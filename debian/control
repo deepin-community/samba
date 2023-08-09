@@ -3,10 +3,6 @@ Section: net
 Priority: optional
 Maintainer: Deepin Developer <deepin-dev@deepin.org>
 Uploaders: Deepin Packages Builder <packages@deepin.org>
-           Jelmer Vernooĳ <jelmer@debian.org>,
-           Mathieu Parent <sathieu@debian.org>,
-           Andrew Bartlett <abartlet+debian@catalyst.net.nz>,
-           Michael Tokarev <mjt@tls.msk.ru>
 Homepage: https://www.samba.org
 Standards-Version: 4.5.1
 Build-Depends:
