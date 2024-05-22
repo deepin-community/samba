@@ -127,6 +127,9 @@ int cli_credentials_get_keytab(struct cli_credentials *cred,
 			       struct loadparm_context *lp_ctx,
 			       struct keytab_container **_ktc);
 const char *cli_credentials_get_domain(struct cli_credentials *cred);
+const char *cli_credentials_get_domain_and_obtained(
+	struct cli_credentials *cred,
+	enum credentials_obtained *obtained);
 struct netlogon_creds_CredentialState *cli_credentials_get_netlogon_creds(struct cli_credentials *cred);
 void cli_credentials_set_machine_account_pending(struct cli_credentials *cred,
 						 struct loadparm_context *lp_ctx);
@@ -350,5 +353,17 @@ int cli_credentials_get_aes256_key(struct cli_credentials *cred,
 				   struct loadparm_context *lp_ctx,
 				   const char *salt,
 				   DATA_BLOB *aes_256);
+
+/**
+ * Kerberos FAST handling
+ */
+
+NTSTATUS cli_credentials_set_krb5_fast_armor_credentials(struct cli_credentials *creds,
+							 struct cli_credentials *armor_creds,
+							 bool require_fast_armor);
+
+struct cli_credentials *cli_credentials_get_krb5_fast_armor_credentials(struct cli_credentials *creds);
+
+bool cli_credentials_get_krb5_require_fast_armor(struct cli_credentials *creds);
 
 #endif /* __CREDENTIALS_H__ */

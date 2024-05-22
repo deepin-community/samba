@@ -10,6 +10,7 @@ Uploaders: Steve Langasek <vorlon@debian.org>,
 Homepage: https://www.samba.org
 Standards-Version: 4.6.2
 Build-Depends:
+	dpkg-dev (>= 1.22.5) <!pkg.samba.before-trixie>,
 	debhelper-compat (= 13),
 	dh-exec,
 Build-Depends-Arch:
@@ -20,14 +21,15 @@ Build-Depends-Arch:
 	flex,
 	perl:any,
 	po-debconf,
+	rpcsvc-proto  <!pkg.samba.before-trixie>,
 # libraries which we embed but use system versions of:
-	libtalloc-dev (>= 2.4.1~),
-	python3-talloc-dev (>= 2.4.1~),
-	libtevent-dev (>= 0.15.0~),
-	libtdb-dev (>= 1.4.9~),
-	python3-tdb (>= 1.4.9~),
+	libtalloc-dev (>= 2.4.2~),
+	python3-talloc-dev (>= 2.4.2~),
+	libtevent-dev (>= 0.16.1~),
+	libtdb-dev (>= 1.4.10~),
+	python3-tdb (>= 1.4.10~),
 # system libraries:
-	pkg-config,
+	pkgconf,
 	libacl1-dev,
 	libarchive-dev,
 	libavahi-client-dev,
@@ -46,9 +48,8 @@ Build-Depends-Arch:
 	libgpgme11-dev,
 	libicu-dev,
 	libjansson-dev,
-	libjson-perl,
 	libkeyutils-dev,
-	libkrb5-dev (>= 1.20.0~) <pkg.samba.mitkrb5>,
+	libkrb5-dev (>= 1.21.0~) <pkg.samba.mitkrb5>,
 	libldap2-dev,
 	liblmdb-dev,
 	libpam0g-dev,
@@ -56,10 +57,11 @@ Build-Depends-Arch:
 	libpcap-dev [hurd-i386 kfreebsd-any],
 	libpopt-dev,
 	libreadline-dev,
+	libtirpc-dev,
 	libsystemd-dev [linux-any],
 	libtasn1-6-dev (>= 3.8),
 	libtasn1-bin,
-	liburing-dev [linux-any] <!pkg.samba.nouring>,
+	liburing-dev [linux-any],
 	xfslibs-dev [linux-any],
 	zlib1g-dev (>= 1:1.2.3),
 # python (+#904999):
@@ -75,7 +77,7 @@ Build-Depends-Arch:
 #	python3-iso8601 <!nocheck>,
 #	python3-pyasn1 <!nocheck>,
 #	tdb-tools <!nocheck>,
-Rules-Requires-Root: binary-targets
+Rules-Requires-Root: no
 Vcs-Browser: https://salsa.debian.org/samba-team/samba
 Vcs-Git: https://salsa.debian.org/samba-team/samba.git
 
@@ -96,7 +98,6 @@ Depends: passwd,
          ${python3:Depends},
          ${shlibs:Depends}
 Recommends: attr,
-            logrotate,
             python3-markdown,
             samba-dsdb-modules,
             samba-vfs-modules,
@@ -131,6 +132,7 @@ Pre-Depends: ${misc:Pre-Depends}
 Multi-Arch: same
 Architecture: any
 Section: libs
+Provides: libndr4 (= ${binary:Version}), libsmbldap2 (= ${binary:Version})
 Depends: ${misc:Depends}, ${shlibs:Depends},
 # since libldb ABI is incorrectly versioned resulting in breakage like #1021371,
 # just require libldb version of the same build
@@ -144,6 +146,9 @@ Replaces:
 Breaks:
  libwbclient0 (<< 2:4.16.1+dfsg-7~),
  samba (<< 2:4.17.0+dfsg-2~),
+ sssd-ad (<< 2.9.4-1+b1),
+ sssd-ad-common (<< 2.9.4-1+b1),
+ sssd-ipa (<< 2.9.4-1+b1),
 Description: Samba core libraries
  Samba is an implementation of the SMB/CIFS protocol for Unix systems,
  providing support for cross-platform file sharing with Microsoft Windows, OS X,
@@ -190,7 +195,7 @@ Description: Samba common files used by both the server and the client
  .
  This package contains the common files that are used by both the server
  (provided in the samba package) and the client (provided in the smbclient
- libsmbclient packages).
+ package).
 
 Package: samba-ad-dc
 Architecture: all
@@ -198,7 +203,7 @@ Multi-Arch: foreign
 Pre-Depends: ${misc:Pre-Depends}
 Depends: samba (>= ${source:Version}~), samba-dsdb-modules, samba-vfs-modules,
 	winbind,
-	krb5-kdc (>> 1.19.0) <pkg.samba.mitkrb5>,
+	krb5-kdc (>= 1.21.0~) <pkg.samba.mitkrb5>,
 	${misc:Depends}
 Recommends: libnss-winbind, libpam-winbind,
 # samba-ad-provision is needed for setup only
@@ -217,7 +222,8 @@ Package: samba-ad-provision
 Architecture: all
 Multi-Arch: foreign
 Pre-Depends: ${misc:Pre-Depends}
-Depends: ${misc:Depends}
+Depends: ${misc:Depends},
+ python3-markdown,
 Replaces: samba (<< 2:4.17.3+dfsg-4~)
 Breaks:   samba (<< 2:4.17.3+dfsg-4~)
 Description: Samba files needed for AD domain provision
@@ -328,8 +334,7 @@ Package: samba-dsdb-modules
 Architecture: any
 Multi-Arch: same
 Section: libs
-Depends: libgpgme11,
-         samba-libs (= ${binary:Version}),
+Depends: samba-libs (= ${binary:Version}),
          ${ldb:Depends},
          ${misc:Depends},
          ${shlibs:Depends}
@@ -370,7 +375,25 @@ Description: Samba Virtual FileSystem plugins
  Note: The runtime dependencies of vfs_ceph, vfs_glusterfs and vfs_snapper are
  moved to Recommends.
 
+Package: libsmbclient0
+Provides: ${t64:Provides}
+X-Time64-Compat: libsmbclient
+Replaces: libsmbclient
+Breaks: libsmbclient (<< ${source:Version})
+Build-Profiles: <!pkg.samba.before-trixie>
+Section: libs
+Architecture: any
+Multi-Arch: same
+Pre-Depends: ${misc:Pre-Depends}
+Depends: samba-libs (= ${binary:Version}), ${misc:Depends}, ${shlibs:Depends}
+Description: shared library for communication with SMB/CIFS servers
+ This package provides a shared library that enables client applications
+ to talk to Microsoft Windows and Samba servers using the SMB/CIFS
+ protocol.
+
 Package: libsmbclient
+# exactly the same as libsmbclient but for older systems before t64 transition
+Build-Profiles: <pkg.samba.before-trixie>
 Section: libs
 Architecture: any
 Multi-Arch: same
@@ -385,7 +408,10 @@ Package: libsmbclient-dev
 Section: libdevel
 Architecture: any
 Multi-Arch: same
-Depends: libsmbclient (= ${binary:Version}), ${misc:Depends}
+Depends: ${misc:Depends},
+ libsmbclient0 (= ${binary:Version}) <!pkg.samba.before-trixie>,
+ libsmbclient  (= ${binary:Version}) < pkg.samba.before-trixie>,
+# the library name is libsmbclient0 on trixie and up
 Description: development files for libsmbclient
  This package provides the development files (static library and headers)
  required for building applications against libsmbclient, a library that
@@ -484,8 +510,9 @@ Section: libdevel
 Architecture: any
 Multi-Arch: same
 Depends: libwbclient0 (= ${binary:Version}), ${misc:Depends}
-Breaks: samba-libs (<< 2:4.11.0+dfsg-1~), samba-dev (<< 2:4.11)
-Replaces: samba-dev (<< 2:4.11)
+# include/samba-4.0/core/*.h moved from samba-dev in 4.19.6+dfsg-2
+Breaks:   samba-dev (<< 2:4.19.6+dfsg-2~)
+Replaces: samba-dev (<< 2:4.19.6+dfsg-2~)
 Description: Samba winbind client library - development files
  Samba is an implementation of the SMB/CIFS protocol for Unix systems,
  providing support for cross-platform file and printer sharing with
@@ -508,7 +535,7 @@ Depends: iproute2 [linux-any],
          ${misc:Depends},
          ${shlibs:Depends}
 Recommends: ethtool [linux-any], python3:any, python3-etcd, ${rados:Depends}
-Suggests: logrotate, lsof
+Suggests: lsof
 Description: clustered database to store temporary data
  CTDB is a cluster implementation of the TDB database used by Samba and other
  projects to store temporary data. If an application is already using TDB for
@@ -583,7 +610,6 @@ Depends: libc6-dev,
          libtalloc-dev,
          libtevent-dev,
          libtdb-dev,
-         pkg-config,
          ${misc:Depends}
 Description: LDAP-like embedded database - development files
  ldb is a LDAP-like embedded database built on top of TDB.
@@ -613,7 +639,6 @@ Section: libdevel
 Architecture: any
 Depends: libc6-dev,
          libldb-dev,
-         pkg-config,
          python3-ldb (= ${binary:Version}),
          ${misc:Depends}
 Description: LDB Python 3 bindings - development files

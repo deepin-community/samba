@@ -362,18 +362,30 @@ static NTSTATUS fsctl_network_iface_info(TALLOC_CTX *mem_ctx,
 					 uint32_t in_max_output,
 					 DATA_BLOB *out_output)
 {
+	struct samba_sockaddr xconn_srv_addr = { .sa_socklen = 0, };
 	struct fsctl_net_iface_info *array = NULL;
 	struct fsctl_net_iface_info *first = NULL;
 	struct fsctl_net_iface_info *last = NULL;
 	size_t i;
-	size_t num_ifaces = iface_count();
+	size_t num_ifaces;
 	enum ndr_err_code ndr_err;
 	struct cluster_movable_ips *cluster_movable_ips = NULL;
+	ssize_t sret;
 	int ret;
 
 	if (in_input->length != 0) {
 		return NT_STATUS_INVALID_PARAMETER;
 	}
+
+	/*
+	 * The list of probed interfaces might have changed, we might need to
+	 * refresh local_interfaces to get up-to-date network information, and
+	 * respond to clients which sent FSCTL_QUERY_NETWORK_INTERFACE_INFO.
+	 * For example, network speed is changed, interfaces count is changed
+	 * (some link down or link up), and etc.
+	 */
+	load_interfaces();
+	num_ifaces = iface_count();
 
 	*out_output = data_blob_null;
 
@@ -399,6 +411,14 @@ static NTSTATUS fsctl_network_iface_info(TALLOC_CTX *mem_ctx,
 			return NT_STATUS_INTERNAL_ERROR;
 		}
 	}
+
+	sret = tsocket_address_bsd_sockaddr(xconn->local_address,
+					    &xconn_srv_addr.u.sa,
+					    sizeof(xconn_srv_addr.u.ss));
+	if (sret < 0) {
+		return NT_STATUS_INTERNAL_ERROR;
+	}
+	xconn_srv_addr.sa_socklen = sret;
 
 	for (i=0; i < num_ifaces; i++) {
 		struct fsctl_net_iface_info *cur = &array[i];
@@ -430,7 +450,18 @@ static NTSTATUS fsctl_network_iface_info(TALLOC_CTX *mem_ctx,
 			return NT_STATUS_NO_MEMORY;
 		}
 
-		if (cluster_movable_ips != NULL) {
+		if (sockaddr_equal(ifsa, &xconn_srv_addr.u.sa)) {
+			/*
+			 * We can announce the ip of the current connection even
+			 * if it is a moveable cluster address... as the client
+			 * is already connected to it.
+			 *
+			 * It means in a typical ctdb cluster, where we
+			 * only have public addresses, the client can at least
+			 * have more than one multichannel'ed connection to the
+			 * public ip.
+			 */
+		} else if (cluster_movable_ips != NULL) {
 			bool is_movable_ip = find_in_cluster_movable_ips(
 						cluster_movable_ips,
 						ifss);

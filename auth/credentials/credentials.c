@@ -465,11 +465,13 @@ _PUBLIC_ const char *
 cli_credentials_get_password_and_obtained(struct cli_credentials *cred,
 					  enum credentials_obtained *obtained)
 {
+	const char *password = cli_credentials_get_password(cred);
+
 	if (obtained != NULL) {
 		*obtained = cred->password_obtained;
 	}
 
-	return cli_credentials_get_password(cred);
+	return password;
 }
 
 /* Set a password on the credentials context, including an indication
@@ -734,6 +736,28 @@ _PUBLIC_ const char *cli_credentials_get_domain(struct cli_credentials *cred)
 	}
 
 	return cred->domain;
+}
+
+/**
+ * @brief Obtain the domain for this credential context.
+ *
+ * @param[in] cred  The credential context.
+ *
+ * @param[out] obtained A pointer to store the obtained information.
+ *
+ * @return The domain name or NULL if an error occurred.
+ */
+_PUBLIC_ const char *cli_credentials_get_domain_and_obtained(
+	struct cli_credentials *cred,
+	enum credentials_obtained *obtained)
+{
+	const char *domain = cli_credentials_get_domain(cred);
+
+	if (obtained != NULL) {
+		*obtained = cred->domain_obtained;
+	}
+
+	return domain;
 }
 
 
@@ -1555,6 +1579,10 @@ _PUBLIC_ bool cli_credentials_parse_password_fd(struct cli_credentials *credenti
 	char *p;
 	char pass[128];
 
+	if (credentials->password_obtained >= obtained) {
+		return false;
+	}
+
 	for(p = pass, *p = '\0'; /* ensure that pass is null-terminated */
 		p && p - pass < sizeof(pass) - 1;) {
 		switch (read(fd, p, 1)) {
@@ -1882,7 +1910,7 @@ _PUBLIC_ NTSTATUS netlogon_creds_session_encrypt(
 
 	if (data.data == NULL || data.length == 0) {
 		DBG_ERR("Nothing to encrypt "
-			"data.data == NULL or data.length == 0");
+			"data.data == NULL or data.length == 0\n");
 		return NT_STATUS_INVALID_PARAMETER;
 	}
 	/*
@@ -1890,7 +1918,7 @@ _PUBLIC_ NTSTATUS netlogon_creds_session_encrypt(
 	 * NETLOGON pipe session key .
 	 */
 	if (all_zero(data.data, data.length)) {
-		DBG_ERR("Supplied data all zeros, could leak session key");
+		DBG_ERR("Supplied data all zeros, could leak session key\n");
 		return NT_STATUS_INVALID_PARAMETER;
 	}
 	if (state->negotiate_flags & NETLOGON_NEG_SUPPORTS_AES) {
@@ -1902,7 +1930,7 @@ _PUBLIC_ NTSTATUS netlogon_creds_session_encrypt(
 						      data.data,
 						      data.length);
 	} else {
-		DBG_ERR("Unsupported encryption option negotiated");
+		DBG_ERR("Unsupported encryption option negotiated\n");
 		status = NT_STATUS_NOT_SUPPORTED;
 	}
 	if (!NT_STATUS_IS_OK(status)) {

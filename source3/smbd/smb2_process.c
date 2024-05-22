@@ -47,6 +47,7 @@
 #include "libcli/smb/smbXcli_base.h"
 #include "lib/util/time_basic.h"
 #include "source3/lib/substitute.h"
+#include "source3/smbd/dir.h"
 
 /* Internal message queue for deferred opens. */
 struct pending_message_list {
@@ -687,20 +688,33 @@ NTSTATUS smbXsrv_connection_init_tables(struct smbXsrv_connection *conn,
  */
 const char *smbXsrv_connection_dbg(const struct smbXsrv_connection *xconn)
 {
-	const char *ret;
-	char *addr;
+	const char *ret = NULL;
+	char *raddr = NULL;
+	char *laddr = NULL;
+	struct GUID_txt_buf guid_buf = {};
+
 	/*
-	 * TODO: this can be improved later
-	 * maybe including the client guid or more
+	 * TODO: this can be improved further later...
 	 */
-	addr = tsocket_address_string(xconn->remote_address, talloc_tos());
-	if (addr == NULL) {
+
+	raddr = tsocket_address_string(xconn->remote_address, talloc_tos());
+	if (raddr == NULL) {
+		return "<tsocket_address_string() failed>";
+	}
+	laddr = tsocket_address_string(xconn->local_address, talloc_tos());
+	if (laddr == NULL) {
 		return "<tsocket_address_string() failed>";
 	}
 
-	ret = talloc_asprintf(talloc_tos(), "ptr=%p,id=%llu,addr=%s",
-			      xconn, (unsigned long long)xconn->channel_id, addr);
-	TALLOC_FREE(addr);
+	ret = talloc_asprintf(talloc_tos(),
+			"PID=%d,CLIENT=%s,channel=%"PRIu64",remote=%s,local=%s",
+			getpid(),
+			GUID_buf_string(&xconn->smb2.client.guid, &guid_buf),
+			xconn->channel_id,
+			raddr,
+			laddr);
+	TALLOC_FREE(raddr);
+	TALLOC_FREE(laddr);
 	if (ret == NULL) {
 		return "<talloc_asprintf() failed>";
 	}
@@ -984,8 +998,36 @@ static void smbd_server_connection_handler(struct tevent_context *ev,
 struct smbd_release_ip_state {
 	struct smbXsrv_connection *xconn;
 	struct tevent_immediate *im;
+	struct sockaddr_storage srv;
+	struct sockaddr_storage clnt;
 	char addr[INET6_ADDRSTRLEN];
 };
+
+static int release_ip(struct tevent_context *ev,
+		      uint32_t src_vnn,
+		      uint32_t dst_vnn,
+		      uint64_t dst_srvid,
+		      const uint8_t *msg,
+		      size_t msglen,
+		      void *private_data);
+
+static int smbd_release_ip_state_destructor(struct smbd_release_ip_state *s)
+{
+	struct ctdbd_connection *cconn = messaging_ctdb_connection();
+	struct smbXsrv_connection *xconn = s->xconn;
+
+	if (cconn == NULL) {
+		return 0;
+	}
+
+	if (NT_STATUS_EQUAL(xconn->transport.status, NT_STATUS_CONNECTION_IN_USE)) {
+		ctdbd_passed_ips(cconn, &s->srv, &s->clnt, release_ip, s);
+	} else {
+		ctdbd_unregister_ips(cconn, &s->srv, &s->clnt, release_ip, s);
+	}
+
+	return 0;
+}
 
 static void smbd_release_ip_immediate(struct tevent_context *ctx,
 				      struct tevent_immediate *im,
@@ -1129,6 +1171,8 @@ static NTSTATUS smbd_register_ips(struct smbXsrv_connection *xconn,
 	if (state->im == NULL) {
 		return NT_STATUS_NO_MEMORY;
 	}
+	state->srv = *srv;
+	state->clnt = *clnt;
 	if (print_sockaddr(state->addr, sizeof(state->addr), srv) == NULL) {
 		return NT_STATUS_NO_MEMORY;
 	}
@@ -1152,6 +1196,9 @@ static NTSTATUS smbd_register_ips(struct smbXsrv_connection *xconn,
 	if (ret != 0) {
 		return map_nt_error_from_unix(ret);
 	}
+
+	talloc_set_destructor(state, smbd_release_ip_state_destructor);
+
 	return NT_STATUS_OK;
 }
 

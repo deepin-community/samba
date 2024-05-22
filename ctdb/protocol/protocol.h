@@ -140,6 +140,9 @@ struct ctdb_call {
 /* SRVID to inform clients that an IP address has been taken over */
 #define CTDB_SRVID_TAKE_IP 0xF301000000000000LL
 
+/* SRVID to inform clients that CTDB_EVENT_IPREALLOCATED finished */
+#define CTDB_SRVID_IPREALLOCATED 0xF302000000000000LL
+
 /* SRVID to inform recovery daemon of the node flags - OBSOLETE */
 #define CTDB_SRVID_SET_NODE_FLAGS 0xF400000000000000LL
 
@@ -381,6 +384,8 @@ enum ctdb_controls {CTDB_CONTROL_PROCESS_EXISTS          = 0,
 		    CTDB_CONTROL_ECHO_DATA               = 156,
 		    CTDB_CONTROL_DISABLE_NODE            = 157,
 		    CTDB_CONTROL_ENABLE_NODE             = 158,
+		    CTDB_CONTROL_TCP_CLIENT_DISCONNECTED = 159,
+		    CTDB_CONTROL_TCP_CLIENT_PASSED       = 160,
 };
 
 #define MAX_COUNT_BUCKETS 16

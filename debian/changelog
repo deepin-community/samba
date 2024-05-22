@@ -1,3 +1,163 @@
+samba (2:4.20.1+dfsg-1) unstable; urgency=medium
+
+  * new upstream major release
+  * d/control: bump tevent/talloc/tdb versions for Build-Depends
+  * d/libldb2.symbols, d/python3-ldb.symbols.in: add new version (2.9.0)
+  * d/patches/meaningful-error-if-no-python3-markdown.patch: fixup
+  * d/*.install: internal library names changed:
+    libfoo-samba4.so.0 => libfoo-private-samba.so.0
+  * d/samba-libs.install: update names for libdcerpc & libndr private libs
+  * d/samba-libs.install, d/samba-libs.links, d/samba-libs.symbols:
+    libndr has soversion 4 now.  This breaks binaries linked with libndr!
+  * d/samba-libs.symbols: update with new ndr4 symbols
+  * d/libsmbclient.symbols: update with new symbols
+  * d/samba-dev.install: add smb3posix.h
+  * d/not-installed: add usr/bin/wspsearch experimental windows search binary
+  * d/control: libperl-json is not needed for build anymore
+  * d/control: bump minimum mit-krb5 version in Build-Depends to 1.21
+    (for pkg.samba.mitkrb5 build profile)
+  * Closes: #1070335 (wronly filed)
+
+ -- Michael Tokarev <mjt@tls.msk.ru>  Wed, 08 May 2024 13:23:57 +0300
+
+samba (2:4.19.6+dfsg-3) unstable; urgency=medium
+
+  * fix brown-paper-bag bugs in previous upload
+    (in meaningful-error-if-no-python3-markdown.patch)
+
+ -- Michael Tokarev <mjt@tls.msk.ru>  Thu, 02 May 2024 20:47:15 +0300
+
+samba (2:4.19.6+dfsg-2) unstable; urgency=medium
+
+  [ Michael Tokarev ]
+  * meaningful-error-if-no-python3-markdown.patch:
+    update to include 2 other places where markdown gets improted
+  * d/winbind.service:
+    - order it before nss-user-lookup.target (Closes: #1068649)
+    - fix typo
+    - nmb.service is nmbd.service in debian
+  * move include/samba/core/*.h from samba-libs to libwbclient-dev
+    (Closes: #1064544)
+
+  [ Alex Murray ]
+  * fix smbd apparmor breakage since change to local systemd services
+    (Cloes: #1069661)
+
+ -- Michael Tokarev <mjt@tls.msk.ru>  Thu, 02 May 2024 14:08:31 +0300
+
+samba (2:4.19.6+dfsg-1) unstable; urgency=medium
+
+  * new upstream stable/bugfix release:
+   - https://bugzilla.samba.org/show_bug.cgi?id=15527 fd_handle_destructor()
+     panics within an smbd_smb2_close() if vfs_stat_fsp() fails in fd_close()
+   - https://bugzilla.samba.org/show_bug.cgi?id=15580
+     Packet marshalling push support missing for
+     CTDB_CONTROL_TCP_CLIENT_DISCONNECTED and CTDB_CONTROL_TCP_CLIENT_PASSED
+   - https://bugzilla.samba.org/show_bug.cgi?id=15588
+     samba-gpupdate: Correctly implement site support
+   - https://bugzilla.samba.org/show_bug.cgi?id=15599
+     libgpo: Segfault in python bindings
+  * revert d/rules: remove Debian/Ubuntu "branding"
+
+ -- Michael Tokarev <mjt@tls.msk.ru>  Mon, 08 Apr 2024 11:18:38 +0300
+
+samba (2:4.19.5+dfsg-5) unstable; urgency=medium
+
+  * implement pkg.samba.before-trixie build profile
+    (undo t64 changhes and drop build-dep)
+  * d/rules: remove Debian/Ubuntu "branding", no need in that
+  * d/control: samba-dsdb-modules: drop hardcoded dependency on libgpgme11
+    (Closes: #1068526)
+
+ -- Michael Tokarev <mjt@tls.msk.ru>  Sun, 07 Apr 2024 16:04:30 +0300
+
+samba (2:4.19.5+dfsg-4) unstable; urgency=medium
+
+  * stop shipping python3/dist-packages/samba/tests
+    (Closes: #1064512, #1063149)
+  * add Debian-Specific tag to debian-specific patches
+  * d/genshlibs: run dh_makeshlibs on libsmbclient0
+    (Closes: #1065349)
+
+ -- Michael Tokarev <mjt@tls.msk.ru>  Sun, 03 Mar 2024 15:37:16 +0300
+
+samba (2:4.19.5+dfsg-3) unstable; urgency=medium
+
+  * d/control: add versioned depends on dpkg-dev to avoid accidental
+    build of time64_t packages on older systems
+  * +lower-dns-lookup-mismatch-messages.patch (reduce log noise)
+  * d/control: add libtirpc-dev and rpcsvc-proto to Build-Depends-Arch
+    (Closes: #1065188)
+
+ -- Michael Tokarev <mjt@tls.msk.ru>  Fri, 01 Mar 2024 19:18:35 +0300
+
+samba (2:4.19.5+dfsg-2) unstable; urgency=medium
+
+  * rename libsmbclient => libsmbclient0 for 64-bit time_t transition
+    Closes: #1064337
+  * d/libsmbclient.lintian-overrides: remove, soname now = package name
+  * add Breaks: of sssd packages to samba-libs
+  * +passchange-error-message.patch - fix password change error message
+  * +edns0.patch: enable EDNS0 support in internal UDP-only DNS client
+    https://bugzilla.samba.org/show_bug.cgi?id=15536
+
+ -- Michael Tokarev <mjt@tls.msk.ru>  Wed, 28 Feb 2024 19:38:48 +0300
+
+samba (2:4.19.5+dfsg-1) unstable; urgency=medium
+
+  * new upstream stable/bugfix release (4.19.5)
+  * reformat previous changelog entry to fit in 80cols
+  * d/winbind.postrm: stop recursively removing plain files
+  * d/winbind.postrm: winbindd_cache.tdb is in /var/lib now,
+    not in /var/cache
+  * d/control: RulesRequiresRoot:no
+  * d/*.symbols: use #PACKAGE# placeholders where appropriate
+    (or add comments where it is not)
+  * +silence-can-not-convert-group-sid.diff -
+    make another log message less annoying
+  * -python-fix-invalid-escape-sequences.patch (applied upstream)
+  * d/control: replace pkg-config=>pkgconf in Build-Depends, remove
+    pkg-config from Depends of libldb-dev and python3-ldb-dev
+  * d/samba-libs.symbols, d/control: make libsmbldapN a virtual package
+    provided by samba-libs too, like libndrN
+
+ -- Michael Tokarev <mjt@tls.msk.ru>  Mon, 19 Feb 2024 15:21:14 +0300
+
+samba (2:4.19.4+dfsg-3) unstable; urgency=medium
+
+  * samba,winbind: remove logrotate scripts
+    samba does its own log rotation (max log size (=5000 by default) and
+    renaming to .old).  The two clashes with each other in an interesting way.
+  * d/samba-libs.symbols, d/control: make libndrN a virtual package
+    to ensure rdeps pick the right dependency
+
+ -- Michael Tokarev <mjt@tls.msk.ru>  Tue, 30 Jan 2024 12:12:42 +0300
+
+samba (2:4.19.4+dfsg-2) unstable; urgency=medium
+
+  * d/samba.smbd.service, d/samba.nmbd.service: expand forgotten @BINDIR@
+
+ -- Michael Tokarev <mjt@tls.msk.ru>  Mon, 08 Jan 2024 20:44:51 +0300
+
+samba (2:4.19.4+dfsg-1) unstable; urgency=medium
+
+  * new upstream stable/bugfix release. See WHATSNEW.txt for details.
+  * d/control: drop pkg.samba.nouring build profile: was needed
+    for focal which we do not support anymore
+  * remove /etc/cron.daily/samba: there's no reason to keep backing it up,
+    most stuff is in ldb/tdb files these days.
+  * d/samba.maintscript, d/winbind.maintscript:
+    remove old rm_connfiles (pre-buster versions)
+  * d/rules, d/*.service: provide .service files directly instead of renaming
+    and patching upstream templates, and use dh_installsystemd to install them
+    (partially Closes: #1059187)
+  * d/rules: run dh_movetousr for libpam-winbind & libnss-winbind, if exists.
+    This fixes remaining files in /lib (hopefully). In a search for better
+    way to detect where to put system libs (/lib vs /usr/lib) as a configure
+    option.  Closes: #1059187
+
+ -- Michael Tokarev <mjt@tls.msk.ru>  Mon, 08 Jan 2024 19:11:37 +0300
+
 samba (2:4.19.3+dfsg-2) unstable; urgency=medium
 
   * d/rules: simplify LDFLAGS assignment

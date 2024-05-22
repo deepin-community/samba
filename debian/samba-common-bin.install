@@ -23,9 +23,9 @@ usr/share/man/man8/smbpasswd.8
 usr/share/samba/addshare.py
 usr/share/samba/setoption.py
 # used by usr/bin/net only:
-usr/lib/*/samba/libnet-keytab-samba4.so.0
+usr/lib/*/samba/libnet-keytab-private-samba.so.0
 # used by usr/libexec/samba/rpcd_*:
-usr/lib/*/samba/libRPC-WORKER-samba4.so.0
+usr/lib/*/samba/libRPC-WORKER-private-samba.so.0
 # samba-dcerpcd: used by smbd & winbind. might go to its own separate package,
 # maybe with a startup script
 usr/libexec/samba/samba-dcerpcd

@@ -57,7 +57,7 @@ bool dbgsetclass(int level, int cls);
  *   #define DBGC_CLASS DBGC_<your class name here>
  *
  * at the start of the file (after #include "includes.h") will default to
- * using index zero, so it will behaive just like it always has.
+ * using index zero, so it will behave just like it always has.
  */
 #define DBGC_ALL		0 /* index equivalent to DEBUGLEVEL */
 
@@ -202,7 +202,7 @@ void debuglevel_set_class(size_t idx, int level);
 /**
  * @brief DEBUGLF is same as DEBUG with explicit location and function arguments
  *
- * To be used when passing location and function of a caller appearig earlier in
+ * To be used when passing location and function of a caller appearing earlier in
  * the call stack instead of some helper function.
  *
  * @code
@@ -274,6 +274,12 @@ void debuglevel_set_class(size_t idx, int level);
 #define DBGLVL_NOTICE	 3	/* normal, but significant, condition */
 #define DBGLVL_INFO	 5	/* informational message */
 #define DBGLVL_DEBUG	10	/* debug-level message */
+
+#define DBG_STARTUP_NOTICE(...) do { \
+	debug_set_forced_log_priority(DBGLVL_NOTICE); \
+	D_ERR(__VA_ARGS__); \
+	debug_set_forced_log_priority(-1); \
+} while(0)
 
 #define DBG_ERR(...)		DBG_PREFIX(DBGLVL_ERR,		(__VA_ARGS__))
 #define DBG_WARNING(...)	DBG_PREFIX(DBGLVL_WARNING,	(__VA_ARGS__))
@@ -354,6 +360,7 @@ void debug_set_settings(struct debug_settings *settings,
 			const char *logging_param,
 			int syslog_level, bool syslog_only);
 void debug_set_hostname(const char *name);
+void debug_set_forced_log_priority(int forced_log_priority);
 bool reopen_logs_internal( void );
 void force_check_log_size( void );
 bool need_to_check_log_size( void );

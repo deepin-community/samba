@@ -23,6 +23,7 @@
 #include "../libcli/security/security.h"
 #include "../librpc/gen_ndr/ndr_security.h"
 #include "smbd/smbd.h"
+#include "source3/smbd/dir.h"
 
 #undef  DBGC_CLASS
 #define DBGC_CLASS DBGC_ACLS
@@ -103,7 +104,7 @@ bool can_delete_file_in_directory(connection_struct *conn,
 			smb_fname_parent->st.st_ex_uid) &&
 		    (get_current_uid(conn) != smb_fname->st.st_ex_uid)) {
 			DEBUG(10,("can_delete_file_in_directory: not "
-				  "owner of file %s or directory %s",
+				  "owner of file %s or directory %s\n",
 				  smb_fname_str_dbg(smb_fname),
 				  smb_fname_str_dbg(smb_fname_parent)));
 			ret = false;
@@ -191,6 +192,7 @@ bool directory_has_default_acl_fsp(struct files_struct *fsp)
 
 NTSTATUS can_set_delete_on_close(files_struct *fsp, uint32_t dosmode)
 {
+	NTSTATUS status;
 	/*
 	 * Only allow delete on close for writable files.
 	 */
@@ -219,11 +221,12 @@ NTSTATUS can_set_delete_on_close(files_struct *fsp, uint32_t dosmode)
 	 * intent.
 	 */
 
-	if (!(fsp->access_mask & DELETE_ACCESS)) {
-		DEBUG(10,("can_set_delete_on_close: file %s delete on "
+	status = check_any_access_fsp(fsp, DELETE_ACCESS);
+	if (!NT_STATUS_IS_OK(status)) {
+		DBG_DEBUG("file %s delete on "
 			  "close flag set but delete access denied.\n",
-			  fsp_str_dbg(fsp)));
-		return NT_STATUS_ACCESS_DENIED;
+			  fsp_str_dbg(fsp));
+		return status;
 	}
 
 	/* Don't allow delete on close for non-empty directories. */

@@ -114,20 +114,23 @@ NTSTATUS set_sd(files_struct *fsp, struct security_descriptor *psd,
 
 	/* Ensure we have the rights to do this. */
 	if (security_info_sent & SECINFO_OWNER) {
-		if (!(fsp->access_mask & SEC_STD_WRITE_OWNER)) {
-			return NT_STATUS_ACCESS_DENIED;
+		status = check_any_access_fsp(fsp, SEC_STD_WRITE_OWNER);
+		if (!NT_STATUS_IS_OK(status)) {
+			return status;
 		}
 	}
 
 	if (security_info_sent & SECINFO_GROUP) {
-		if (!(fsp->access_mask & SEC_STD_WRITE_OWNER)) {
-			return NT_STATUS_ACCESS_DENIED;
+		status = check_any_access_fsp(fsp, SEC_STD_WRITE_OWNER);
+		if (!NT_STATUS_IS_OK(status)) {
+			return status;
 		}
 	}
 
 	if (security_info_sent & SECINFO_DACL) {
-		if (!(fsp->access_mask & SEC_STD_WRITE_DAC)) {
-			return NT_STATUS_ACCESS_DENIED;
+		status = check_any_access_fsp(fsp, SEC_STD_WRITE_DAC);
+		if (!NT_STATUS_IS_OK(status)) {
+			return status;
 		}
 		/* Convert all the generic bits. */
 		if (psd->dacl) {
@@ -136,15 +139,17 @@ NTSTATUS set_sd(files_struct *fsp, struct security_descriptor *psd,
 	}
 
 	if (security_info_sent & SECINFO_SACL) {
-		if (!(fsp->access_mask & SEC_FLAG_SYSTEM_SECURITY)) {
-			return NT_STATUS_ACCESS_DENIED;
+		status = check_any_access_fsp(fsp, SEC_FLAG_SYSTEM_SECURITY);
+		if (!NT_STATUS_IS_OK(status)) {
+			return status;
 		}
 		/*
 		 * Setting a SACL also requires WRITE_DAC.
 		 * See the smbtorture3 SMB2-SACL test.
 		 */
-		if (!(fsp->access_mask & SEC_STD_WRITE_DAC)) {
-			return NT_STATUS_ACCESS_DENIED;
+		status = check_any_access_fsp(fsp, SEC_STD_WRITE_DAC);
+		if (!NT_STATUS_IS_OK(status)) {
+			return status;
 		}
 		/* Convert all the generic bits. */
 		if (psd->sacl) {
@@ -167,6 +172,50 @@ NTSTATUS set_sd(files_struct *fsp, struct security_descriptor *psd,
 	return status;
 }
 
+static bool check_smb2_posix_chmod_ace(const struct files_struct *fsp,
+					uint32_t security_info_sent,
+					struct security_descriptor *psd,
+					mode_t *pmode)
+{
+	int cmp;
+
+	/*
+	 * This must be an ACL with one ACE containing an
+	 * MS NFS style mode entry coming in on a POSIX
+	 * handle over SMB2+.
+	 */
+	if (!fsp->conn->sconn->using_smb2) {
+		return false;
+	}
+
+	if (!(fsp->posix_flags & FSP_POSIX_FLAGS_OPEN)) {
+		return false;
+	}
+
+	if (!(security_info_sent & SECINFO_DACL)) {
+		return false;
+	}
+
+	if (psd->dacl == NULL) {
+		return false;
+	}
+
+	if (psd->dacl->num_aces != 1) {
+		return false;
+	}
+
+	cmp = dom_sid_compare_domain(&global_sid_Unix_NFS_Mode,
+				     &psd->dacl->aces[0].trustee);
+	if (cmp != 0) {
+		return false;
+	}
+
+	*pmode = (mode_t)psd->dacl->aces[0].trustee.sub_auths[2];
+	*pmode &= (S_IRWXU | S_IRWXG | S_IRWXO);
+
+	return true;
+}
+
 /****************************************************************************
  Internal fn to set security descriptors from a data blob.
 ****************************************************************************/
@@ -176,6 +225,9 @@ NTSTATUS set_sd_blob(files_struct *fsp, uint8_t *data, uint32_t sd_len,
 {
 	struct security_descriptor *psd = NULL;
 	NTSTATUS status;
+	bool do_chmod = false;
+	mode_t smb2_posix_mode = 0;
+	int ret;
 
 	if (sd_len == 0) {
 		return NT_STATUS_INVALID_PARAMETER;
@@ -187,7 +239,27 @@ NTSTATUS set_sd_blob(files_struct *fsp, uint8_t *data, uint32_t sd_len,
 		return status;
 	}
 
-	return set_sd(fsp, psd, security_info_sent);
+	do_chmod = check_smb2_posix_chmod_ace(fsp,
+				security_info_sent,
+				psd,
+				&smb2_posix_mode);
+	if (!do_chmod) {
+		return set_sd(fsp, psd, security_info_sent);
+	}
+
+	TALLOC_FREE(psd);
+
+	ret = SMB_VFS_FCHMOD(fsp, smb2_posix_mode);
+	if (ret != 0) {
+		status = map_nt_error_from_unix(errno);
+		DBG_ERR("smb2_posix_chmod [%s] [%04o] failed: %s\n",
+			fsp_str_dbg(fsp),
+			(unsigned)smb2_posix_mode,
+			nt_errstr(status));
+		return status;
+	}
+
+	return NT_STATUS_OK;
 }
 
 /****************************************************************************
@@ -407,16 +479,20 @@ static NTSTATUS smbd_fetch_security_desc(connection_struct *conn,
 	 * Get the permissions to return.
 	 */
 
-	if ((security_info_wanted & SECINFO_SACL) &&
-			!(fsp->access_mask & SEC_FLAG_SYSTEM_SECURITY)) {
-		DEBUG(10, ("Access to SACL denied.\n"));
-		return NT_STATUS_ACCESS_DENIED;
+	if (security_info_wanted & SECINFO_SACL) {
+		status = check_any_access_fsp(fsp, SEC_FLAG_SYSTEM_SECURITY);
+		if (!NT_STATUS_IS_OK(status)) {
+			DBG_DEBUG("Access to SACL denied.\n");
+			return status;
+		}
 	}
 
-	if ((security_info_wanted & (SECINFO_DACL|SECINFO_OWNER|SECINFO_GROUP)) &&
-			!(fsp->access_mask & SEC_STD_READ_CONTROL)) {
-		DEBUG(10, ("Access to DACL, OWNER, or GROUP denied.\n"));
-		return NT_STATUS_ACCESS_DENIED;
+	if (security_info_wanted & (SECINFO_DACL|SECINFO_OWNER|SECINFO_GROUP)) {
+		status = check_any_access_fsp(fsp, SEC_STD_READ_CONTROL);
+		if (!NT_STATUS_IS_OK(status)) {
+			DBG_DEBUG("Access to DACL, OWNER, or GROUP denied.\n");
+			return status;
+		}
 	}
 
 	status = refuse_symlink_fsp(fsp);

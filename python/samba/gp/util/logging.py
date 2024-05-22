@@ -17,16 +17,16 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-import json
 import datetime
 import logging
 import gettext
 import random
 import sys
 
-logger = logging.getLogger()
+logger = logging.getLogger("gp")
+
+
 def logger_init(name, log_level):
-    logger = logging.getLogger(name)
     logger.addHandler(logging.StreamHandler(sys.stdout))
     logger.setLevel(logging.CRITICAL)
     if log_level == 1:
@@ -39,9 +39,9 @@ def logger_init(name, log_level):
         logger.setLevel(logging.DEBUG)
 
 class slogm(object):
-    '''
+    """
     Structured log message class
-    '''
+    """
     def __init__(self, message, kwargs=None):
         if kwargs is None:
             kwargs = {}

@@ -449,7 +449,7 @@ static NTSTATUS validate_nt_acl_blob(TALLOC_CTX *mem_ctx,
 	switch (xattr_version) {
 	case 1:
 	case 2:
-		/* These xattr types are unilatteral, they do not
+		/* These xattr types are unilateral, they do not
 		 * require confirmation of the hash.  In particular,
 		 * the NTVFS file server uses version 1, but
 		 * 'samba-tool ntacl' can set these as well */
@@ -738,9 +738,12 @@ static NTSTATUS set_underlying_acl(vfs_handle_struct *handle, files_struct *fsp,
 	/* We got access denied here. If we're already root,
 	   or we didn't need to do a chown, or the fsp isn't
 	   open with WRITE_OWNER access, just return. */
-	if (get_current_uid(handle->conn) == 0 || !chown_needed ||
-	    !(fsp->access_mask & SEC_STD_WRITE_OWNER)) {
+	if (get_current_uid(handle->conn) == 0 || !chown_needed) {
 		return NT_STATUS_ACCESS_DENIED;
+	}
+	status = check_any_access_fsp(fsp, SEC_STD_WRITE_OWNER);
+	if (!NT_STATUS_IS_OK(status)) {
+		return status;
 	}
 
 	/*

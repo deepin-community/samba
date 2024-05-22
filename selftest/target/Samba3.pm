@@ -262,7 +262,7 @@ sub check_env($$)
 
 sub setup_nt4_dc
 {
-	my ($self, $path, $more_conf, $server) = @_;
+	my ($self, $path, $more_conf, $domain, $server) = @_;
 
 	print "PROVISIONING NT4 DC...";
 
@@ -312,12 +312,15 @@ sub setup_nt4_dc
 	if (defined($more_conf)) {
 		$nt4_dc_options = $nt4_dc_options . $more_conf;
 	}
+	if (!defined($domain)) {
+		$domain = "SAMBA-TEST";
+	}
 	if (!defined($server)) {
 		$server = "LOCALNT4DC2";
 	}
 	my $vars = $self->provision(
 	    prefix => $path,
-	    domain => "SAMBA-TEST",
+	    domain => $domain,
 	    server => $server,
 	    password => "localntdc2pass",
 	    extra_options => $nt4_dc_options);
@@ -352,7 +355,7 @@ sub setup_nt4_dc_smb1
 	client min protocol = CORE
 	server min protocol = LANMAN1
 ";
-	return $self->setup_nt4_dc($path, $conf, "LCLNT4DC2SMB1");
+	return $self->setup_nt4_dc($path, $conf, "NT4SMB1", "LCLNT4DC2SMB1");
 }
 
 sub setup_nt4_dc_smb1_done
@@ -503,8 +506,6 @@ sub setup_clusteredmember
 	my $prefix_abs = abs_path($prefix);
 	mkdir($prefix_abs, 0777);
 
-	my $server_name = "CLUSTEREDMEMBER";
-
 	my $ctdb_data = $self->setup_ctdb($prefix);
 
 	if (not $ctdb_data) {
@@ -527,8 +528,8 @@ sub setup_clusteredmember
 		my $pub_iface = $node->{SOCKET_WRAPPER_DEFAULT_IFACE};
 		my $node_prefix = $node->{NODE_PREFIX};
 
-		print "NODE_PREFIX=${node_prefix}\n";
-		print "SOCKET=${socket}\n";
+		print "CTDB_BASE=${node_prefix}\n";
+		print "CTDB_SOCKET=${socket}\n";
 
 		my $require_mutexes = "dbwrap_tdb_require_mutexes:* = yes";
 		if ($ENV{SELFTEST_DONT_REQUIRE_TDB_MUTEX_SUPPORT} // '' eq "1") {
@@ -539,6 +540,8 @@ sub setup_clusteredmember
        security = domain
        server signing = on
        clustering = yes
+       rpc start on demand helpers = false
+       rpcd witness:include node ips = yes
        ctdbd socket = ${socket}
        include = registry
        dbwrap_tdb_mutexes:* = yes
@@ -632,6 +635,7 @@ sub setup_clusteredmember
 		my $ok;
 		$ok = $self->check_or_start(
 		    env_vars => $node_provision,
+		    samba_dcerpcd => "yes",
 		    winbindd => "yes",
 		    smbd => "yes",
 		    child_cleanup => sub {
@@ -745,6 +749,9 @@ sub provision_ad_member
 
 	$substitution_path = "$share_dir/D_$dcvars->{DOMAIN}/u_$dcvars->{DOMAIN}/alice/g_$dcvars->{DOMAIN}/domain users";
 	push(@dirs, $substitution_path);
+
+	my $smbcacls_sharedir="$share_dir/smbcacls";
+	push(@dirs,$smbcacls_sharedir);
 
 	my $option_offline_logon = "no";
 	if (defined($offline_logon)) {
@@ -1006,6 +1013,10 @@ sub provision_ad_member
 	$ret->{DC_NETBIOSNAME} = $dcvars->{NETBIOSNAME};
 	$ret->{DC_USERNAME} = $dcvars->{USERNAME};
 	$ret->{DC_PASSWORD} = $dcvars->{PASSWORD};
+	$ret->{DOMAIN_ADMIN} = $dcvars->{DOMAIN_ADMIN};
+	$ret->{DOMAIN_ADMIN_PASSWORD} = $dcvars->{DOMAIN_ADMIN_PASSWORD};
+	$ret->{DOMAIN_USER} = $dcvars->{DOMAIN_USER};
+	$ret->{DOMAIN_USER_PASSWORD} = $dcvars->{DOMAIN_USER_PASSWORD};
 
 	# forest trust
 	$ret->{TRUST_F_BOTH_SERVER} = $trustvars_f->{SERVER};
@@ -1171,6 +1182,10 @@ sub setup_ad_member_rfc2307
 	$ret->{DC_NETBIOSNAME} = $dcvars->{NETBIOSNAME};
 	$ret->{DC_USERNAME} = $dcvars->{USERNAME};
 	$ret->{DC_PASSWORD} = $dcvars->{PASSWORD};
+	$ret->{DOMAIN_ADMIN} = $dcvars->{DOMAIN_ADMIN};
+	$ret->{DOMAIN_ADMIN_PASSWORD} = $dcvars->{DOMAIN_ADMIN_PASSWORD};
+	$ret->{DOMAIN_USER} = $dcvars->{DOMAIN_USER};
+	$ret->{DOMAIN_USER_PASSWORD} = $dcvars->{DOMAIN_USER_PASSWORD};
 
 	return $ret;
 }
@@ -1267,6 +1282,10 @@ sub setup_admem_idmap_autorid
 	$ret->{DC_NETBIOSNAME} = $dcvars->{NETBIOSNAME};
 	$ret->{DC_USERNAME} = $dcvars->{USERNAME};
 	$ret->{DC_PASSWORD} = $dcvars->{PASSWORD};
+	$ret->{DOMAIN_ADMIN} = $dcvars->{DOMAIN_ADMIN};
+	$ret->{DOMAIN_ADMIN_PASSWORD} = $dcvars->{DOMAIN_ADMIN_PASSWORD};
+	$ret->{DOMAIN_USER} = $dcvars->{DOMAIN_USER};
+	$ret->{DOMAIN_USER_PASSWORD} = $dcvars->{DOMAIN_USER_PASSWORD};
 
 	return $ret;
 }
@@ -1366,6 +1385,10 @@ sub setup_ad_member_idmap_rid
 	$ret->{DC_NETBIOSNAME} = $dcvars->{NETBIOSNAME};
 	$ret->{DC_USERNAME} = $dcvars->{USERNAME};
 	$ret->{DC_PASSWORD} = $dcvars->{PASSWORD};
+	$ret->{DOMAIN_ADMIN} = $dcvars->{DOMAIN_ADMIN};
+	$ret->{DOMAIN_ADMIN_PASSWORD} = $dcvars->{DOMAIN_ADMIN_PASSWORD};
+	$ret->{DOMAIN_USER} = $dcvars->{DOMAIN_USER};
+	$ret->{DOMAIN_USER_PASSWORD} = $dcvars->{DOMAIN_USER_PASSWORD};
 
 	return $ret;
 }
@@ -1396,6 +1419,8 @@ sub setup_ad_member_idmap_ad
 	idmap config $dcvars->{TRUST_DOMAIN} : backend = ad
 	idmap config $dcvars->{TRUST_DOMAIN} : range = 2000000-2999999
 	gensec_gssapi:requested_life_time = 5
+	winbind scan trusted domains = yes
+	winbind expand groups = 1
 ";
 
 	my $ret = $self->provision(
@@ -1466,6 +1491,10 @@ sub setup_ad_member_idmap_ad
 	$ret->{DC_NETBIOSNAME} = $dcvars->{NETBIOSNAME};
 	$ret->{DC_USERNAME} = $dcvars->{USERNAME};
 	$ret->{DC_PASSWORD} = $dcvars->{PASSWORD};
+	$ret->{DOMAIN_ADMIN} = $dcvars->{DOMAIN_ADMIN};
+	$ret->{DOMAIN_ADMIN_PASSWORD} = $dcvars->{DOMAIN_ADMIN_PASSWORD};
+	$ret->{DOMAIN_USER} = $dcvars->{DOMAIN_USER};
+	$ret->{DOMAIN_USER_PASSWORD} = $dcvars->{DOMAIN_USER_PASSWORD};
 
 	$ret->{TRUST_SERVER} = $dcvars->{TRUST_SERVER};
 	$ret->{TRUST_USERNAME} = $dcvars->{TRUST_USERNAME};
@@ -1558,6 +1587,10 @@ sub setup_ad_member_oneway
 	$ret->{DC_NETBIOSNAME} = $dcvars->{NETBIOSNAME};
 	$ret->{DC_USERNAME} = $dcvars->{USERNAME};
 	$ret->{DC_PASSWORD} = $dcvars->{PASSWORD};
+	$ret->{DOMAIN_ADMIN} = $dcvars->{DOMAIN_ADMIN};
+	$ret->{DOMAIN_ADMIN_PASSWORD} = $dcvars->{DOMAIN_ADMIN_PASSWORD};
+	$ret->{DOMAIN_USER} = $dcvars->{DOMAIN_USER};
+	$ret->{DOMAIN_USER_PASSWORD} = $dcvars->{DOMAIN_USER_PASSWORD};
 
 	$ret->{TRUST_SERVER} = $dcvars->{TRUST_SERVER};
 	$ret->{TRUST_USERNAME} = $dcvars->{TRUST_USERNAME};
@@ -1689,6 +1722,7 @@ sub setup_simpleserver
 	vfs objects = xattr_tdb streams_depot
 	change notify = no
 	server smb encrypt = off
+        allow trusted domains = no
 
 [vfs_aio_pthread]
 	path = $prefix_abs/share
@@ -1852,6 +1886,7 @@ sub setup_fileserver
 
 	my $ip4 = Samba::get_ipv4_addr("FILESERVER");
 	my $fileserver_options = "
+        smb3 unix extensions = yes
 	kernel change notify = yes
 	spotlight backend = elasticsearch
 	elasticsearch:address = $ip4
@@ -2008,6 +2043,11 @@ sub setup_fileserver
 	path = $share_dir
 	vfs objects = acl_xattr
 	acl_xattr:security_acl_name = user.hackme
+	read only = no
+
+[io_uring]
+	path = $share_dir
+	vfs objects = acl_xattr fake_acls xattr_tdb streams_depot time_audit full_audit io_uring
 	read only = no
 
 [homes]
@@ -2647,11 +2687,20 @@ sub provision($$)
 	my $local_symlinks_shrdir="$shrdir/local_symlinks";
 	push(@dirs,$local_symlinks_shrdir);
 
+	my $worm_shrdir="$shrdir/worm";
+	push(@dirs,$worm_shrdir);
+
 	my $fruit_resource_stream_shrdir="$shrdir/fruit_resource_stream";
 	push(@dirs,$fruit_resource_stream_shrdir);
 
 	my $smbget_sharedir="$shrdir/smbget";
 	push(@dirs, $smbget_sharedir);
+
+	my $recycle_shrdir="$shrdir/recycle";
+	push(@dirs,$recycle_shrdir);
+
+	my $fakedircreatetimes_shrdir="$shrdir/fakedircreatetimes";
+	push(@dirs,$fakedircreatetimes_shrdir);
 
 	# this gets autocreated by winbindd
 	my $wbsockdir="$prefix_abs/wbsock";
@@ -3241,6 +3290,7 @@ sub provision($$)
 	fruit:resource = file
 	fruit:metadata = stream
 	fruit:zero_file_id=yes
+	fruit:validate_afpinfo = no
 
 [fruit_resource_stream]
 	path = $fruit_resource_stream_shrdir
@@ -3412,9 +3462,7 @@ sub provision($$)
 [shadow_write]
 	path = $shadow_tstdir
 	comment = previous versions snapshots under mount point
-	vfs objects = shadow_copy2 streams_xattr error_inject
-	aio write size = 0
-	error_inject:pwrite = EBADF
+	vfs objects = shadow_copy2 streams_xattr
 	shadow:mountpoint = $shadow_tstdir
 	shadow:fixinodes = yes
 	smbd async dosmode = yes
@@ -3469,6 +3517,13 @@ sub provision($$)
 	copy = tmp
 	path = $local_symlinks_shrdir
 	follow symlinks = yes
+
+[worm]
+	copy = tmp
+	path = $worm_shrdir
+	vfs objects = worm
+	worm:grace_period = 1
+	comment = vfs_worm with 1s grace_period
 
 [kernel_oplocks]
 	copy = tmp
@@ -3560,6 +3615,23 @@ sub provision($$)
 	server addresses = $server_ipv6
 
 [smbget]
+	path = $smbget_sharedir
+	comment = smb username is [%U]
+
+[recycle]
+	copy = tmp
+	path = $recycle_shrdir
+	vfs objects = recycle
+	recycle : repository = .trash
+	recycle : exclude = *.tmp
+	recycle : directory_mode = 755
+
+[fakedircreatetimes]
+	copy = tmp
+	path = $fakedircreatetimes_shrdir
+	fake directory create times = yes
+
+[smbget_guest]
 	path = $smbget_sharedir
 	comment = smb username is [%U]
 	guest ok = yes
@@ -3738,7 +3810,7 @@ jacknomappergroup:x:$gid_jacknomapper:jacknomapper
 	$ret{USERID} = $unix_uid;
 	$ret{DOMAIN} = $domain;
 	$ret{SAMSID} = $samsid;
-	$ret{NETBIOSNAME} = $server;
+	$ret{NETBIOSNAME} = $netbios_name;
 	$ret{PASSWORD} = $password;
 	$ret{PIDDIR} = $piddir;
 	$ret{SELFTEST_WINBINDD_SOCKET_DIR} = $wbsockdir;
@@ -3787,7 +3859,7 @@ sub wait_for_start($$$$$)
 	    print "checking for samba_dcerpcd\n";
 
 	    do {
-		$ret = system("$rpcclient $envvars->{CONFIGURATION} ncalrpc: -c epmmap");
+		$ret = system("UID_WRAPPER_ROOT=1 $rpcclient $envvars->{CONFIGURATION} ncalrpc: -c epmmap");
 
 		if ($ret != 0) {
 		    sleep(1);
@@ -4128,6 +4200,24 @@ sub provision_ctdb($$$$)
 	$ret{NUM_NODES} = $num_nodes;
 	$ret{CTDB_NODES} = \@nodes;
 	$ret{CTDB_NODES_FILE} = $nodes_file;
+
+	for (my $i = 0; $i < $num_nodes; $i++) {
+		my $node = $nodes[$i];
+		my $socket = $node->{SOCKET_FILE};
+		my $server_name = $node->{SERVER_NAME};
+		my $node_prefix = $node->{NODE_PREFIX};
+		my $ip = $node->{IP};
+
+		$ret{"CTDB_BASE_NODE${i}"} = $node_prefix;
+		$ret{"CTDB_SOCKET_NODE${i}"} = $socket;
+		$ret{"CTDB_SERVER_NAME_NODE${i}"} = $server_name;
+		$ret{"CTDB_IFACE_IP_NODE${i}"} = $ip;
+	}
+
+	$ret{CTDB_BASE} = $ret{CTDB_BASE_NODE0};
+	$ret{CTDB_SOCKET} = $ret{CTDB_SOCKET_NODE0};
+	$ret{CTDB_SERVER_NAME} = $ret{CTDB_SERVER_NAME_NODE0};
+	$ret{CTDB_IFACE_IP} = $ret{CTDB_IFACE_IP_NODE0};
 
 	return \%ret;
 }

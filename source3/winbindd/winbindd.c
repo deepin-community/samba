@@ -1179,8 +1179,17 @@ static void winbindd_register_handlers(struct messaging_context *msg_ctx,
 		exit(1);
 	}
 
-	init_idmap_child();
-	init_locator_child();
+	status = init_idmap_child(global_event_context());
+	if (NT_STATUS_IS_ERR(status)) {
+		DBG_ERR("Unable to start idmap child: %s\n", nt_errstr(status));
+		exit(1);
+	}
+
+	status = init_locator_child(global_event_context());
+	if (NT_STATUS_IS_ERR(status)) {
+		DBG_ERR("Unable to start locator child: %s\n", nt_errstr(status));
+		exit(1);
+	}
 
 	smb_nscd_flush_user_cache();
 	smb_nscd_flush_group_cache();
@@ -1438,8 +1447,9 @@ int main(int argc, const char **argv)
 
 	reopen_logs();
 
-	DEBUG(0,("winbindd version %s started.\n", samba_version_string()));
-	DEBUGADD(0,("%s\n", COPYRIGHT_STARTUP_MESSAGE));
+	DBG_STARTUP_NOTICE("winbindd version %s started.\n%s\n",
+			   samba_version_string(),
+			   samba_copyright_string());
 
 	/* After parsing the configuration file we setup the core path one more time
 	 * as the log file might have been set in the configuration and cores's

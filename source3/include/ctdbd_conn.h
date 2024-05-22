@@ -84,6 +84,28 @@ int ctdbd_register_ips(struct ctdbd_connection *conn,
 				 const uint8_t *msg, size_t msglen,
 				 void *private_data),
 		       void *private_data);
+void ctdbd_unregister_ips(struct ctdbd_connection *conn,
+			  const struct sockaddr_storage *_server,
+			  const struct sockaddr_storage *_client,
+			  int (*cb)(struct tevent_context *ev,
+				    uint32_t src_vnn,
+				    uint32_t dst_vnn,
+				    uint64_t dst_srvid,
+				    const uint8_t *msg,
+				    size_t msglen,
+				    void *private_data),
+			  void *private_data);
+void ctdbd_passed_ips(struct ctdbd_connection *conn,
+		      const struct sockaddr_storage *_server,
+		      const struct sockaddr_storage *_client,
+		      int (*cb)(struct tevent_context *ev,
+				uint32_t src_vnn,
+				uint32_t dst_vnn,
+				uint64_t dst_srvid,
+				const uint8_t *msg,
+				size_t msglen,
+				void *private_data),
+		      void *private_data);
 
 /*
  * call @cb for each public IP. If @cb returns non-zero, then break the loop
@@ -99,6 +121,15 @@ int ctdbd_public_ip_foreach(struct ctdbd_connection *conn,
 				      bool is_movable_ip,
 				      void *private_data),
 			    void *private_data);
+int ctdbd_all_ip_foreach(struct ctdbd_connection *conn,
+			 bool include_node_ips,
+			 bool include_public_ips,
+			 int (*cb)(uint32_t total_ip_count,
+				   const struct sockaddr_storage *ip,
+				   uint32_t pinned_pnn,
+				   uint32_t current_pnn,
+				   void *private_data),
+			 void *private_data);
 
 int ctdbd_control_local(struct ctdbd_connection *conn, uint32_t opcode,
 			uint64_t srvid, uint32_t flags, TDB_DATA data,
@@ -116,6 +147,16 @@ int register_with_ctdbd(struct ctdbd_connection *conn, uint64_t srvid,
 				  const uint8_t *msg, size_t msglen,
 				  void *private_data),
 			void *private_data);
+void deregister_from_ctdbd(struct ctdbd_connection *conn,
+			   uint64_t srvid,
+			   int (*cb)(struct tevent_context *ev,
+				     uint32_t src_vnn,
+				     uint32_t dst_vnn,
+				     uint64_t dst_srvid,
+				     const uint8_t *msg,
+				     size_t msglen,
+				     void *private_data),
+			   void *private_data);
 int ctdbd_probe(const char *sockname, int timeout);
 
 struct ctdb_req_header;

@@ -14,7 +14,7 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-import os, grp, pwd
+import os, grp, pwd, re
 import errno
 from samba import gpo, tests
 from samba.gp.gpclass import register_gp_extension, list_gp_extensions, \
@@ -27,7 +27,7 @@ from tempfile import NamedTemporaryFile, TemporaryDirectory
 from samba.gp import gpclass
 # Disable privilege dropping for testing
 gpclass.drop_privileges = lambda _, func, *args : func(*args)
-from samba.gp.gp_sec_ext import gp_krb_ext, gp_access_ext
+from samba.gp.gp_sec_ext import gp_krb_ext
 from samba.gp.gp_scripts_ext import gp_scripts_ext, gp_user_scripts_ext
 from samba.gp.gp_sudoers_ext import gp_sudoers_ext
 from samba.gp.vgp_sudoers_ext import vgp_sudoers_ext
@@ -50,6 +50,7 @@ from samba.gp.gp_msgs_ext import gp_msgs_ext
 from samba.gp.gp_centrify_sudoers_ext import gp_centrify_sudoers_ext
 from samba.gp.gp_centrify_crontab_ext import gp_centrify_crontab_ext, \
                                              gp_user_centrify_crontab_ext
+from samba.gp.gp_drive_maps_ext import gp_drive_maps_user_ext
 from samba.common import get_bytes
 from samba.dcerpc import preg
 from samba.ndr import ndr_pack
@@ -60,7 +61,7 @@ import hashlib
 from samba.gp_parse.gp_pol import GPPolParser
 from glob import glob
 from configparser import ConfigParser
-from samba.gp.gpclass import get_dc_hostname
+from samba.gp.gpclass import get_dc_hostname, expand_pref_variables
 from samba import Ldb
 import ldb as _ldb
 from samba.auth import system_session
@@ -72,7 +73,7 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.hazmat.primitives.serialization import Encoding
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from samba.samba3 import param as s3param
 
 def dummy_certificate():
@@ -81,7 +82,7 @@ def dummy_certificate():
                            os.environ.get('SERVER'))
     ])
     cons = x509.BasicConstraints(ca=True, path_length=0)
-    now = datetime.utcnow()
+    now = datetime.now(tz=timezone.utc)
 
     key = rsa.generate_private_key(public_exponent=65537, key_size=2048,
                                    backend=default_backend())
@@ -102,16 +103,20 @@ def dummy_certificate():
 
 # Dummy requests structure for Certificate Auto Enrollment
 class dummy_requests(object):
-    @staticmethod
-    def get(url=None, params=None):
+    class exceptions(object):
+        ConnectionError = Exception
+
+    def __init__(self, want_exception=False):
+        self.want_exception = want_exception
+
+    def get(self, url=None, params=None):
+        if self.want_exception:
+            raise self.exceptions.ConnectionError
+
         dummy = requests.Response()
         dummy._content = dummy_certificate()
         dummy.headers = {'Content-Type': 'application/x-x509-ca-cert'}
         return dummy
-
-    class exceptions(object):
-        ConnectionError = Exception
-cae.requests = dummy_requests
 
 realm = os.environ.get('REALM')
 policies = realm + '/POLICIES'
@@ -123,7 +128,7 @@ dspath = 'CN=Policies,CN=System,' + base_dn
 gpt_data = '[General]\nVersion=%d'
 
 gnome_test_reg_pol = \
-b"""
+br"""
 <?xml version="1.0" encoding="utf-8"?>
 <PolFile num_entries="26" signature="PReg" version="1">
     <Entry type="4" type_name="REG_DWORD">
@@ -260,7 +265,7 @@ b"""
 """
 
 auto_enroll_reg_pol = \
-b"""
+br"""
 <?xml version="1.0" encoding="utf-8"?>
 <PolFile num_entries="3" signature="PReg" version="1">
         <Entry type="4" type_name="REG_DWORD">
@@ -281,8 +286,30 @@ b"""
 </PolFile>
 """
 
+auto_enroll_unchecked_reg_pol = \
+br"""
+<?xml version="1.0" encoding="utf-8"?>
+<PolFile num_entries="3" signature="PReg" version="1">
+        <Entry type="4" type_name="REG_DWORD">
+                <Key>Software\Policies\Microsoft\Cryptography\AutoEnrollment</Key>
+                <ValueName>AEPolicy</ValueName>
+                <Value>0</Value>
+        </Entry>
+        <Entry type="4" type_name="REG_DWORD">
+                <Key>Software\Policies\Microsoft\Cryptography\AutoEnrollment</Key>
+                <ValueName>OfflineExpirationPercent</ValueName>
+                <Value>10</Value>
+        </Entry>
+        <Entry type="1" type_name="REG_SZ">
+                <Key>Software\Policies\Microsoft\Cryptography\AutoEnrollment</Key>
+                <ValueName>OfflineExpirationStoreNames</ValueName>
+                <Value>MY</Value>
+        </Entry>
+</PolFile>
+"""
+
 advanced_enroll_reg_pol = \
-b"""
+br"""
 <?xml version="1.0" encoding="utf-8"?>
 <PolFile num_entries="30" signature="PReg" version="1">
     <Entry type="1" type_name="REG_SZ">
@@ -316,122 +343,122 @@ b"""
         <Value>0</Value>
     </Entry>
     <Entry type="1" type_name="REG_SZ">
-        <Key>Software\Policies\Microsoft\Cryptography\PolicyServers\\37c9dc30f207f27f61a2f7c3aed598a6e2920b54</Key>
+        <Key>Software\Policies\Microsoft\Cryptography\PolicyServers\37c9dc30f207f27f61a2f7c3aed598a6e2920b54</Key>
         <ValueName>URL</ValueName>
         <Value>LDAP:</Value>
     </Entry>
     <Entry type="1" type_name="REG_SZ">
-        <Key>Software\Policies\Microsoft\Cryptography\PolicyServers\\37c9dc30f207f27f61a2f7c3aed598a6e2920b54</Key>
+        <Key>Software\Policies\Microsoft\Cryptography\PolicyServers\37c9dc30f207f27f61a2f7c3aed598a6e2920b54</Key>
         <ValueName>PolicyID</ValueName>
         <Value>%s</Value>
     </Entry>
     <Entry type="1" type_name="REG_SZ">
-        <Key>Software\Policies\Microsoft\Cryptography\PolicyServers\\37c9dc30f207f27f61a2f7c3aed598a6e2920b54</Key>
+        <Key>Software\Policies\Microsoft\Cryptography\PolicyServers\37c9dc30f207f27f61a2f7c3aed598a6e2920b54</Key>
         <ValueName>FriendlyName</ValueName>
         <Value>Example</Value>
     </Entry>
     <Entry type="4" type_name="REG_DWORD">
-        <Key>Software\Policies\Microsoft\Cryptography\PolicyServers\\37c9dc30f207f27f61a2f7c3aed598a6e2920b54</Key>
+        <Key>Software\Policies\Microsoft\Cryptography\PolicyServers\37c9dc30f207f27f61a2f7c3aed598a6e2920b54</Key>
         <ValueName>Flags</ValueName>
         <Value>16</Value>
     </Entry>
     <Entry type="4" type_name="REG_DWORD">
-        <Key>Software\Policies\Microsoft\Cryptography\PolicyServers\\37c9dc30f207f27f61a2f7c3aed598a6e2920b54</Key>
+        <Key>Software\Policies\Microsoft\Cryptography\PolicyServers\37c9dc30f207f27f61a2f7c3aed598a6e2920b54</Key>
         <ValueName>AuthFlags</ValueName>
         <Value>2</Value>
     </Entry>
     <Entry type="4" type_name="REG_DWORD">
-        <Key>Software\Policies\Microsoft\Cryptography\PolicyServers\\37c9dc30f207f27f61a2f7c3aed598a6e2920b54</Key>
+        <Key>Software\Policies\Microsoft\Cryptography\PolicyServers\37c9dc30f207f27f61a2f7c3aed598a6e2920b54</Key>
         <ValueName>Cost</ValueName>
         <Value>2147483645</Value>
     </Entry>
     <Entry type="1" type_name="REG_SZ">
-        <Key>Software\Policies\Microsoft\Cryptography\PolicyServers\\144bdbb8e4717c26e408f3c9a0cb8d6cfacbcbbe</Key>
+        <Key>Software\Policies\Microsoft\Cryptography\PolicyServers\144bdbb8e4717c26e408f3c9a0cb8d6cfacbcbbe</Key>
         <ValueName>URL</ValueName>
         <Value>https://example2.com/ADPolicyProvider_CEP_Certificate/service.svc/CEP</Value>
     </Entry>
     <Entry type="1" type_name="REG_SZ">
-        <Key>Software\Policies\Microsoft\Cryptography\PolicyServers\\144bdbb8e4717c26e408f3c9a0cb8d6cfacbcbbe</Key>
+        <Key>Software\Policies\Microsoft\Cryptography\PolicyServers\144bdbb8e4717c26e408f3c9a0cb8d6cfacbcbbe</Key>
         <ValueName>PolicyID</ValueName>
         <Value>%s</Value>
     </Entry>
     <Entry type="1" type_name="REG_SZ">
-        <Key>Software\Policies\Microsoft\Cryptography\PolicyServers\\144bdbb8e4717c26e408f3c9a0cb8d6cfacbcbbe</Key>
+        <Key>Software\Policies\Microsoft\Cryptography\PolicyServers\144bdbb8e4717c26e408f3c9a0cb8d6cfacbcbbe</Key>
         <ValueName>FriendlyName</ValueName>
         <Value>Example2</Value>
     </Entry>
     <Entry type="4" type_name="REG_DWORD">
-        <Key>Software\Policies\Microsoft\Cryptography\PolicyServers\\144bdbb8e4717c26e408f3c9a0cb8d6cfacbcbbe</Key>
+        <Key>Software\Policies\Microsoft\Cryptography\PolicyServers\144bdbb8e4717c26e408f3c9a0cb8d6cfacbcbbe</Key>
         <ValueName>Flags</ValueName>
         <Value>16</Value>
     </Entry>
     <Entry type="4" type_name="REG_DWORD">
-        <Key>Software\Policies\Microsoft\Cryptography\PolicyServers\\144bdbb8e4717c26e408f3c9a0cb8d6cfacbcbbe</Key>
+        <Key>Software\Policies\Microsoft\Cryptography\PolicyServers\144bdbb8e4717c26e408f3c9a0cb8d6cfacbcbbe</Key>
         <ValueName>AuthFlags</ValueName>
         <Value>8</Value>
     </Entry>
     <Entry type="4" type_name="REG_DWORD">
-        <Key>Software\Policies\Microsoft\Cryptography\PolicyServers\\144bdbb8e4717c26e408f3c9a0cb8d6cfacbcbbe</Key>
+        <Key>Software\Policies\Microsoft\Cryptography\PolicyServers\144bdbb8e4717c26e408f3c9a0cb8d6cfacbcbbe</Key>
         <ValueName>Cost</ValueName>
         <Value>10</Value>
     </Entry>
     <Entry type="1" type_name="REG_SZ">
-        <Key>Software\Policies\Microsoft\Cryptography\PolicyServers\\20d46e856e9b9746c0b1265c328f126a7b3283a9</Key>
+        <Key>Software\Policies\Microsoft\Cryptography\PolicyServers\20d46e856e9b9746c0b1265c328f126a7b3283a9</Key>
         <ValueName>URL</ValueName>
         <Value>https://example0.com/ADPolicyProvider_CEP_Kerberos/service.svc/CEP</Value>
     </Entry>
     <Entry type="1" type_name="REG_SZ">
-        <Key>Software\Policies\Microsoft\Cryptography\PolicyServers\\20d46e856e9b9746c0b1265c328f126a7b3283a9</Key>
+        <Key>Software\Policies\Microsoft\Cryptography\PolicyServers\20d46e856e9b9746c0b1265c328f126a7b3283a9</Key>
         <ValueName>PolicyID</ValueName>
         <Value>%s</Value>
     </Entry>
     <Entry type="1" type_name="REG_SZ">
-        <Key>Software\Policies\Microsoft\Cryptography\PolicyServers\\20d46e856e9b9746c0b1265c328f126a7b3283a9</Key>
+        <Key>Software\Policies\Microsoft\Cryptography\PolicyServers\20d46e856e9b9746c0b1265c328f126a7b3283a9</Key>
         <ValueName>FriendlyName</ValueName>
         <Value>Example0</Value>
     </Entry>
     <Entry type="4" type_name="REG_DWORD">
-        <Key>Software\Policies\Microsoft\Cryptography\PolicyServers\\20d46e856e9b9746c0b1265c328f126a7b3283a9</Key>
+        <Key>Software\Policies\Microsoft\Cryptography\PolicyServers\20d46e856e9b9746c0b1265c328f126a7b3283a9</Key>
         <ValueName>Flags</ValueName>
         <Value>16</Value>
     </Entry>
     <Entry type="4" type_name="REG_DWORD">
-        <Key>Software\Policies\Microsoft\Cryptography\PolicyServers\\20d46e856e9b9746c0b1265c328f126a7b3283a9</Key>
+        <Key>Software\Policies\Microsoft\Cryptography\PolicyServers\20d46e856e9b9746c0b1265c328f126a7b3283a9</Key>
         <ValueName>AuthFlags</ValueName>
         <Value>2</Value>
     </Entry>
     <Entry type="4" type_name="REG_DWORD">
-        <Key>Software\Policies\Microsoft\Cryptography\PolicyServers\\20d46e856e9b9746c0b1265c328f126a7b3283a9</Key>
+        <Key>Software\Policies\Microsoft\Cryptography\PolicyServers\20d46e856e9b9746c0b1265c328f126a7b3283a9</Key>
         <ValueName>Cost</ValueName>
         <Value>1</Value>
     </Entry>
     <Entry type="1" type_name="REG_SZ">
-        <Key>Software\Policies\Microsoft\Cryptography\PolicyServers\\855b5246433a48402ac4f5c3427566df26ccc9ac</Key>
+        <Key>Software\Policies\Microsoft\Cryptography\PolicyServers\855b5246433a48402ac4f5c3427566df26ccc9ac</Key>
         <ValueName>URL</ValueName>
         <Value>https://example1.com/ADPolicyProvider_CEP_Kerberos/service.svc/CEP</Value>
     </Entry>
     <Entry type="1" type_name="REG_SZ">
-        <Key>Software\Policies\Microsoft\Cryptography\PolicyServers\\855b5246433a48402ac4f5c3427566df26ccc9ac</Key>
+        <Key>Software\Policies\Microsoft\Cryptography\PolicyServers\855b5246433a48402ac4f5c3427566df26ccc9ac</Key>
         <ValueName>PolicyID</ValueName>
         <Value>%s</Value>
     </Entry>
     <Entry type="1" type_name="REG_SZ">
-        <Key>Software\Policies\Microsoft\Cryptography\PolicyServers\\855b5246433a48402ac4f5c3427566df26ccc9ac</Key>
+        <Key>Software\Policies\Microsoft\Cryptography\PolicyServers\855b5246433a48402ac4f5c3427566df26ccc9ac</Key>
         <ValueName>FriendlyName</ValueName>
         <Value>Example1</Value>
     </Entry>
     <Entry type="4" type_name="REG_DWORD">
-        <Key>Software\Policies\Microsoft\Cryptography\PolicyServers\\855b5246433a48402ac4f5c3427566df26ccc9ac</Key>
+        <Key>Software\Policies\Microsoft\Cryptography\PolicyServers\855b5246433a48402ac4f5c3427566df26ccc9ac</Key>
         <ValueName>Flags</ValueName>
         <Value>16</Value>
     </Entry>
     <Entry type="4" type_name="REG_DWORD">
-        <Key>Software\Policies\Microsoft\Cryptography\PolicyServers\\855b5246433a48402ac4f5c3427566df26ccc9ac</Key>
+        <Key>Software\Policies\Microsoft\Cryptography\PolicyServers\855b5246433a48402ac4f5c3427566df26ccc9ac</Key>
         <ValueName>AuthFlags</ValueName>
         <Value>2</Value>
     </Entry>
     <Entry type="4" type_name="REG_DWORD">
-        <Key>Software\Policies\Microsoft\Cryptography\PolicyServers\\855b5246433a48402ac4f5c3427566df26ccc9ac</Key>
+        <Key>Software\Policies\Microsoft\Cryptography\PolicyServers\855b5246433a48402ac4f5c3427566df26ccc9ac</Key>
         <ValueName>Cost</ValueName>
         <Value>1</Value>
     </Entry>
@@ -2094,7 +2121,7 @@ firefox_json_expected = \
 """
 
 chromium_reg_pol = \
-b"""
+br"""
 <?xml version="1.0" encoding="utf-8"?>
 <PolFile num_entries="418" signature="PReg" version="1">
     <Entry type="4" type_name="REG_DWORD">
@@ -2990,12 +3017,12 @@ b"""
     <Entry type="1" type_name="REG_SZ">
         <Key>Software\Policies\Google\Chrome</Key>
         <ValueName>RestrictSigninToPattern</ValueName>
-        <Value>.*@example\\.com</Value>
+        <Value>.*@example\.com</Value>
     </Entry>
     <Entry type="1" type_name="REG_SZ">
         <Key>Software\Policies\Google\Chrome</Key>
         <ValueName>RoamingProfileLocation</ValueName>
-        <Value>${roaming_app_data}\\chrome-profile</Value>
+        <Value>${roaming_app_data}\chrome-profile</Value>
     </Entry>
     <Entry type="4" type_name="REG_DWORD">
         <Key>Software\Policies\Google\Chrome</Key>
@@ -3245,7 +3272,7 @@ b"""
     <Entry type="1" type_name="REG_SZ">
         <Key>Software\Policies\Google\Chrome\AlternativeBrowserParameters</Key>
         <ValueName>5</ValueName>
-        <Value>%HOME%\\browser_profile</Value>
+        <Value>%HOME%\browser_profile</Value>
     </Entry>
     <Entry type="1" type_name="REG_SZ">
         <Key>Software\Policies\Google\Chrome\AudioCaptureAllowedUrls</Key>
@@ -4951,7 +4978,7 @@ b"""
 """
 
 firewalld_reg_pol = \
-b"""
+br"""
 <?xml version="1.0" encoding="utf-8"?>
 <PolFile num_entries="6" signature="PReg" version="1">
     <Entry type="4" type_name="REG_DWORD">
@@ -4983,6 +5010,37 @@ b"""
         <Key>Software\Policies\Samba\Unix Settings\Firewalld\Zones</Key>
         <ValueName>home</ValueName>
         <Value>home</Value>
+    </Entry>
+</PolFile>
+"""
+
+drive_maps_xml = b"""<?xml version="1.0" encoding="utf-8"?>
+<Drives clsid="{8FDDCC1A-0C3C-43cd-A6B4-71A6DF20DA8C}"><Drive clsid="{935D1B74-9CB8-4e3c-9914-7DD559B7A417}" name="A:" status="A:" image="2" changed="2023-03-08 19:23:02" uid="{1641E121-DEF3-418D-A428-2D8DF4749504}" bypassErrors="1"><Properties action="U" thisDrive="NOCHANGE" allDrives="NOCHANGE" userName="" path="\\\\example.com\\test" label="TEST" persistent="1" useLetter="0" letter="A"/></Drive>
+</Drives>
+"""
+
+empty_multi_sz_reg_pol = \
+br"""
+<?xml version="1.0" encoding="utf-8"?>
+<PolFile num_entries="1" signature="PReg" version="1">
+    <Entry type="7" type_name="REG_MULTI_SZ">
+        <Key>KeyName</Key>
+        <ValueName>ValueName</ValueName>
+        <Value/>
+    </Entry>
+</PolFile>
+"""
+
+multiple_values_multi_sz_reg_pol = \
+br"""
+<?xml version="1.0" encoding="utf-8"?>
+<PolFile num_entries="1" signature="PReg" version="1">
+    <Entry type="7" type_name="REG_MULTI_SZ">
+        <Key>KeyName</Key>
+        <ValueName>ValueName</ValueName>
+        <Value>Value1</Value>
+        <Value>Value2</Value>
+        <Value>Value3</Value>
     </Entry>
 </PolFile>
 """
@@ -5037,15 +5095,12 @@ def unstage_file(path):
 
 class GPOTests(tests.TestCase):
     def setUp(self):
-        super(GPOTests, self).setUp()
+        super().setUp()
         self.server = os.environ["SERVER"]
         self.dc_account = self.server.upper() + '$'
         self.lp = s3param.get_context()
         self.lp.load_default()
         self.creds = self.insta_creds(template=self.get_credentials())
-
-    def tearDown(self):
-        super(GPOTests, self).tearDown()
 
     def test_gpo_list(self):
         global poldir, dspath
@@ -5712,9 +5767,12 @@ class GPOTests(tests.TestCase):
 
     def test_smb_conf_ext(self):
         local_path = self.lp.cache_path('gpo_cache')
-        guid = '{31B2F340-016D-11D2-945F-00C04FB984F9}'
-        reg_pol = os.path.join(local_path, policies, guid,
+        guids = ['{31B2F340-016D-11D2-945F-00C04FB984F9}',
+                 '{6AC1786C-016F-11D2-945F-00C04FB984F9}']
+        reg_pol = os.path.join(local_path, policies, guids[0],
                                'MACHINE/REGISTRY.POL')
+        reg_pol2 = os.path.join(local_path, policies, guids[1],
+                                'MACHINE/REGISTRY.POL')
         cache_dir = self.lp.get('cache directory')
         store = GPOStorage(os.path.join(cache_dir, 'gpo.tdb'))
 
@@ -5751,6 +5809,20 @@ class GPOTests(tests.TestCase):
         ret = stage_file(reg_pol, ndr_pack(stage))
         self.assertTrue(ret, 'Failed to create the Registry.pol file')
 
+        # Stage the other Registry.pol
+        entries = []
+        e = preg.entry()
+        e.keyname = 'Software\\Policies\\Samba\\smb_conf\\apply group policies'
+        e.type = 4
+        e.data = 0
+        e.valuename = 'apply group policies'
+        entries.append(e)
+        stage = preg.file()
+        stage.num_entries = len(entries)
+        stage.entries = entries
+        ret = stage_file(reg_pol2, ndr_pack(stage))
+        self.assertTrue(ret, 'Failed to create the Registry.pol file')
+
         with NamedTemporaryFile(suffix='_smb.conf') as f:
             copyfile(self.lp.configfile, f.name)
             lp = LoadParm(f.name)
@@ -5763,7 +5835,23 @@ class GPOTests(tests.TestCase):
 
             template_homedir = lp.get('template homedir')
             self.assertEqual(template_homedir, '/home/samba/%D/%U',
-                              'template homedir was not applied')
+                             'template homedir was not applied')
+            apply_group_policies = lp.get('apply group policies')
+            self.assertFalse(apply_group_policies,
+                            'apply group policies was not applied')
+            ldap_timeout = lp.get('ldap timeout')
+            self.assertEqual(ldap_timeout, 9999, 'ldap timeout was not applied')
+
+            # Force apply with removal of second GPO
+            gp_db = store.get_gplog(machine_creds.get_username())
+            del_gpos = gp_db.get_applied_settings([guids[1]])
+            gpos = [gpo for gpo in gpos if gpo.name != guids[1]]
+            ext.process_group_policy(del_gpos, gpos)
+            lp = LoadParm(f.name)
+
+            template_homedir = lp.get('template homedir')
+            self.assertEqual(template_homedir, '/home/samba/%D/%U',
+                             'template homedir was not applied')
             apply_group_policies = lp.get('apply group policies')
             self.assertTrue(apply_group_policies,
                             'apply group policies was not applied')
@@ -5775,7 +5863,6 @@ class GPOTests(tests.TestCase):
             self.assertEqual(ret, 0, 'gpupdate --rsop failed!')
 
             # Remove policy
-            gp_db = store.get_gplog(machine_creds.get_username())
             del_gpos = get_deleted_gpos_list(gp_db, [])
             ext.process_group_policy(del_gpos, [])
 
@@ -5783,22 +5870,25 @@ class GPOTests(tests.TestCase):
 
             template_homedir = lp.get('template homedir')
             self.assertEqual(template_homedir, self.lp.get('template homedir'),
-                              'template homedir was not unapplied')
+                             'template homedir was not unapplied')
             apply_group_policies = lp.get('apply group policies')
             self.assertEqual(apply_group_policies, self.lp.get('apply group policies'),
-                              'apply group policies was not unapplied')
+                             'apply group policies was not unapplied')
             ldap_timeout = lp.get('ldap timeout')
             self.assertEqual(ldap_timeout, self.lp.get('ldap timeout'),
-                              'ldap timeout was not unapplied')
+                             'ldap timeout was not unapplied')
 
         # Unstage the Registry.pol file
         unstage_file(reg_pol)
 
     def test_gp_motd(self):
         local_path = self.lp.cache_path('gpo_cache')
-        guid = '{31B2F340-016D-11D2-945F-00C04FB984F9}'
-        reg_pol = os.path.join(local_path, policies, guid,
+        guids = ['{31B2F340-016D-11D2-945F-00C04FB984F9}',
+                 '{6AC1786C-016F-11D2-945F-00C04FB984F9}']
+        reg_pol = os.path.join(local_path, policies, guids[0],
                                'MACHINE/REGISTRY.POL')
+        reg_pol2 = os.path.join(local_path, policies, guids[1],
+                                'MACHINE/REGISTRY.POL')
         cache_dir = self.lp.get('cache directory')
         store = GPOStorage(os.path.join(cache_dir, 'gpo.tdb'))
 
@@ -5830,10 +5920,38 @@ class GPOTests(tests.TestCase):
         ret = stage_file(reg_pol, ndr_pack(stage))
         self.assertTrue(ret, 'Could not create the target %s' % reg_pol)
 
+        # Stage the other Registry.pol
+        stage = preg.file()
+        e3 = preg.entry()
+        e3.keyname = b'Software\\Policies\\Samba\\Unix Settings\\Messages'
+        e3.valuename = b'motd'
+        e3.type = 1
+        e3.data = b'This should overwrite the first policy'
+        stage.num_entries = 1
+        stage.entries = [e3]
+        ret = stage_file(reg_pol2, ndr_pack(stage))
+        self.assertTrue(ret, 'Could not create the target %s' % reg_pol2)
+
         # Process all gpos, with temp output directory
         with TemporaryDirectory() as dname:
             ext.process_group_policy([], gpos, dname)
             motd_file = os.path.join(dname, 'motd')
+            self.assertTrue(os.path.exists(motd_file),
+                            'Message of the day file not created')
+            data = open(motd_file, 'r').read()
+            self.assertEqual(data, e3.data, 'Message of the day not applied')
+            issue_file = os.path.join(dname, 'issue')
+            self.assertTrue(os.path.exists(issue_file),
+                            'Login Prompt Message file not created')
+            data = open(issue_file, 'r').read()
+            self.assertEqual(data, e2.data, 'Login Prompt Message not applied')
+
+            # Force apply with removal of second GPO
+            gp_db = store.get_gplog(machine_creds.get_username())
+            del_gpos = gp_db.get_applied_settings([guids[1]])
+            gpos = [gpo for gpo in gpos if gpo.name != guids[1]]
+            ext.process_group_policy(del_gpos, gpos, dname)
+
             self.assertTrue(os.path.exists(motd_file),
                             'Message of the day file not created')
             data = open(motd_file, 'r').read()
@@ -5849,7 +5967,6 @@ class GPOTests(tests.TestCase):
             self.assertEqual(ret, 0, 'gpupdate --rsop failed!')
 
             # Unapply policy, and ensure the test files are removed
-            gp_db = store.get_gplog(machine_creds.get_username())
             del_gpos = get_deleted_gpos_list(gp_db, [])
             ext.process_group_policy(del_gpos, [], dname)
             data = open(motd_file, 'r').read()
@@ -6000,9 +6117,9 @@ class GPOTests(tests.TestCase):
             self.assertTrue(os.path.exists(target.text),
                             'The target file does not exist')
             self.assertEqual(os.stat(target.text).st_mode & 0o777, 0o755,
-                              'The target file permissions are incorrect')
+                             'The target file permissions are incorrect')
             self.assertEqual(open(target.text).read(), source_data,
-                              'The target file contents are incorrect')
+                             'The target file contents are incorrect')
 
             # Remove policy
             gp_db = store.get_gplog(machine_creds.get_username())
@@ -6143,7 +6260,7 @@ class GPOTests(tests.TestCase):
             ext.process_group_policy([], gpos, dname)
             files = os.listdir(dname)
             self.assertEqual(len(files), 1,
-                              'The target script was not created')
+                             'The target script was not created')
             entry = '@reboot %s %s %s' % (run_as.text, test_script,
                                           parameters.text)
             self.assertIn(entry,
@@ -6276,8 +6393,11 @@ class GPOTests(tests.TestCase):
 
     def test_vgp_motd(self):
         local_path = self.lp.cache_path('gpo_cache')
-        guid = '{31B2F340-016D-11D2-945F-00C04FB984F9}'
-        manifest = os.path.join(local_path, policies, guid, 'MACHINE',
+        guids = ['{31B2F340-016D-11D2-945F-00C04FB984F9}',
+                 '{6AC1786C-016F-11D2-945F-00C04FB984F9}']
+        manifest = os.path.join(local_path, policies, guids[0], 'MACHINE',
+            'VGP/VTLA/UNIX/MOTD/MANIFEST.XML')
+        manifest2 = os.path.join(local_path, policies, guids[1], 'MACHINE',
             'VGP/VTLA/UNIX/MOTD/MANIFEST.XML')
         cache_dir = self.lp.get('cache directory')
         store = GPOStorage(os.path.join(cache_dir, 'gpo.tdb'))
@@ -6306,9 +6426,33 @@ class GPOTests(tests.TestCase):
         ret = stage_file(manifest, etree.tostring(stage))
         self.assertTrue(ret, 'Could not create the target %s' % manifest)
 
+        # Stage the other manifest.xml
+        stage = etree.Element('vgppolicy')
+        policysetting = etree.SubElement(stage, 'policysetting')
+        version = etree.SubElement(policysetting, 'version')
+        version.text = '1'
+        data = etree.SubElement(policysetting, 'data')
+        filename = etree.SubElement(data, 'filename')
+        filename.text = 'motd'
+        text2 = etree.SubElement(data, 'text')
+        text2.text = 'This should overwrite the first policy'
+        ret = stage_file(manifest2, etree.tostring(stage))
+        self.assertTrue(ret, 'Could not create the target %s' % manifest2)
+
         # Process all gpos, with temp output directory
         with NamedTemporaryFile() as f:
             ext.process_group_policy([], gpos, f.name)
+            self.assertTrue(os.path.exists(f.name),
+                            'Message of the day file not created')
+            data = open(f.name, 'r').read()
+            self.assertEqual(data, text2.text, 'Message of the day not applied')
+
+            # Force apply with removal of second GPO
+            gp_db = store.get_gplog(machine_creds.get_username())
+            del_gpos = gp_db.get_applied_settings([guids[1]])
+            gpos = [gpo for gpo in gpos if gpo.name != guids[1]]
+            ext.process_group_policy(del_gpos, gpos, f.name)
+
             self.assertEqual(open(f.name, 'r').read(), text.text,
                              'The motd was not applied')
 
@@ -6317,19 +6461,22 @@ class GPOTests(tests.TestCase):
             self.assertEqual(ret, 0, 'gpupdate --rsop failed!')
 
             # Remove policy
-            gp_db = store.get_gplog(machine_creds.get_username())
             del_gpos = get_deleted_gpos_list(gp_db, [])
             ext.process_group_policy(del_gpos, [], f.name)
             self.assertNotEqual(open(f.name, 'r').read(), text.text,
                                 'The motd was not unapplied')
 
-        # Unstage the Registry.pol file
+        # Unstage the manifest files
         unstage_file(manifest)
+        unstage_file(manifest2)
 
     def test_vgp_issue(self):
         local_path = self.lp.cache_path('gpo_cache')
-        guid = '{31B2F340-016D-11D2-945F-00C04FB984F9}'
-        manifest = os.path.join(local_path, policies, guid, 'MACHINE',
+        guids = ['{31B2F340-016D-11D2-945F-00C04FB984F9}',
+                 '{6AC1786C-016F-11D2-945F-00C04FB984F9}']
+        manifest = os.path.join(local_path, policies, guids[0], 'MACHINE',
+            'VGP/VTLA/UNIX/ISSUE/MANIFEST.XML')
+        manifest2 = os.path.join(local_path, policies, guids[1], 'MACHINE',
             'VGP/VTLA/UNIX/ISSUE/MANIFEST.XML')
         cache_dir = self.lp.get('cache directory')
         store = GPOStorage(os.path.join(cache_dir, 'gpo.tdb'))
@@ -6358,9 +6505,31 @@ class GPOTests(tests.TestCase):
         ret = stage_file(manifest, etree.tostring(stage))
         self.assertTrue(ret, 'Could not create the target %s' % manifest)
 
+        # Stage the other manifest.xml
+        stage = etree.Element('vgppolicy')
+        policysetting = etree.SubElement(stage, 'policysetting')
+        version = etree.SubElement(policysetting, 'version')
+        version.text = '1'
+        data = etree.SubElement(policysetting, 'data')
+        filename = etree.SubElement(data, 'filename')
+        filename.text = 'issue'
+        text2 = etree.SubElement(data, 'text')
+        text2.text = 'This test message overwrites the first'
+        ret = stage_file(manifest2, etree.tostring(stage))
+        self.assertTrue(ret, 'Could not create the target %s' % manifest2)
+
         # Process all gpos, with temp output directory
         with NamedTemporaryFile() as f:
             ext.process_group_policy([], gpos, f.name)
+            self.assertEqual(open(f.name, 'r').read(), text2.text,
+                             'The issue was not applied')
+
+            # Force apply with removal of second GPO
+            gp_db = store.get_gplog(machine_creds.get_username())
+            del_gpos = gp_db.get_applied_settings([guids[1]])
+            gpos = [gpo for gpo in gpos if gpo.name != guids[1]]
+            ext.process_group_policy(del_gpos, gpos, f.name)
+
             self.assertEqual(open(f.name, 'r').read(), text.text,
                              'The issue was not applied')
 
@@ -6369,7 +6538,6 @@ class GPOTests(tests.TestCase):
             self.assertEqual(ret, 0, 'gpupdate --rsop failed!')
 
             # Remove policy
-            gp_db = store.get_gplog(machine_creds.get_username())
             del_gpos = get_deleted_gpos_list(gp_db, [])
             ext.process_group_policy(del_gpos, [], f.name)
             self.assertNotEqual(open(f.name, 'r').read(), text.text,
@@ -6663,13 +6831,13 @@ class GPOTests(tests.TestCase):
                             'modify-device defaults not found')
             allow_any = defaults.find('allow_any').text
             self.assertEqual(allow_any, 'no',
-                              'modify-device allow_any not set to no')
+                             'modify-device allow_any not set to no')
             allow_inactive = defaults.find('allow_inactive').text
             self.assertEqual(allow_inactive, 'no',
-                              'modify-device allow_inactive not set to no')
+                             'modify-device allow_inactive not set to no')
             allow_active = defaults.find('allow_active').text
             self.assertEqual(allow_active, 'yes',
-                              'modify-device allow_active not set to yes')
+                             'modify-device allow_active not set to yes')
 
             # Disable printing
             data = { 'org/gnome/desktop/lockdown':
@@ -6742,7 +6910,7 @@ class GPOTests(tests.TestCase):
         # Unstage the Registry.pol file
         unstage_file(reg_pol)
 
-    def test_gp_cert_auto_enroll_ext(self):
+    def test_gp_cert_auto_enroll_ext_without_ndes(self):
         local_path = self.lp.cache_path('gpo_cache')
         guid = '{31B2F340-016D-11D2-945F-00C04FB984F9}'
         reg_pol = os.path.join(local_path, policies, guid,
@@ -6755,6 +6923,7 @@ class GPOTests(tests.TestCase):
         machine_creds.set_machine_account()
 
         # Initialize the group policy extension
+        cae.requests = dummy_requests(want_exception=True)
         ext = cae.gp_cert_auto_enroll_ext(self.lp, machine_creds,
                                           machine_creds.get_username(), store)
 
@@ -6783,14 +6952,122 @@ class GPOTests(tests.TestCase):
         ldb.add({'dn': certa_dn,
                  'objectClass': 'certificationAuthority',
                  'authorityRevocationList': ['XXX'],
-                 'cACertificate': 'XXX',
+                 'cACertificate': dummy_certificate(),
                  'certificateRevocationList': ['XXX'],
                 })
         # Write the dummy pKIEnrollmentService
         enroll_dn = 'CN=%s,CN=Enrollment Services,%s' % (ca_cn, confdn)
         ldb.add({'dn': enroll_dn,
                  'objectClass': 'pKIEnrollmentService',
-                 'cACertificate': 'XXXX',
+                 'cACertificate': dummy_certificate(),
+                 'certificateTemplates': ['Machine'],
+                 'dNSHostName': hostname,
+                })
+        # Write the dummy pKICertificateTemplate
+        template_dn = 'CN=Machine,CN=Certificate Templates,%s' % confdn
+        ldb.add({'dn': template_dn,
+                 'objectClass': 'pKICertificateTemplate',
+                })
+
+        with TemporaryDirectory() as dname:
+            try:
+                ext.process_group_policy([], gpos, dname, dname)
+            except Exception as e:
+                self.fail(str(e))
+
+            ca_crt = os.path.join(dname, '%s.crt' % ca_cn)
+            self.assertTrue(os.path.exists(ca_crt),
+                            'Root CA certificate was not requested')
+            machine_crt = os.path.join(dname, '%s.Machine.crt' % ca_cn)
+            self.assertTrue(os.path.exists(machine_crt),
+                            'Machine certificate was not requested')
+            machine_key = os.path.join(dname, '%s.Machine.key' % ca_cn)
+            self.assertTrue(os.path.exists(machine_key),
+                            'Machine key was not generated')
+
+            # Verify RSOP does not fail
+            ext.rsop([g for g in gpos if g.name == guid][0])
+
+            # Check that a call to gpupdate --rsop also succeeds
+            ret = rsop(self.lp)
+            self.assertEqual(ret, 0, 'gpupdate --rsop failed!')
+
+            # Remove policy
+            gp_db = store.get_gplog(machine_creds.get_username())
+            del_gpos = get_deleted_gpos_list(gp_db, [])
+            ext.process_group_policy(del_gpos, [], dname)
+            self.assertFalse(os.path.exists(ca_crt),
+                            'Root CA certificate was not removed')
+            self.assertFalse(os.path.exists(machine_crt),
+                            'Machine certificate was not removed')
+            self.assertFalse(os.path.exists(machine_key),
+                            'Machine key was not removed')
+            out, _ = Popen(['getcert', 'list-cas'], stdout=PIPE).communicate()
+            self.assertNotIn(get_bytes(ca_cn), out, 'CA was not removed')
+            out, _ = Popen(['getcert', 'list'], stdout=PIPE).communicate()
+            self.assertNotIn(b'Machine', out,
+                             'Machine certificate not removed')
+            self.assertNotIn(b'Workstation', out,
+                             'Workstation certificate not removed')
+
+        # Remove the dummy CA, pKIEnrollmentService, and pKICertificateTemplate
+        ldb.delete(certa_dn)
+        ldb.delete(enroll_dn)
+        ldb.delete(template_dn)
+
+        # Unstage the Registry.pol file
+        unstage_file(reg_pol)
+
+    def test_gp_cert_auto_enroll_ext(self):
+        local_path = self.lp.cache_path('gpo_cache')
+        guid = '{31B2F340-016D-11D2-945F-00C04FB984F9}'
+        reg_pol = os.path.join(local_path, policies, guid,
+                               'MACHINE/REGISTRY.POL')
+        cache_dir = self.lp.get('cache directory')
+        store = GPOStorage(os.path.join(cache_dir, 'gpo.tdb'))
+
+        machine_creds = Credentials()
+        machine_creds.guess(self.lp)
+        machine_creds.set_machine_account()
+
+        # Initialize the group policy extension
+        cae.requests = dummy_requests()
+        ext = cae.gp_cert_auto_enroll_ext(self.lp, machine_creds,
+                                          machine_creds.get_username(), store)
+
+        gpos = get_gpo_list(self.server, machine_creds, self.lp,
+                            machine_creds.get_username())
+
+        # Stage the Registry.pol file with test data
+        parser = GPPolParser()
+        parser.load_xml(etree.fromstring(auto_enroll_reg_pol.strip()))
+        ret = stage_file(reg_pol, ndr_pack(parser.pol_file))
+        self.assertTrue(ret, 'Could not create the target %s' % reg_pol)
+
+        # Write the dummy CA entry, Enrollment Services, and Templates Entries
+        admin_creds = Credentials()
+        admin_creds.set_username(os.environ.get('DC_USERNAME'))
+        admin_creds.set_password(os.environ.get('DC_PASSWORD'))
+        admin_creds.set_realm(os.environ.get('REALM'))
+        hostname = get_dc_hostname(machine_creds, self.lp)
+        url = 'ldap://%s' % hostname
+        ldb = Ldb(url=url, session_info=system_session(),
+                  lp=self.lp, credentials=admin_creds)
+        # Write the dummy CA
+        confdn = 'CN=Public Key Services,CN=Services,CN=Configuration,%s' % base_dn
+        ca_cn = '%s-CA' % hostname.replace('.', '-')
+        certa_dn = 'CN=%s,CN=Certification Authorities,%s' % (ca_cn, confdn)
+        ldb.add({'dn': certa_dn,
+                 'objectClass': 'certificationAuthority',
+                 'authorityRevocationList': ['XXX'],
+                 'cACertificate': b'0\x82\x03u0\x82\x02]\xa0\x03\x02\x01\x02\x02\x10I',
+                 'certificateRevocationList': ['XXX'],
+                })
+        # Write the dummy pKIEnrollmentService
+        enroll_dn = 'CN=%s,CN=Enrollment Services,%s' % (ca_cn, confdn)
+        ldb.add({'dn': enroll_dn,
+                 'objectClass': 'pKIEnrollmentService',
+                 'cACertificate': b'0\x82\x03u0\x82\x02]\xa0\x03\x02\x01\x02\x02\x10I',
                  'certificateTemplates': ['Machine'],
                  'dNSHostName': hostname,
                 })
@@ -6809,8 +7086,25 @@ class GPOTests(tests.TestCase):
             self.assertTrue(os.path.exists(machine_crt),
                             'Machine certificate was not requested')
             machine_key = os.path.join(dname, '%s.Machine.key' % ca_cn)
-            self.assertTrue(os.path.exists(machine_crt),
+            self.assertTrue(os.path.exists(machine_key),
                             'Machine key was not generated')
+
+            # Subsequent apply should react to new certificate templates
+            os.environ['CEPCES_SUBMIT_SUPPORTED_TEMPLATES'] = 'Machine,Workstation'
+            self.addCleanup(os.environ.pop, 'CEPCES_SUBMIT_SUPPORTED_TEMPLATES')
+            ext.process_group_policy([], gpos, dname, dname)
+            self.assertTrue(os.path.exists(ca_crt),
+                            'Root CA certificate was not requested')
+            self.assertTrue(os.path.exists(machine_crt),
+                            'Machine certificate was not requested')
+            self.assertTrue(os.path.exists(machine_key),
+                            'Machine key was not generated')
+            workstation_crt = os.path.join(dname, '%s.Workstation.crt' % ca_cn)
+            self.assertTrue(os.path.exists(workstation_crt),
+                            'Workstation certificate was not requested')
+            workstation_key = os.path.join(dname, '%s.Workstation.key' % ca_cn)
+            self.assertTrue(os.path.exists(workstation_key),
+                            'Workstation key was not generated')
 
             # Verify RSOP does not fail
             ext.rsop([g for g in gpos if g.name == guid][0])
@@ -6818,6 +7112,38 @@ class GPOTests(tests.TestCase):
             # Check that a call to gpupdate --rsop also succeeds
             ret = rsop(self.lp)
             self.assertEqual(ret, 0, 'gpupdate --rsop failed!')
+
+            # Remove policy by staging pol file with auto-enroll unchecked
+            parser.load_xml(etree.fromstring(auto_enroll_unchecked_reg_pol.strip()))
+            ret = stage_file(reg_pol, ndr_pack(parser.pol_file))
+            self.assertTrue(ret, 'Could not create the target %s' % reg_pol)
+            ext.process_group_policy([], gpos, dname, dname)
+            self.assertFalse(os.path.exists(ca_crt),
+                            'Root CA certificate was not removed')
+            self.assertFalse(os.path.exists(machine_crt),
+                            'Machine certificate was not removed')
+            self.assertFalse(os.path.exists(machine_key),
+                            'Machine key was not removed')
+            self.assertFalse(os.path.exists(workstation_crt),
+                            'Workstation certificate was not removed')
+            self.assertFalse(os.path.exists(workstation_key),
+                            'Workstation key was not removed')
+
+            # Reapply policy by staging the enabled pol file
+            parser.load_xml(etree.fromstring(auto_enroll_reg_pol.strip()))
+            ret = stage_file(reg_pol, ndr_pack(parser.pol_file))
+            self.assertTrue(ret, 'Could not create the target %s' % reg_pol)
+            ext.process_group_policy([], gpos, dname, dname)
+            self.assertTrue(os.path.exists(ca_crt),
+                            'Root CA certificate was not requested')
+            self.assertTrue(os.path.exists(machine_crt),
+                            'Machine certificate was not requested')
+            self.assertTrue(os.path.exists(machine_key),
+                            'Machine key was not generated')
+            self.assertTrue(os.path.exists(workstation_crt),
+                            'Workstation certificate was not requested')
+            self.assertTrue(os.path.exists(workstation_key),
+                            'Workstation key was not generated')
 
             # Remove policy
             gp_db = store.get_gplog(machine_creds.get_username())
@@ -6827,13 +7153,19 @@ class GPOTests(tests.TestCase):
                             'Root CA certificate was not removed')
             self.assertFalse(os.path.exists(machine_crt),
                             'Machine certificate was not removed')
-            self.assertFalse(os.path.exists(machine_crt),
+            self.assertFalse(os.path.exists(machine_key),
                             'Machine key was not removed')
+            self.assertFalse(os.path.exists(workstation_crt),
+                            'Workstation certificate was not removed')
+            self.assertFalse(os.path.exists(workstation_key),
+                            'Workstation key was not removed')
             out, _ = Popen(['getcert', 'list-cas'], stdout=PIPE).communicate()
             self.assertNotIn(get_bytes(ca_cn), out, 'CA was not removed')
             out, _ = Popen(['getcert', 'list'], stdout=PIPE).communicate()
             self.assertNotIn(b'Machine', out,
                              'Machine certificate not removed')
+            self.assertNotIn(b'Workstation', out,
+                             'Workstation certificate not removed')
 
         # Remove the dummy CA, pKIEnrollmentService, and pKICertificateTemplate
         ldb.delete(certa_dn)
@@ -6845,9 +7177,12 @@ class GPOTests(tests.TestCase):
 
     def test_gp_user_scripts_ext(self):
         local_path = self.lp.cache_path('gpo_cache')
-        guid = '{31B2F340-016D-11D2-945F-00C04FB984F9}'
-        reg_pol = os.path.join(local_path, policies, guid,
+        guids = ['{31B2F340-016D-11D2-945F-00C04FB984F9}',
+                 '{6AC1786C-016F-11D2-945F-00C04FB984F9}']
+        reg_pol = os.path.join(local_path, policies, guids[0],
                                'USER/REGISTRY.POL')
+        reg_pol2 = os.path.join(local_path, policies, guids[1],
+                                'USER/REGISTRY.POL')
         cache_dir = self.lp.get('cache directory')
         store = GPOStorage(os.path.join(cache_dir, 'gpo.tdb'))
 
@@ -6880,6 +7215,18 @@ class GPOTests(tests.TestCase):
             ret = stage_file(reg_pol, ndr_pack(stage))
             self.assertTrue(ret, 'Could not create the target %s' % reg_pol)
 
+            # Stage the other Registry.pol
+            stage = preg.file()
+            e2 = preg.entry()
+            e2.keyname = keyname
+            e2.valuename = b'Software\\Policies\\Samba\\Unix Settings'
+            e2.type = 1
+            e2.data = b'echo this is a second policy'
+            stage.num_entries = 1
+            stage.entries = [e2]
+            ret = stage_file(reg_pol2, ndr_pack(stage))
+            self.assertTrue(ret, 'Could not create the target %s' % reg_pol2)
+
             # Process all gpos, intentionally skipping the privilege drop
             ext.process_group_policy([], gpos)
             # Dump the fake crontab setup for testing
@@ -6888,13 +7235,31 @@ class GPOTests(tests.TestCase):
             entry = b'%s %s' % (sections[keyname], e.data.encode())
             self.assertIn(entry, crontab,
                 'The crontab entry was not installed')
+            entry2 = b'%s %s' % (sections[keyname], e2.data.encode())
+            self.assertIn(entry2, crontab,
+                'The crontab entry was not installed')
+
+            # Force apply with removal of second GPO
+            gp_db = store.get_gplog(os.environ.get('DC_USERNAME'))
+            del_gpos = gp_db.get_applied_settings([guids[1]])
+            rgpos = [gpo for gpo in gpos if gpo.name != guids[1]]
+            ext.process_group_policy(del_gpos, rgpos)
+
+            # Dump the fake crontab setup for testing
+            p = Popen(['crontab', '-l'], stdout=PIPE)
+            crontab, _ = p.communicate()
+
+            # Ensure the first entry remains, and the second entry is removed
+            self.assertIn(entry, crontab,
+                'The first crontab entry was not found')
+            self.assertNotIn(entry2, crontab,
+                'The second crontab entry was still present')
 
             # Check that a call to gpupdate --rsop also succeeds
             ret = rsop(self.lp)
             self.assertEqual(ret, 0, 'gpupdate --rsop failed!')
 
             # Remove policy
-            gp_db = store.get_gplog(os.environ.get('DC_USERNAME'))
             del_gpos = get_deleted_gpos_list(gp_db, [])
             ext.process_group_policy(del_gpos, [])
             # Dump the fake crontab setup for testing
@@ -6903,8 +7268,9 @@ class GPOTests(tests.TestCase):
             self.assertNotIn(entry, crontab,
                 'Unapply failed to cleanup crontab entry')
 
-            # Unstage the Registry.pol file
+            # Unstage the Registry.pol files
             unstage_file(reg_pol)
+            unstage_file(reg_pol2)
 
     def test_gp_firefox_ext(self):
         local_path = self.lp.cache_path('gpo_cache')
@@ -6946,12 +7312,88 @@ class GPOTests(tests.TestCase):
                                  policy_data['policies'][name],
                                  'Policies were not applied')
 
+            # Check that modifying the policy will enforce the correct settings
+            entries = [e for e in parser.pol_file.entries
+                       if e.valuename != 'AppUpdateURL']
+            for e in entries:
+                if e.valuename == 'AppAutoUpdate':
+                    e.data = 0
+            parser.pol_file.entries = entries
+            parser.pol_file.num_entries = len(entries)
+            # Stage the Registry.pol file with altered test data
+            unstage_file(reg_pol)
+            ret = stage_file(reg_pol, ndr_pack(parser.pol_file))
+            self.assertTrue(ret, 'Could not create the target %s' % reg_pol)
+
+            # Enforce the altered policy
+            ext.process_group_policy([], gpos)
+
+            # Check that the App Update policy was altered
+            with open(policies_file, 'r') as r:
+                policy_data = json.load(r)
+            self.assertIn('policies', policy_data, 'Policies were not applied')
+            keys = list(expected_policy_data['policies'].keys())
+            keys.remove('AppUpdateURL')
+            keys.sort()
+            policy_keys = list(policy_data['policies'].keys())
+            policy_keys.sort()
+            self.assertEqual(keys, policy_keys, 'Firefox policies are incorrect')
+            for name in policy_data['policies'].keys():
+                self.assertNotEqual(name, 'AppUpdateURL',
+                                    'Failed to remove AppUpdateURL policy')
+                if name == 'AppAutoUpdate':
+                    self.assertEqual(False, policy_data['policies'][name],
+                                     'Failed to alter AppAutoUpdate policy')
+                    continue
+                self.assertEqual(expected_policy_data['policies'][name],
+                                 policy_data['policies'][name],
+                                 'Policies were not applied')
+
             # Verify RSOP does not fail
             ext.rsop([g for g in gpos if g.name == guid][0])
 
             # Check that a call to gpupdate --rsop also succeeds
             ret = rsop(self.lp)
             self.assertEqual(ret, 0, 'gpupdate --rsop failed!')
+
+            # Unapply the policy
+            gp_db = store.get_gplog(machine_creds.get_username())
+            del_gpos = get_deleted_gpos_list(gp_db, [])
+            ext.process_group_policy(del_gpos, [], dname)
+            if os.path.exists(policies_file):
+                data = json.load(open(policies_file, 'r'))
+                if 'policies' in data.keys():
+                    self.assertEqual(len(data['policies'].keys()), 0,
+                                     'The policy was not unapplied')
+
+            # Initialize the cache with old style existing policies,
+            # ensure they are overwritten.
+            old_cache = {'policies': {}}
+            ext.cache_add_attribute(guid, 'policies.json',
+                                    json.dumps(old_cache))
+            with open(policies_file, 'w') as w:
+                w.write(firefox_json_expected)
+
+            # Overwrite policy
+            ext.process_group_policy([], gpos)
+
+            # Check that policy was overwritten
+            with open(policies_file, 'r') as r:
+                policy_data = json.load(r)
+            self.assertIn('policies', policy_data, 'Policies were not applied')
+            policy_keys = list(policy_data['policies'].keys())
+            policy_keys.sort()
+            self.assertEqual(keys, policy_keys, 'Firefox policies are incorrect')
+            for name in policy_data['policies'].keys():
+                self.assertNotEqual(name, 'AppUpdateURL',
+                                    'Failed to remove AppUpdateURL policy')
+                if name == 'AppAutoUpdate':
+                    self.assertEqual(False, policy_data['policies'][name],
+                                     'Failed to overwrite AppAutoUpdate policy')
+                    continue
+                self.assertEqual(expected_policy_data['policies'][name],
+                                 policy_data['policies'][name],
+                                 'Policies were not applied')
 
             # Unapply the policy
             gp_db = store.get_gplog(machine_creds.get_username())
@@ -7125,9 +7567,33 @@ class GPOTests(tests.TestCase):
         cmd = [firewall_cmd, '--zone=work', '--list-rich-rules']
         p = Popen(cmd, stdout=PIPE, stderr=PIPE)
         out, err = p.communicate()
-        rule = b'rule family=ipv4 source address=172.25.1.7 ' + \
-               b'service name=ftp reject'
-        self.assertEqual(rule, out.strip(), 'Failed to set rich rule')
+        # Firewalld will report the rule one of two ways:
+        rules = [b'rule family=ipv4 source address=172.25.1.7 ' +
+                 b'service name=ftp reject',
+                 b'rule family="ipv4" source address="172.25.1.7" ' +
+                 b'service name="ftp" reject']
+        self.assertIn(out.strip(), rules, 'Failed to set rich rule')
+
+        # Check that modifying the policy will enforce the correct settings
+        entries = [e for e in parser.pol_file.entries if e.data != 'home']
+        self.assertEqual(len(entries), len(parser.pol_file.entries)-1,
+                         'Failed to remove the home zone entry')
+        parser.pol_file.entries = entries
+        parser.pol_file.num_entries = len(entries)
+        # Stage the Registry.pol file with altered test data
+        unstage_file(reg_pol)
+        ret = stage_file(reg_pol, ndr_pack(parser.pol_file))
+        self.assertTrue(ret, 'Could not create the target %s' % reg_pol)
+
+        # Enforce the altered policy
+        ext.process_group_policy([], gpos)
+
+        # Check that the home zone was removed
+        cmd = [firewall_cmd, '--get-zones']
+        p = Popen(cmd, stdout=PIPE, stderr=PIPE)
+        out, err = p.communicate()
+        self.assertIn(b'work', out, 'Failed to apply zones')
+        self.assertNotIn(b'home', out, 'Failed to apply zones')
 
         # Verify RSOP does not fail
         ext.rsop([g for g in gpos if g.name == guid][0])
@@ -7164,6 +7630,7 @@ class GPOTests(tests.TestCase):
         machine_creds.set_machine_account()
 
         # Initialize the group policy extension
+        cae.requests = dummy_requests()
         ext = cae.gp_cert_auto_enroll_ext(self.lp, machine_creds,
                                           machine_creds.get_username(), store)
 
@@ -7189,7 +7656,7 @@ class GPOTests(tests.TestCase):
         objectGUID = b'{%s}' % \
             cae.octet_string_to_objectGUID(res2[0]['objectGUID'][0]).upper().encode()
         parser = GPPolParser()
-        parser.load_xml(etree.fromstring(advanced_enroll_reg_pol.strip() % \
+        parser.load_xml(etree.fromstring(advanced_enroll_reg_pol.strip() %
             (objectGUID, objectGUID, objectGUID, objectGUID)))
         ret = stage_file(reg_pol, ndr_pack(parser.pol_file))
         self.assertTrue(ret, 'Could not create the target %s' % reg_pol)
@@ -7201,14 +7668,14 @@ class GPOTests(tests.TestCase):
         ldb.add({'dn': certa_dn,
                  'objectClass': 'certificationAuthority',
                  'authorityRevocationList': ['XXX'],
-                 'cACertificate': 'XXX',
+                 'cACertificate': b'0\x82\x03u0\x82\x02]\xa0\x03\x02\x01\x02\x02\x10I',
                  'certificateRevocationList': ['XXX'],
                 })
         # Write the dummy pKIEnrollmentService
         enroll_dn = 'CN=%s,CN=Enrollment Services,%s' % (ca_cn, confdn)
         ldb.add({'dn': enroll_dn,
                  'objectClass': 'pKIEnrollmentService',
-                 'cACertificate': 'XXXX',
+                 'cACertificate': b'0\x82\x03u0\x82\x02]\xa0\x03\x02\x01\x02\x02\x10I',
                  'certificateTemplates': ['Machine'],
                  'dNSHostName': hostname,
                 })
@@ -7230,8 +7697,27 @@ class GPOTests(tests.TestCase):
                 self.assertTrue(os.path.exists(machine_crt),
                                 'Machine certificate was not requested')
                 machine_key = os.path.join(dname, '%s.Machine.key' % ca)
-                self.assertTrue(os.path.exists(machine_crt),
+                self.assertTrue(os.path.exists(machine_key),
                                 'Machine key was not generated')
+
+            # Subsequent apply should react to new certificate templates
+            os.environ['CEPCES_SUBMIT_SUPPORTED_TEMPLATES'] = 'Machine,Workstation'
+            self.addCleanup(os.environ.pop, 'CEPCES_SUBMIT_SUPPORTED_TEMPLATES')
+            ext.process_group_policy([], gpos, dname, dname)
+            for ca in ca_list:
+                self.assertTrue(os.path.exists(ca_crt),
+                                'Root CA certificate was not requested')
+                self.assertTrue(os.path.exists(machine_crt),
+                                'Machine certificate was not requested')
+                self.assertTrue(os.path.exists(machine_key),
+                                'Machine key was not generated')
+
+                workstation_crt = os.path.join(dname, '%s.Workstation.crt' % ca)
+                self.assertTrue(os.path.exists(workstation_crt),
+                                'Workstation certificate was not requested')
+                workstation_key = os.path.join(dname, '%s.Workstation.key' % ca)
+                self.assertTrue(os.path.exists(workstation_key),
+                                'Workstation key was not generated')
 
             # Verify RSOP does not fail
             ext.rsop([g for g in gpos if g.name == guid][0])
@@ -7248,14 +7734,20 @@ class GPOTests(tests.TestCase):
                             'Root CA certificate was not removed')
             self.assertFalse(os.path.exists(machine_crt),
                             'Machine certificate was not removed')
-            self.assertFalse(os.path.exists(machine_crt),
+            self.assertFalse(os.path.exists(machine_key),
                             'Machine key was not removed')
+            self.assertFalse(os.path.exists(workstation_crt),
+                            'Workstation certificate was not removed')
+            self.assertFalse(os.path.exists(workstation_key),
+                            'Workstation key was not removed')
             out, _ = Popen(['getcert', 'list-cas'], stdout=PIPE).communicate()
             for ca in ca_list:
                 self.assertNotIn(get_bytes(ca), out, 'CA was not removed')
             out, _ = Popen(['getcert', 'list'], stdout=PIPE).communicate()
             self.assertNotIn(b'Machine', out,
                              'Machine certificate not removed')
+            self.assertNotIn(b'Workstation', out,
+                             'Workstation certificate not removed')
 
         # Remove the dummy CA, pKIEnrollmentService, and pKICertificateTemplate
         ldb.delete(certa_dn)
@@ -7391,9 +7883,12 @@ class GPOTests(tests.TestCase):
 
     def test_gp_user_centrify_crontab_ext(self):
         local_path = self.lp.cache_path('gpo_cache')
-        guid = '{31B2F340-016D-11D2-945F-00C04FB984F9}'
-        reg_pol = os.path.join(local_path, policies, guid,
+        guids = ['{31B2F340-016D-11D2-945F-00C04FB984F9}',
+                 '{6AC1786C-016F-11D2-945F-00C04FB984F9}']
+        reg_pol = os.path.join(local_path, policies, guids[0],
                                'USER/REGISTRY.POL')
+        reg_pol2 = os.path.join(local_path, policies, guids[1],
+                                'USER/REGISTRY.POL')
         cache_dir = self.lp.get('cache directory')
         store = GPOStorage(os.path.join(cache_dir, 'gpo.tdb'))
 
@@ -7422,6 +7917,19 @@ class GPOTests(tests.TestCase):
         ret = stage_file(reg_pol, ndr_pack(stage))
         self.assertTrue(ret, 'Could not create the target %s' % reg_pol)
 
+        # Stage the other Registry.pol
+        stage = preg.file()
+        e2 = preg.entry()
+        e2.keyname = \
+            b'Software\\Policies\\Centrify\\UnixSettings\\CrontabEntries'
+        e2.valuename = b'Command1'
+        e2.type = 1
+        e2.data = b'17 * * * * echo this is a second policy'
+        stage.num_entries = 1
+        stage.entries = [e2]
+        ret = stage_file(reg_pol2, ndr_pack(stage))
+        self.assertTrue(ret, 'Could not create the target %s' % reg_pol2)
+
         # Process all gpos, intentionally skipping the privilege drop
         ext.process_group_policy([], gpos)
         # Dump the fake crontab setup for testing
@@ -7429,13 +7937,30 @@ class GPOTests(tests.TestCase):
         crontab, _ = p.communicate()
         self.assertIn(get_bytes(e.data), crontab,
             'The crontab entry was not installed')
+        self.assertIn(get_bytes(e2.data), crontab,
+            'The crontab entry was not installed')
+
+        # Force apply with removal of second GPO
+        gp_db = store.get_gplog(os.environ.get('DC_USERNAME'))
+        del_gpos = gp_db.get_applied_settings([guids[1]])
+        gpos = [gpo for gpo in gpos if gpo.name != guids[1]]
+        ext.process_group_policy(del_gpos, gpos)
+
+        # Dump the fake crontab setup for testing
+        p = Popen(['crontab', '-l'], stdout=PIPE)
+        crontab, _ = p.communicate()
+
+        # Ensure the first entry remains, and the second entry is removed
+        self.assertIn(get_bytes(e.data), crontab,
+            'The first crontab entry was not found')
+        self.assertNotIn(get_bytes(e2.data), crontab,
+            'The second crontab entry was still present')
 
         # Check that a call to gpupdate --rsop also succeeds
         ret = rsop(self.lp)
         self.assertEqual(ret, 0, 'gpupdate --rsop failed!')
 
         # Remove policy
-        gp_db = store.get_gplog(os.environ.get('DC_USERNAME'))
         del_gpos = get_deleted_gpos_list(gp_db, [])
         ext.process_group_policy(del_gpos, [])
         # Dump the fake crontab setup for testing
@@ -7444,5 +7969,224 @@ class GPOTests(tests.TestCase):
         self.assertNotIn(get_bytes(e.data), crontab,
             'Unapply failed to cleanup crontab entry')
 
-        # Unstage the Registry.pol file
+        # Unstage the Registry.pol files
         unstage_file(reg_pol)
+        unstage_file(reg_pol2)
+
+    def test_gp_drive_maps_user_ext(self):
+        local_path = self.lp.cache_path('gpo_cache')
+        guid = '{31B2F340-016D-11D2-945F-00C04FB984F9}'
+        xml_path = os.path.join(local_path, policies, guid,
+                                'USER/PREFERENCES/DRIVES/DRIVES.XML')
+        cache_dir = self.lp.get('cache directory')
+        store = GPOStorage(os.path.join(cache_dir, 'gpo.tdb'))
+
+        machine_creds = Credentials()
+        machine_creds.guess(self.lp)
+        machine_creds.set_machine_account()
+
+        # Initialize the group policy extension
+        ext = gp_drive_maps_user_ext(self.lp, machine_creds,
+                                     os.environ.get('DC_USERNAME'), store)
+
+        ads = gpo.ADS_STRUCT(self.server, self.lp, machine_creds)
+        if ads.connect():
+            gpos = ads.get_gpo_list(machine_creds.get_username())
+
+        # Stage the Drives.xml file with test data
+        ret = stage_file(xml_path, drive_maps_xml)
+        self.assertTrue(ret, 'Could not create the target %s' % xml_path)
+
+        # Process all gpos, intentionally skipping the privilege drop
+        ext.process_group_policy([], gpos)
+        # Dump the fake crontab setup for testing
+        p = Popen(['crontab', '-l'], stdout=PIPE)
+        crontab, _ = p.communicate()
+        entry = b'@hourly gio mount smb://example.com/test'
+        self.assertIn(entry, crontab,
+            'The crontab entry was not installed')
+
+        # Check that a call to gpupdate --rsop also succeeds
+        ret = rsop(self.lp)
+        self.assertEqual(ret, 0, 'gpupdate --rsop failed!')
+
+        # Unstage the Drives.xml
+        unstage_file(xml_path)
+
+        # Modify the policy and ensure it is updated
+        xml_conf = etree.fromstring(drive_maps_xml.strip())
+        drives = xml_conf.findall('Drive')
+        props = drives[0].find('Properties')
+        props.attrib['action'] = 'D'
+        ret = stage_file(xml_path,
+                         etree.tostring(xml_conf, encoding='unicode'))
+        self.assertTrue(ret, 'Could not create the target %s' % xml_path)
+
+        # Process all gpos, intentionally skipping the privilege drop
+        ext.process_group_policy([], gpos)
+        # Dump the fake crontab setup for testing
+        p = Popen(['crontab', '-l'], stdout=PIPE)
+        crontab, _ = p.communicate()
+        self.assertNotIn(entry+b'\n', crontab,
+            'The old crontab entry was not removed')
+        entry = entry + b' --unmount'
+        self.assertIn(entry, crontab,
+            'The crontab entry was not installed')
+
+        # Remove policy
+        gp_db = store.get_gplog(os.environ.get('DC_USERNAME'))
+        del_gpos = get_deleted_gpos_list(gp_db, [])
+        ext.process_group_policy(del_gpos, [])
+        # Dump the fake crontab setup for testing
+        p = Popen(['crontab', '-l'], stdout=PIPE)
+        crontab, _ = p.communicate()
+        self.assertNotIn(entry, crontab,
+                         'Unapply failed to cleanup crontab entry')
+
+        # Unstage the Drives.xml
+        unstage_file(xml_path)
+
+        # Modify the policy to set 'run once', ensure there is no cron entry
+        xml_conf = etree.fromstring(drive_maps_xml.strip())
+        drives = xml_conf.findall('Drive')
+        filters = etree.SubElement(drives[0], 'Filters')
+        etree.SubElement(filters, 'FilterRunOnce')
+        ret = stage_file(xml_path,
+                         etree.tostring(xml_conf, encoding='unicode'))
+        self.assertTrue(ret, 'Could not create the target %s' % xml_path)
+
+        # Process all gpos, intentionally skipping the privilege drop
+        ext.process_group_policy([], gpos)
+        # Dump the fake crontab setup for testing
+        p = Popen(['crontab', '-l'], stdout=PIPE)
+        crontab, _ = p.communicate()
+        entry = b'@hourly gio mount smb://example.com/test'
+        self.assertNotIn(entry, crontab,
+            'The crontab entry was added despite run-once request')
+
+        # Remove policy
+        gp_db = store.get_gplog(os.environ.get('DC_USERNAME'))
+        del_gpos = get_deleted_gpos_list(gp_db, [])
+        ext.process_group_policy(del_gpos, [])
+
+        # Unstage the Drives.xml
+        unstage_file(xml_path)
+
+    def test_expand_pref_variables(self):
+        cache_path = self.lp.cache_path(os.path.join('gpo_cache'))
+        gpt_path = 'TEST'
+        username = 'test_uname'
+        test_vars = { 'AppDataDir': os.path.expanduser('~/.config'),
+                      'ComputerName': self.lp.get('netbios name'),
+                      'DesktopDir': os.path.expanduser('~/Desktop'),
+                      'DomainName': self.lp.get('realm'),
+                      'GptPath': os.path.join(cache_path,
+                                              check_safe_path(gpt_path).upper()),
+                      'LogonDomain': self.lp.get('realm'),
+                      'LogonUser': username,
+                      'SystemDrive': '/',
+                      'TempDir': '/tmp'
+        }
+        for exp_var, val in test_vars.items():
+            self.assertEqual(expand_pref_variables('%%%s%%' % exp_var,
+                                                   gpt_path,
+                                                   self.lp,
+                                                   username),
+                             val, 'Failed to expand variable %s' % exp_var)
+        # With the time variables, we can't test for an exact time, so let's do
+        # simple checks instead.
+        time_vars = ['DateTime', 'DateTimeEx', 'LocalTime',
+                     'LocalTimeEx', 'TimeStamp']
+        for time_var in time_vars:
+            self.assertNotEqual(expand_pref_variables('%%%s%%' % time_var,
+                                                      gpt_path,
+                                                      self.lp,
+                                                      username),
+                                None, 'Failed to expand variable %s' % time_var)
+
+        # Here we test to ensure undefined preference variables cause an error.
+        # The reason for testing these is to ensure we don't apply nonsense
+        # policies when they can't be defined. Also, these tests will fail if
+        # one of these is implemented in the future (forcing us to write a test
+        # anytime these are implemented).
+        undef_vars = ['BinaryComputerSid',
+                      'BinaryUserSid',
+                      'CommonAppdataDir',
+                      'CommonDesktopDir',
+                      'CommonFavoritesDir',
+                      'CommonProgramsDir',
+                      'CommonStartUpDir',
+                      'CurrentProccessId',
+                      'CurrentThreadId',
+                      'FavoritesDir',
+                      'GphPath',
+                      'GroupPolicyVersion',
+                      'LastDriveMapped',
+                      'LastError',
+                      'LastErrorText',
+                      'LdapComputerSid',
+                      'LdapUserSid',
+                      'LogonServer',
+                      'LogonUserSid',
+                      'MacAddress',
+                      'NetPlacesDir',
+                      'OsVersion',
+                      'ProgramFilesDir',
+                      'ProgramsDir',
+                      'RecentDocumentsDir',
+                      'ResultCode',
+                      'ResultText',
+                      'ReversedComputerSid',
+                      'ReversedUserSid',
+                      'SendToDir',
+                      'StartMenuDir',
+                      'StartUpDir',
+                      'SystemDir',
+                      'TraceFile',
+                      'WindowsDir'
+        ]
+        for undef_var in undef_vars:
+            try:
+                expand_pref_variables('%%%s%%' % undef_var, gpt_path, self.lp)
+            except NameError:
+                pass
+            else:
+                self.fail('Undefined variable %s caused no error' % undef_var)
+
+    def test_parser_roundtrip_empty_multi_sz(self):
+        with TemporaryDirectory() as dname:
+            reg_pol_xml = os.path.join(dname, 'REGISTRY.POL.XML')
+
+            parser = GPPolParser()
+            try:
+                parser.load_xml(etree.fromstring(empty_multi_sz_reg_pol.strip()))
+            except Exception as e:
+                self.fail(str(e))
+            parser.write_xml(reg_pol_xml)
+
+            with open(reg_pol_xml, 'r') as f:
+                pol_xml_data = f.read()
+
+            # Strip whitespace characters due to indentation differences
+            expected_xml_data = re.sub(r"\s+", "", empty_multi_sz_reg_pol.decode(), flags=re.UNICODE)
+            actual_xml_data = re.sub(r"\s+", "", pol_xml_data, flags=re.UNICODE)
+            self.assertEqual(expected_xml_data, actual_xml_data, 'XML data mismatch')
+
+    def test_parser_roundtrip_multiple_values_multi_sz(self):
+        with TemporaryDirectory() as dname:
+            reg_pol_xml = os.path.join(dname, 'REGISTRY.POL.XML')
+
+            parser = GPPolParser()
+            try:
+                parser.load_xml(etree.fromstring(multiple_values_multi_sz_reg_pol.strip()))
+            except Exception as e:
+                self.fail(str(e))
+            parser.write_xml(reg_pol_xml)
+
+            with open(reg_pol_xml, 'r') as f:
+                pol_xml_data = f.read()
+
+            # Strip whitespace characters due to indentation differences
+            expected_xml_data = re.sub(r"\s+", "", multiple_values_multi_sz_reg_pol.decode(), flags=re.UNICODE)
+            actual_xml_data = re.sub(r"\s+", "", pol_xml_data, flags=re.UNICODE)
+            self.assertEqual(expected_xml_data, actual_xml_data, 'XML data mismatch')
