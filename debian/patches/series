@@ -29,3 +29,5 @@ add-interface-for-libsmbclient.patch
 fix-smbtree-segfault.patch
 fix-smb-userpass-mount-fail.patch
 fix-statvfs-fail.patch
+CVE-2025-10230-tests.patch
+CVE-2025-10230-fix.patch
