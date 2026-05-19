@@ -39,6 +39,8 @@ with-snapper =
 
 config-args = \
 	--prefix=/usr \
+	--pythondir=/usr/lib/python3/dist-packages \
+	--pythonarchdir=/usr/lib/python3/dist-packages \
 	--enable-fhs \
 	--sysconfdir=/etc \
 	--localstatedir=/var \
@@ -235,8 +237,8 @@ override_dh_auto_install-arch:
 	# get list of files in build log
 	find debian/tmp
 	# Included in python-tevent?
-	rm debian/tmp/usr/lib/python*/*-packages/_tevent.*
-	rm debian/tmp/usr/lib/python*/*-packages/tevent.py
+	rm -f debian/tmp/usr/lib/python*/*-packages/_tevent.*
+	rm -f debian/tmp/usr/lib/python*/*-packages/tevent.py
 	# pam stuff
 	install -Dp -m0644 debian/winbind.pam-config debian/tmp/usr/share/pam-configs/winbind
 	mv debian/tmp/usr/lib/$(DEB_HOST_MULTIARCH)/libnss_* debian/tmp/lib/$(DEB_HOST_MULTIARCH)/
@@ -298,10 +300,11 @@ override_dh_installpam:
 ifpkg = $(if $(filter ${1},${build-pkgs}),${2})
 
 override_dh_installinit:
+	# Disable smbd nmbd samba-ad-dc auto-start
 ifneq (,$(filter samba, ${build-pkgs}))
-	dh_installinit -psamba --name smbd
-	dh_installinit -psamba --name nmbd --error-handler nmbd_error_handler
-	dh_installinit -psamba --name samba-ad-dc
+	dh_installinit -psamba --name smbd --no-start --no-enable
+	dh_installinit -psamba --name nmbd --error-handler nmbd_error_handler --no-start --no-enable
+	dh_installinit -psamba --name samba-ad-dc --no-start --no-enable
 endif
 	$(call ifpkg, winbind, dh_installinit -pwinbind)
 ifneq (,$(filter ctdb, ${build-pkgs}))
@@ -311,10 +314,11 @@ ifneq (,$(filter ctdb, ${build-pkgs}))
 endif
 
 override_dh_installsystemd:
+	# Disable smbd nmbd samba-ad-dc auto-start
 ifneq (,$(filter samba, ${build-pkgs}))
-	dh_installsystemd -psamba --name=smbd
-	dh_installsystemd -psamba --name=nmbd
-	dh_installsystemd -psamba --name=samba-ad-dc
+	dh_installsystemd -psamba --name=smbd --no-start --no-enable
+	dh_installsystemd -psamba --name=nmbd --no-start --no-enable
+	dh_installsystemd -psamba --name=samba-ad-dc --no-start --no-enable
 endif
 	$(call ifpkg, winbind, dh_installsystemd -pwinbind)
 	$(call ifpkg, ctdb, dh_installsystemd -pctdb --no-start --no-stop-on-upgrade)

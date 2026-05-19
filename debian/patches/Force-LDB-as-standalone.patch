@@ -14,12 +14,12 @@ index 57dfdd6fe6b..70a982da352 100644
 @@ -68,7 +68,7 @@ def configure(conf):
      #
      conf.CONFIG_PATH('LDB_MODULESDIR', conf.SUBST_ENV_VAR('MODULESDIR') + '/ldb')
- 
+
 -    conf.env.standalone_ldb = conf.IN_LAUNCH_DIR()
 +    conf.env.standalone_ldb = conf.IN_LAUNCH_DIR() or True
- 
+
      if not conf.env.standalone_ldb:
          max_ldb_version = [int(x) for x in VERSION.split(".")]
--- 
+--
 2.30.2
 

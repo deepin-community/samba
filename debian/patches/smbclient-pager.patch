@@ -18,5 +18,5 @@ index 7f97d4e..60a00d1 100644
 -#define PAGER "more"
 +#define PAGER "/usr/bin/pager"
  #endif
- 
+
  /* the size of the uid cache used to reduce valid user checks */

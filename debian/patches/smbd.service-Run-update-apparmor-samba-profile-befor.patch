@@ -20,6 +20,6 @@ index 18912ef0e98..6bb24861682 100644
  ExecStart=@SBINDIR@/smbd --foreground --no-process-group $SMBDOPTIONS
  ExecReload=/bin/kill -HUP $MAINPID
  LimitCORE=infinity
--- 
+--
 2.20.1
 

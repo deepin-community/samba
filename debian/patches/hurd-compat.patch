@@ -24,7 +24,7 @@ index 492b8807996..0bbfc2ed280 100644
 +#ifndef PIPE_BUF /* eg hurd does not define it */
 +# define PIPE_BUF 512 /* a safe bet */
 +#endif
- 
+
  static struct tevent_context *
  test_tevent_context_init(TALLOC_CTX *mem_ctx)
 diff --git a/lib/util/tests/tfork.c b/lib/util/tests/tfork.c
@@ -38,6 +38,6 @@ index 70ae97583fc..72288e03abb 100644
 +#ifndef SA_NOCLDWAIT
 +#define SA_NOCLDWAIT 0
 +#endif
- 
+
  static bool test_tfork_simple(struct torture_context *tctx)
  {

@@ -19,4 +19,4 @@ index 1d67ab58c15..858802635a2 100644
 +            self.outf.write("Exception in importing markdown: %s\n" % e)
 +            raise CommandError('Failed to import module markdown, please install python3-markdown package')
          from samba.schema import Schema
- 
+

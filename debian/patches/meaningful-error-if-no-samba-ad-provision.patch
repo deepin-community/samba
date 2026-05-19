@@ -19,5 +19,5 @@ index a6851b7e4c1..935918aa73f 100644
 +    if not os.path.exists(path):
 +        raise Exception("File [%s] not found. Please install samba-ad-provision package" % path)
 +    return path
- 
- 
+
+

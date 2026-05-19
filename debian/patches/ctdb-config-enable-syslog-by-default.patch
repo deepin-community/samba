@@ -35,8 +35,8 @@ index 8e1b3760973..def0803578f 100644
  	# Enable logging to syslog
 -	# location = syslog
 +	location = syslog
- 
+
  	# Default log level
 -	# log level = NOTICE
 +	log level = NOTICE
- 
+

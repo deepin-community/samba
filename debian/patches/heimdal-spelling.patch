@@ -27,7 +27,7 @@ index 1e6805a25e7..b5f325f9c8d 100644
      if (tls == NULL || (ar = tls->current) == NULL)
 -	heim_abort("no auto relase pool in place, would leak");
 +	heim_abort("no auto release pool in place, would leak");
- 
+
 diff --git a/third_party/heimdal/lib/gssapi/spnego/accept_sec_context.c b/third_party/heimdal/lib/gssapi/spnego/accept_sec_context.c
 index c4ac7455cf6..7a211900fd3 100644
 --- a/third_party/heimdal/lib/gssapi/spnego/accept_sec_context.c
@@ -113,7 +113,7 @@ index e7e8a1deaed..a846e4b7ece 100644
 --- a/third_party/heimdal/po/heimdal_krb5/de.po
 +++ b/third_party/heimdal/po/heimdal_krb5/de.po
 @@ -327,5 +327,4 @@ msgstr "Prüfsummentyp %s ist deaktiviert."
- 
+
 -# FIXME: s/confunder/confounder/
  #: lib/krb5/crypto.c:2958
 -msgid "Encrypted data shorter then checksum + confunder"

@@ -19,7 +19,7 @@ index 0d69bb8..e985857 100644
 +++ b/docs-xml/smbdotconf/misc/usersharemaxshares.xml
 @@ -9,5 +9,5 @@
  	</para>
- 
+
  </description>
 -<value type="default">0</value>
 +<value type="default">100</value>
@@ -29,13 +29,13 @@ index a221e87..c5367fd 100644
 --- a/lib/param/loadparm.c
 +++ b/lib/param/loadparm.c
 @@ -2966,6 +2966,8 @@ struct loadparm_context *loadparm_init(TALLOC_CTX *mem_ctx)
- 
+
  	lpcfg_do_global_parameter(lp_ctx, "init logon delay", "100");
- 
+
 +	lpcfg_do_global_parameter(lp_ctx, "usershare max shares", "100");
 +
  	lpcfg_do_global_parameter(lp_ctx, "usershare owner only", "yes");
- 
+
  	lpcfg_do_global_parameter(lp_ctx, "-valid", "yes");
 diff --git a/source3/param/loadparm.c b/source3/param/loadparm.c
 index d5b1c56..5cd0a18 100644

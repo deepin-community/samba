@@ -19,8 +19,8 @@ index c082c3b7a7d..523984487a3 100644
 -    conf.env.CTDB_RUNDIR = os.path.join(conf.env.LOCALSTATEDIR, 'run/ctdb')
 +    conf.env.CTDB_RUNDIR = '/run/ctdb'
      conf.env.CTDB_HELPER_BINDIR = os.path.join(conf.env.LIBEXECDIR, 'ctdb')
- 
+
      if Options.options.ctdb_logdir:
--- 
+--
 2.30.2
 

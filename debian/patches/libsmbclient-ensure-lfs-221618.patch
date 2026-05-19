@@ -43,8 +43,8 @@ index 84c98089251..1a6ea599cfa 100644
 +++ b/source3/include/libsmbclient.h
 @@ -82,4 +82,6 @@ extern "C" {
  #include <utime.h>
- 
+
 +typedef int smbc_off_t_should_be_at_least_64bits_use_LFS_CFLAGS[sizeof(off_t)-7];
 +
  #define SMBC_BASE_FD        10000 /* smallest file descriptor returned */
- 
+

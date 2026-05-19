@@ -33,7 +33,7 @@ index 4058d4834e7..8e31e74f2a6 100644
 @@ -5273,17 +5273,6 @@ static bool fruit_tmsize_do_dirent(vfs_handle_struct *handle,
  		return true;
  	}
- 
+
 -	/*
 -	 * Arithmetic on 32-bit systems may cause overflow, depending on
 -	 * size_t precision. First we check its unlikely, then we
@@ -46,8 +46,8 @@ index 4058d4834e7..8e31e74f2a6 100644
 -		return false;
 -	}
  	tm_size = (off_t)bandsize * (off_t)nbands;
- 
+
  	if (state->total_size + tm_size < state->total_size) {
--- 
+--
 2.30.2
 

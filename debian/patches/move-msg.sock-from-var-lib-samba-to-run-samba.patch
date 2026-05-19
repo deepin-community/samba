@@ -13,7 +13,7 @@ index 8641a9dad56..bf866e65e44 100644
 @@ -461,11 +461,6 @@ static int messaging_context_destructor(struct messaging_context *ctx)
  	return 0;
  }
- 
+
 -static const char *private_path(const char *name)
 -{
 -	return talloc_asprintf(talloc_tos(), "%s/%s", lp_private_dir(), name);
@@ -25,7 +25,7 @@ index 8641a9dad56..bf866e65e44 100644
 @@ -500,7 +495,7 @@ static NTSTATUS messaging_init_internal(TALLOC_CTX *mem_ctx,
  		return NT_STATUS_ACCESS_DENIED;
  	}
- 
+
 -	priv_path = private_path("msg.sock");
 +	priv_path = lock_path(talloc_tos(), "msg.sock");
  	if (priv_path == NULL) {
@@ -47,7 +47,7 @@ index a00c35be0d5..da641bc06aa 100644
 @@ -500,7 +500,7 @@ struct imessaging_context *imessaging_init(TALLOC_CTX *mem_ctx,
  		goto fail;
  	}
- 
+
 -	msg->sock_dir = lpcfg_private_path(msg, lp_ctx, "msg.sock");
 +	msg->sock_dir = lpcfg_lock_path(msg, lp_ctx, "msg.sock");
  	if (msg->sock_dir == NULL) {

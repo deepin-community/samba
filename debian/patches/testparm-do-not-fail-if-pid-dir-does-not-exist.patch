@@ -24,28 +24,28 @@ index b44dea1f141..6fecbb15303 100644
 +++ b/python/samba/netcmd/testparm.py
 @@ -142,14 +142,12 @@ class cmd_testparm(Command):
          lockdir = lp.get("lockdir")
- 
+
          if not os.path.isdir(lockdir):
 -            logger.error("lock directory %s does not exist", lockdir)
 -            valid = False
 +            logger.warning("lock directory %s does not exist", lockdir)
- 
+
          piddir = lp.get("pid directory")
- 
+
          if not os.path.isdir(piddir):
 -            logger.error("pid directory %s does not exist", piddir)
 -            valid = False
 +            logger.warning("pid directory %s does not exist", piddir)
- 
+
          winbind_separator = lp.get("winbind separator")
- 
+
 diff --git a/source3/utils/testparm.c b/source3/utils/testparm.c
 index 71bc4c2694e..4916a665c02 100644
 --- a/source3/utils/testparm.c
 +++ b/source3/utils/testparm.c
 @@ -326,9 +326,8 @@ static int do_global_checks(void)
  	}
- 
+
  	if (!directory_exist_stat(lp_lock_directory(), &st)) {
 -		fprintf(stderr, "ERROR: lock directory %s does not exist\n\n",
 +		fprintf(stderr, "WARNING: lock directory %s does not exist\n\n",
@@ -56,15 +56,15 @@ index 71bc4c2694e..4916a665c02 100644
  				"permissions 0755 for browsing to work\n\n",
 @@ -356,9 +355,8 @@ static int do_global_checks(void)
  	}
- 
+
  	if (!directory_exist_stat(lp_pid_directory(), &st)) {
 -		fprintf(stderr, "ERROR: pid directory %s does not exist\n\n",
 +		fprintf(stderr, "WARNING: pid directory %s does not exist\n\n",
  		       lp_pid_directory());
 -		ret = 1;
  	}
- 
+
  	if (lp_passdb_expand_explicit()) {
--- 
+--
 2.30.2
 
