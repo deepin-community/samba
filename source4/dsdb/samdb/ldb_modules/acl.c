@@ -220,7 +220,7 @@ static int acl_childClasses(struct ldb_module *module,
 		return LDB_ERR_OPERATIONS_ERROR;
 	}
 
-	/* Must remove any existing attribute, or else confusion reins */
+	/* Must remove any existing attribute, or else confusion reigns */
 	ldb_msg_remove_attr(msg, attrName);
 	ret = ldb_msg_add_empty(msg, attrName, 0, &allowedClasses);
 	if (ret != LDB_SUCCESS) {
@@ -286,7 +286,7 @@ static int acl_childClassesEffective(struct ldb_module *module,
 		return LDB_ERR_OPERATIONS_ERROR;
 	}
 
-	/* Must remove any existing attribute, or else confusion reins */
+	/* Must remove any existing attribute, or else confusion reigns */
 	ldb_msg_remove_attr(msg, "allowedChildClassesEffective");
 
 	oc_el = ldb_msg_find_element(sd_msg, "objectClass");
@@ -361,7 +361,7 @@ static int acl_sDRightsEffective(struct ldb_module *module,
 		as_system->critical = 0;
 	}
 
-	/* Must remove any existing attribute, or else confusion reins */
+	/* Must remove any existing attribute, or else confusion reigns */
 	ldb_msg_remove_attr(msg, "sDRightsEffective");
 	ret = ldb_msg_add_empty(msg, "sDRightsEffective", 0, &rightsEffective);
 	if (ret != LDB_SUCCESS) {
@@ -456,13 +456,13 @@ static int acl_validate_spn_value(TALLOC_CTX *mem_ctx,
 				  const char *netbios_name,
 				  const char *ntds_guid)
 {
-	int ret, princ_size;
+	krb5_error_code ret, princ_size;
 	krb5_context krb_ctx;
 	krb5_error_code kerr;
 	krb5_principal principal;
-	char *instanceName;
-	char *serviceType;
-	char *serviceName;
+	char *instanceName = NULL;
+	char *serviceType = NULL;
+	char *serviceName = NULL;
 	const char *spn_value_str = NULL;
 	size_t account_name_len;
 	const char *forest_name = samdb_forest_name(ldb, mem_ctx);
@@ -509,15 +509,22 @@ static int acl_validate_spn_value(TALLOC_CTX *mem_ctx,
 		goto fail;
 	}
 
-	instanceName = smb_krb5_principal_get_comp_string(mem_ctx, krb_ctx,
-							  principal, 1);
-	serviceType = smb_krb5_principal_get_comp_string(mem_ctx, krb_ctx,
-							 principal, 0);
+	ret = smb_krb5_principal_get_comp_string(mem_ctx, krb_ctx,
+							  principal, 1, &instanceName);
+	if (ret) {
+		goto fail;
+	}
+	ret = smb_krb5_principal_get_comp_string(mem_ctx, krb_ctx,
+						 principal, 0, &serviceType);
+	if (ret) {
+		goto fail;
+	}
 	if (krb5_princ_size(krb_ctx, principal) == 3) {
-		serviceName = smb_krb5_principal_get_comp_string(mem_ctx, krb_ctx,
-								 principal, 2);
-	} else {
-		serviceName = NULL;
+		ret = smb_krb5_principal_get_comp_string(mem_ctx, krb_ctx,
+							 principal, 2, &serviceName);
+		if (ret) {
+			goto fail;
+		}
 	}
 
 	if (serviceName) {
@@ -576,7 +583,7 @@ static int acl_validate_spn_value(TALLOC_CTX *mem_ctx,
 		goto success;
 	}
 	if (is_dc) {
-		const char *guid_str;
+		const char *guid_str = NULL;
 		guid_str = talloc_asprintf(mem_ctx,"%s._msdcs.%s",
 					   ntds_guid,
 					   forest_name);
@@ -638,7 +645,7 @@ static int acl_check_spn(TALLOC_CTX *mem_ctx,
 	const struct ldb_message *search_res = NULL;
 
 	static const char *acl_attrs[] = {
-		"samAccountName",
+		"sAMAccountName",
 		"dnsHostName",
 		"userAccountControl",
 		NULL
@@ -940,7 +947,7 @@ static int acl_check_dns_host_name(TALLOC_CTX *mem_ctx,
 		return LDB_ERR_OPERATIONS_ERROR;
 	}
 
-        /* Check if the account has objectclass 'computer' or 'server'. */
+	/* Check if the account has objectclass 'computer' or 'server'. */
 
 	schema = dsdb_get_schema(ldb, req);
 	if (schema == NULL) {
@@ -1181,7 +1188,6 @@ static int acl_add(struct ldb_module *module, struct ldb_request *req)
 	const struct dsdb_class *computer_objectclass = NULL;
 	const struct ldb_message_element *oc_el = NULL;
 	struct ldb_message_element sorted_oc_el;
-	struct ldb_control *as_system;
 	struct ldb_control *sd_ctrl = NULL;
 	struct ldb_message_element *el;
 	unsigned int instanceType = 0;
@@ -1198,12 +1204,8 @@ static int acl_add(struct ldb_module *module, struct ldb_request *req)
 		return ldb_next_request(module, req);
 	}
 
-	as_system = ldb_request_get_control(req, LDB_CONTROL_AS_SYSTEM_OID);
-	if (as_system != NULL) {
-		as_system->critical = 0;
-	}
-
-	if (dsdb_module_am_system(module) || as_system) {
+	if (dsdb_have_system_access(module, req, SYSTEM_CONTROL_STRIP_CRITICAL))
+	{
 		return ldb_next_request(module, req);
 	}
 
@@ -1872,7 +1874,6 @@ static int acl_modify(struct ldb_module *module, struct ldb_request *req)
 	struct ldb_result *acl_res;
 	struct security_descriptor *sd;
 	struct dom_sid *sid = NULL;
-	struct ldb_control *as_system;
 	struct ldb_control *is_undelete;
 	struct ldb_control *implicit_validated_write_control = NULL;
 	bool userPassword;
@@ -1894,11 +1895,6 @@ static int acl_modify(struct ldb_module *module, struct ldb_request *req)
 		return ldb_next_request(module, req);
 	}
 
-	as_system = ldb_request_get_control(req, LDB_CONTROL_AS_SYSTEM_OID);
-	if (as_system != NULL) {
-		as_system->critical = 0;
-	}
-
 	is_undelete = ldb_request_get_control(req, DSDB_CONTROL_RESTORE_TOMBSTONE_OID);
 
 	implicit_validated_write_control = ldb_request_get_control(
@@ -1911,7 +1907,8 @@ static int acl_modify(struct ldb_module *module, struct ldb_request *req)
 	if (msg->num_elements > 0) {
 		DEBUG(10, ("ldb:acl_modify: %s\n", msg->elements[0].name));
 	}
-	if (dsdb_module_am_system(module) || as_system) {
+	if (dsdb_have_system_access(module, req, SYSTEM_CONTROL_STRIP_CRITICAL))
+	{
 		return ldb_next_request(module, req);
 	}
 
@@ -2200,7 +2197,6 @@ static int acl_delete(struct ldb_module *module, struct ldb_request *req)
 	struct ldb_dn *parent;
 	struct ldb_context *ldb;
 	struct ldb_dn *nc_root;
-	struct ldb_control *as_system;
 	const struct dsdb_schema *schema;
 	const struct dsdb_class *objectclass;
 	struct security_descriptor *sd = NULL;
@@ -2217,12 +2213,8 @@ static int acl_delete(struct ldb_module *module, struct ldb_request *req)
 		return ldb_next_request(module, req);
 	}
 
-	as_system = ldb_request_get_control(req, LDB_CONTROL_AS_SYSTEM_OID);
-	if (as_system != NULL) {
-		as_system->critical = 0;
-	}
-
-	if (dsdb_module_am_system(module) || as_system) {
+	if (dsdb_have_system_access(module, req, SYSTEM_CONTROL_STRIP_CRITICAL))
+	{
 		return ldb_next_request(module, req);
 	}
 
@@ -2255,7 +2247,7 @@ static int acl_delete(struct ldb_module *module, struct ldb_request *req)
 				    DSDB_FLAG_NEXT_MODULE |
 				    DSDB_FLAG_AS_SYSTEM |
 				    DSDB_SEARCH_SHOW_RECYCLED, req);
-	/* we sould be able to find the parent */
+	/* we should be able to find the parent */
 	if (ret != LDB_SUCCESS) {
 		DEBUG(10,("acl: failed to find object %s\n",
 			  ldb_dn_get_linearized(req->op.rename.olddn)));
@@ -2377,7 +2369,6 @@ static int acl_rename(struct ldb_module *module, struct ldb_request *req)
 	struct dom_sid *sid = NULL;
 	struct ldb_result *acl_res;
 	struct ldb_dn *nc_root;
-	struct ldb_control *as_system;
 	struct ldb_control *is_undelete;
 	TALLOC_CTX *tmp_ctx;
 	const char *rdn_name;
@@ -2392,13 +2383,9 @@ static int acl_rename(struct ldb_module *module, struct ldb_request *req)
 		return ldb_next_request(module, req);
 	}
 
-	as_system = ldb_request_get_control(req, LDB_CONTROL_AS_SYSTEM_OID);
-	if (as_system != NULL) {
-		as_system->critical = 0;
-	}
-
 	DEBUG(10, ("ldb:acl_rename: %s\n", ldb_dn_get_linearized(req->op.rename.olddn)));
-	if (dsdb_module_am_system(module) || as_system) {
+	if (dsdb_have_system_access(module, req, SYSTEM_CONTROL_STRIP_CRITICAL))
+	{
 		return ldb_next_request(module, req);
 	}
 
@@ -2451,7 +2438,7 @@ static int acl_rename(struct ldb_module *module, struct ldb_request *req)
 				    DSDB_FLAG_NEXT_MODULE |
 				    DSDB_FLAG_AS_SYSTEM |
 				    DSDB_SEARCH_SHOW_RECYCLED, req);
-	/* we sould be able to find the parent */
+	/* we should be able to find the parent */
 	if (ret != LDB_SUCCESS) {
 		DEBUG(10,("acl: failed to find object %s\n",
 			  ldb_dn_get_linearized(req->op.rename.olddn)));
@@ -2846,7 +2833,6 @@ static int acl_search(struct ldb_module *module, struct ldb_request *req)
 static int acl_extended(struct ldb_module *module, struct ldb_request *req)
 {
 	struct ldb_context *ldb = ldb_module_get_ctx(module);
-	struct ldb_control *as_system = ldb_request_get_control(req, LDB_CONTROL_AS_SYSTEM_OID);
 
 	/* allow everybody to read the sequence number */
 	if (strcmp(req->op.extended.oid,
@@ -2854,8 +2840,11 @@ static int acl_extended(struct ldb_module *module, struct ldb_request *req)
 		return ldb_next_request(module, req);
 	}
 
-	if (dsdb_module_am_system(module) ||
-	    dsdb_module_am_administrator(module) || as_system) {
+	if (dsdb_have_system_access(module,
+				    req,
+				    SYSTEM_CONTROL_KEEP_CRITICAL) ||
+	    dsdb_module_am_administrator(module))
+	{
 		return ldb_next_request(module, req);
 	} else {
 		ldb_asprintf_errstring(ldb,

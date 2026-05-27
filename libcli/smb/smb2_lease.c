@@ -23,6 +23,11 @@
 #include "includes.h"
 #include "../libcli/smb/smb_common.h"
 
+/**
+ * Pull a lease off the wire into a struct smb2_lease.
+ *
+ * Note: the caller MUST zero initialize "lease".
+ **/
 ssize_t smb2_lease_pull(const uint8_t *buf, size_t len,
 			struct smb2_lease *lease)
 {
@@ -39,20 +44,23 @@ ssize_t smb2_lease_pull(const uint8_t *buf, size_t len,
 		return -1;
 	}
 
-	memcpy(&lease->lease_key, buf, 16);
-	lease->lease_state = IVAL(buf, 16);
-	lease->lease_flags = IVAL(buf, 20);
-	lease->lease_duration = BVAL(buf, 24);
+	lease->lease_key.data[0] = PULL_LE_U64(buf, 0);
+	lease->lease_key.data[1] = PULL_LE_U64(buf, 8);
+	lease->lease_state = PULL_LE_U32(buf, 16);
 	lease->lease_version = version;
 
 	switch (version) {
 	case 1:
-		ZERO_STRUCT(lease->parent_lease_key);
-		lease->lease_epoch = 0;
 		break;
 	case 2:
-		memcpy(&lease->parent_lease_key, buf+32, 16);
-		lease->lease_epoch = SVAL(buf, 48);
+		lease->lease_flags = PULL_LE_U32(buf, 20);
+		lease->lease_duration = PULL_LE_U64(buf, 24);
+		lease->lease_flags &= SMB2_LEASE_FLAG_PARENT_LEASE_KEY_SET;
+		if (lease->lease_flags & SMB2_LEASE_FLAG_PARENT_LEASE_KEY_SET) {
+			lease->parent_lease_key.data[0] = PULL_LE_U64(buf, 32);
+			lease->parent_lease_key.data[1] = PULL_LE_U64(buf, 40);
+		}
+		lease->lease_epoch = PULL_LE_U16(buf, 48);
 		break;
 	}
 
@@ -74,14 +82,17 @@ bool smb2_lease_push(const struct smb2_lease *lease, uint8_t *buf, size_t len)
 		return false;
 	}
 
-	memcpy(&buf[0], &lease->lease_key, 16);
-	SIVAL(buf, 16, lease->lease_state);
-	SIVAL(buf, 20, lease->lease_flags);
-	SBVAL(buf, 24, lease->lease_duration);
+	PUSH_LE_U64(buf,  0, lease->lease_key.data[0]);
+	PUSH_LE_U64(buf,  8, lease->lease_key.data[1]);
+	PUSH_LE_U32(buf, 16, lease->lease_state);
+	PUSH_LE_U32(buf, 20, lease->lease_flags);
+	PUSH_LE_U64(buf, 24, lease->lease_duration);
 
 	if (version == 2) {
-		memcpy(&buf[32], &lease->parent_lease_key, 16);
-		SIVAL(buf, 48, lease->lease_epoch);
+		PUSH_LE_U64(buf, 32, lease->parent_lease_key.data[0]);
+		PUSH_LE_U64(buf, 40, lease->parent_lease_key.data[1]);
+		PUSH_LE_U16(buf, 48, lease->lease_epoch);
+		PUSH_LE_U16(buf, 50, 0); /* reserved */
 	}
 
 	return true;

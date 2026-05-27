@@ -451,12 +451,6 @@ static int test_chroot(void)
 	return true;
 }
 
-static int test_bzero(void)
-{
-	/* FIXME: bzero */
-	return true;
-}
-
 static int test_strerror(void)
 {
 	/* FIXME */
@@ -854,14 +848,14 @@ static int test_socketpair(void)
 		return false;
 	}
 
-	if (write(sock[1], "automatisch", 12) == -1) {
+	if (write(sock[1], "automatisch", 12) != 12) {
 		printf("failure: socketpair [\n"
 			   "write() failed: %s\n"
 			   "]\n", strerror(errno));
 		return false;
 	}
 
-	if (read(sock[0], buf, 12) == -1) {
+	if (read(sock[0], buf, 12) != 12) {
 		printf("failure: socketpair [\n"
 			   "read() failed: %s\n"
 			   "]\n", strerror(errno));
@@ -1200,7 +1194,6 @@ bool torture_local_replace(struct torture_context *ctx)
 	ret &= test_seekdir();
 	ret &= test_dlopen();
 	ret &= test_chroot();
-	ret &= test_bzero();
 	ret &= test_strerror();
 	ret &= test_errno();
 	ret &= test_mkdtemp();

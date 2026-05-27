@@ -168,7 +168,7 @@
 	    <listitem>
 	      <para>Controls where the OS X resource fork is stored.</para>
 
-	      <para>Due to a spelling bug in all Samba versions older then
+	      <para>Due to a spelling bug in all Samba versions older than
 	      4.6.0, this option can also be given as
 	      <emphasis>fruit:ressource</emphasis>, ie with two s.</para>
 
@@ -329,17 +329,6 @@
 	  </varlistentry>
 
 	  <varlistentry>
-	    <term>fruit:posix_rename = yes | no</term>
-	    <listitem>
-	      <para>Whether to enable POSIX directory rename behaviour
-	      for OS X clients. Without this, directories can't be
-	      renamed if any client has any file inside it
-	      (recursive!) open.</para>
-	      <para>The default is <emphasis>yes</emphasis>.</para>
-	    </listitem>
-	  </varlistentry>
-
-	  <varlistentry>
 	    <term>readdir_attr:aapl_rsize = yes | no</term>
 	    <listitem>
 	      <para>Return resource fork size in SMB2 FIND responses.</para>
@@ -417,6 +406,57 @@
 	      files.</para>
 	      <para>The default is <emphasis>yes</emphasis>.</para>
 	    </listitem>
+	  </varlistentry>
+
+	  <varlistentry>
+	    <term>fruit:validate_afpinfo = yes | no</term>
+	    <listitem>
+	      <para>Apple clients use the AFP_AfpInfo stream to store structured
+	      file metadata. As part of the marshaled data stored in the stream
+	      the first eight bytes contain some header information. Apple's SMB
+	      server as well as Samba will validate this header bytes processing
+	      a client write request on this stream, and, if the validation
+	      fails, fail the write. While this validation is generally correct,
+	      in some data migration scenarios clients may try to migrate data
+	      from 3rd-party SMB servers to Samba servers where the header
+	      information is broken for whatever reason. To allow migration and
+	      header fix-up in these scenarios, the validation can be temporarily
+	      disabled by setting this option to <emphasis>no</emphasis>.</para>
+	      <para>The default is <emphasis>yes</emphasis>.</para>
+	    </listitem>
+	  </varlistentry>
+
+	  <varlistentry>
+	    <term>fruit:posix_opens = yes | no</term>
+	    <listitem>
+
+	      <para>When <parameter>fruit:posix_opens</parameter> is set to
+	      <parameter>yes</parameter>, vfs_fruit will internally translate
+	      all filesystem semantics to use POSIX behaviour instead of Windows
+	      behaviour. As Macs are closer to POSIX than Windows with regard
+	      to filesystem semantics, this improves access semantics for
+	      a lot of corner cases.</para>
+	      <para>The default is <emphasis>yes</emphasis>.</para>
+
+            </listitem>
+	  </varlistentry>
+
+	  <varlistentry>
+	    <term>fruit:ignore_zero_aces = yes | no</term>
+	    <listitem>
+
+	      <para>When <parameter>fruit:ignore_zero_aces</parameter> is
+	      enabled, attempts to modify filesystem permissions fail if the ACL
+	      sent over the wire contains no ACEs. This is completely valid
+	      client behaviour, but it means subsequently no further access is
+	      possible to the file, unless permissions get fixed by an
+	      administrator.</para>
+	      <para>This problematic behaviour has been reported for latest
+	      macOS versions and this new option allows to work around
+	      it.</para>
+	      <para>The default is <emphasis>yes</emphasis>.</para>
+
+            </listitem>
 	  </varlistentry>
 
 	</variablelist>

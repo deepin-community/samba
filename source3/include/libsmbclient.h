@@ -333,7 +333,7 @@ typedef struct _SMBCCTX SMBCCTX;
 /**@ingroup callback
  * Authentication callback function type (traditional method)
  *
- * Type for the the authentication function called by the library to
+ * Type for the authentication function called by the library to
  * obtain authentication credentials
  *
  * For kerberos support the function should just be called without
@@ -372,7 +372,7 @@ typedef void (*smbc_get_auth_data_fn)(const char *srv,
 /**@ingroup callback
  * Authentication callback function type (method that includes context)
  *
- * Type for the the authentication function called by the library to
+ * Type for the authentication function called by the library to
  * obtain authentication credentials
  *
  * For kerberos support the function should just be called without
@@ -588,7 +588,13 @@ smbc_getPort(SMBCCTX *c);
 void
 smbc_setPort(SMBCCTX *c, uint16_t port);
 
+/** Get whether to enable POSIX extensions if available */
+smbc_bool
+smbc_getOptionPosixExtensions(SMBCCTX *c);
 
+/** Set whether to enable POSIX extensions if available */
+void
+smbc_setOptionPosixExtensions(SMBCCTX *c, smbc_bool b);
 
 /***********************************
  * Getters and setters for OPTIONS *

@@ -91,6 +91,12 @@ static NTSTATUS check_samlogon(struct samlogon_state *samlogon_state,
 	struct netr_NetworkInfo ninfo;
 	struct netr_SamBaseInfo *base = NULL;
 	uint16_t validation_level = 0;
+	enum dcerpc_AuthType auth_type;
+	enum dcerpc_AuthLevel auth_level;
+
+	dcerpc_binding_handle_auth_info(samlogon_state->p->binding_handle,
+					&auth_type,
+					&auth_level);
 
 	samlogon_state->r.in.logon->network = &ninfo;
 	samlogon_state->r_ex.in.logon->network = &ninfo;
@@ -163,9 +169,22 @@ static NTSTATUS check_samlogon(struct samlogon_state *samlogon_state,
 			}
 			return status;
 		}
-		if (!r->out.return_authenticator ||
-		    !netlogon_creds_client_check(samlogon_state->creds, &r->out.return_authenticator->cred)) {
-			torture_comment(samlogon_state->tctx, "Credential chaining failed\n");
+		if (r->out.return_authenticator == NULL) {
+			status = NT_STATUS_INVALID_NETWORK_RESPONSE;
+			if (error_string) {
+				*error_string = strdup(nt_errstr(status));
+			}
+			return status;
+		}
+		status = netlogon_creds_client_verify(samlogon_state->creds,
+						      &r->out.return_authenticator->cred,
+						      auth_type,
+						      auth_level);
+		if (!NT_STATUS_IS_OK(status)) {
+			if (error_string) {
+				*error_string = strdup(nt_errstr(status));
+			}
+			return status;
 		}
 		if (!NT_STATUS_IS_OK(r->out.result)) {
 			if (error_string) {
@@ -178,7 +197,9 @@ static NTSTATUS check_samlogon(struct samlogon_state *samlogon_state,
 
 		status = netlogon_creds_decrypt_samlogon_validation(samlogon_state->creds,
 								    validation_level,
-								    r->out.validation);
+								    r->out.validation,
+								    auth_type,
+								    auth_level);
 		if (!NT_STATUS_IS_OK(status)) {
 			if (error_string) {
 				*error_string = strdup(nt_errstr(status));
@@ -218,7 +239,9 @@ static NTSTATUS check_samlogon(struct samlogon_state *samlogon_state,
 
 		status = netlogon_creds_decrypt_samlogon_validation(samlogon_state->creds,
 								    validation_level,
-								    r_ex->out.validation);
+								    r_ex->out.validation,
+								    auth_type,
+								    auth_level);
 		if (!NT_STATUS_IS_OK(status)) {
 			if (error_string) {
 				*error_string = strdup(nt_errstr(status));
@@ -251,9 +274,22 @@ static NTSTATUS check_samlogon(struct samlogon_state *samlogon_state,
 			}
 			return status;
 		}
-		if (!r_flags->out.return_authenticator ||
-		    !netlogon_creds_client_check(samlogon_state->creds, &r_flags->out.return_authenticator->cred)) {
-			torture_comment(samlogon_state->tctx, "Credential chaining failed\n");
+		if (r_flags->out.return_authenticator == NULL) {
+			status = NT_STATUS_INVALID_NETWORK_RESPONSE;
+			if (error_string) {
+				*error_string = strdup(nt_errstr(status));
+			}
+			return status;
+		}
+		status = netlogon_creds_client_verify(samlogon_state->creds,
+						      &r_flags->out.return_authenticator->cred,
+						      auth_type,
+						      auth_level);
+		if (!NT_STATUS_IS_OK(status)) {
+			if (error_string) {
+				*error_string = strdup(nt_errstr(status));
+			}
+			return status;
 		}
 		if (!NT_STATUS_IS_OK(r_flags->out.result)) {
 			if (error_string) {
@@ -266,7 +302,9 @@ static NTSTATUS check_samlogon(struct samlogon_state *samlogon_state,
 
 		status = netlogon_creds_decrypt_samlogon_validation(samlogon_state->creds,
 								    validation_level,
-								    r_flags->out.validation);
+								    r_flags->out.validation,
+								    auth_type,
+								    auth_level);
 		if (!NT_STATUS_IS_OK(status)) {
 			if (error_string) {
 				*error_string = strdup(nt_errstr(status));
@@ -781,7 +819,7 @@ static bool test_lmv2_ntlmv2_broken(struct samlogon_state *samlogon_state,
 			   sizeof(user_session_key)) != 0) {
 			if (memcmp(lmv2_session_key.data, user_session_key,
 				   sizeof(user_session_key)) == 0) {
-				torture_comment(samlogon_state->tctx, "USER (NTLMv2) Session Key expected, got LMv2 sessesion key instead:\n");
+				torture_comment(samlogon_state->tctx, "USER (NTLMv2) Session Key expected, got LMv2 session key instead:\n");
 				torture_comment(samlogon_state->tctx, "user_session_key:\n");
 				dump_data(1, user_session_key, 16);
 				torture_comment(samlogon_state->tctx, "expected:\n");
@@ -801,7 +839,7 @@ static bool test_lmv2_ntlmv2_broken(struct samlogon_state *samlogon_state,
 			   sizeof(lm_session_key)) != 0) {
 			if (memcmp(lmv2_session_key.data, lm_session_key,
 				   sizeof(lm_session_key)) == 0) {
-				torture_comment(samlogon_state->tctx, "LM (NTLMv2) Session Key expected, got LMv2 sessesion key instead:\n");
+				torture_comment(samlogon_state->tctx, "LM (NTLMv2) Session Key expected, got LMv2 session key instead:\n");
 				torture_comment(samlogon_state->tctx, "user_session_key:\n");
 				dump_data(1, lm_session_key, 8);
 				torture_comment(samlogon_state->tctx, "expected:\n");
@@ -1116,7 +1154,7 @@ static bool test_lmv2_ntlm_break_lm_no_dom(struct samlogon_state *samlogon_state
 }
 
 /*
- * Test the NTLM2 response (extra challenge in LM feild)
+ * Test the NTLM2 response (extra challenge in LM field)
  *
  * This test is the same as the 'break LM' test, but checks that the
  * server implements NTLM2 session security in the right place
@@ -1539,6 +1577,10 @@ bool test_InteractiveLogon(struct dcerpc_pipe *p, TALLOC_CTX *mem_ctx,
 	union netr_Validation validation;
 	uint8_t authoritative = 1;
 	struct dcerpc_binding_handle *b = p->binding_handle;
+	enum dcerpc_AuthType auth_type;
+	enum dcerpc_AuthLevel auth_level;
+
+	dcerpc_binding_handle_auth_info(b, &auth_type, &auth_level);
 
 	ZERO_STRUCT(a);
 	ZERO_STRUCT(r);
@@ -1574,13 +1616,15 @@ bool test_InteractiveLogon(struct dcerpc_pipe *p, TALLOC_CTX *mem_ctx,
 	}
 	E_md4hash(plain_pass, pinfo.ntpassword.hash);
 
-	if (creds->negotiate_flags & NETLOGON_NEG_ARCFOUR) {
-		netlogon_creds_arcfour_crypt(creds, pinfo.lmpassword.hash, 16);
-		netlogon_creds_arcfour_crypt(creds, pinfo.ntpassword.hash, 16);
-	} else {
-		netlogon_creds_des_encrypt(creds, &pinfo.lmpassword);
-		netlogon_creds_des_encrypt(creds, &pinfo.ntpassword);
-	}
+	status = netlogon_creds_encrypt_samlogon_logon(creds,
+						       r.in.logon_level,
+						       r.in.logon,
+						       auth_type,
+						       auth_level);
+	torture_assert_ntstatus_ok_goto(tctx,
+		status,
+		ret, failed,
+		"netlogon_creds_encrypt_samlogon_logon");
 
 	torture_comment(tctx, "Testing netr_LogonSamLogonWithFlags '%s' (Interactive Logon)\n", comment);
 
@@ -1596,9 +1640,11 @@ bool test_InteractiveLogon(struct dcerpc_pipe *p, TALLOC_CTX *mem_ctx,
 		torture_fail(tctx, "no authenticator returned");
 	}
 
-	torture_assert_goto(tctx,
-		netlogon_creds_client_check(creds, &r.out.return_authenticator->cred),
-		ret, failed,
+	status = netlogon_creds_client_verify(creds,
+					      &r.out.return_authenticator->cred,
+					      auth_type,
+					      auth_level);
+	torture_assert_ntstatus_ok_goto(tctx, status, ret, failed,
 		"Credential chaining failed\n");
 
 	torture_assert_ntstatus_equal(tctx, r.out.result, expected_error,
@@ -1838,7 +1884,7 @@ bool torture_rpc_samlogon(struct torture_context *torture)
 				     creds = cli_credentials_get_netlogon_creds(machine_credentials),
 				     ret,
 				     failed,
-				     "obtaining credentails");
+				     "obtaining credentials");
 
 	{
 
@@ -2066,11 +2112,17 @@ bool torture_rpc_samlogon(struct torture_context *torture)
 		 * session key encryption) */
 
 		for (i=0; i < ARRAY_SIZE(credential_flags); i++) {
-			/* TODO:  Somehow we lost setting up the different credential flags here! */
-
 			torture_comment(torture,
 					"Testing with flags: 0x%08x\n",
 					credential_flags[i]);
+
+			ret = test_SetupCredentials2(p,
+						     torture,
+						     credential_flags[i],
+						     machine_credentials,
+						     SEC_CHAN_WKSTA,
+						     &creds);
+			torture_assert_goto(torture, ret, ret, failed, "test_SetupCredentials2()\n");
 
 			torture_assert_goto(torture,
 					    test_InteractiveLogon(p, mem_ctx, torture, creds,
@@ -2106,6 +2158,61 @@ bool torture_rpc_samlogon(struct torture_context *torture)
 			}
 		}
 
+		torture_comment(torture, "Testing with krb5\n");
+
+		cli_credentials_set_netlogon_creds(machine_credentials, NULL);
+		status = dcerpc_binding_set_flags(b,
+						  DCERPC_SCHANNEL |
+						  DCERPC_SIGN | DCERPC_SEAL |
+						  DCERPC_SCHANNEL_KRB5,
+						  DCERPC_AUTH_OPTIONS);
+		torture_assert_ntstatus_ok(torture, status, "set flags");
+
+		status = dcerpc_pipe_connect_b(mem_ctx, &p, b,
+					       &ndr_table_netlogon,
+					       machine_credentials, torture->ev, torture->lp_ctx);
+
+		torture_assert_ntstatus_ok_goto(torture, status, ret, failed,
+			talloc_asprintf(torture, "RPC pipe connect as domain member failed: %s\n", nt_errstr(status)));
+
+		torture_assert_not_null_goto(torture,
+					     creds = cli_credentials_get_netlogon_creds(machine_credentials),
+					     ret,
+					     failed,
+					     "obtaining credentials");
+
+		torture_assert_goto(torture,
+				    test_InteractiveLogon(p, mem_ctx, torture, creds,
+							  usercreds[0].comment,
+							  TEST_MACHINE_NAME,
+							  usercreds[0].domain,
+							  usercreds[0].username,
+							  usercreds[0].password,
+							  usercreds[0].parameter_control,
+							  usercreds[0].expected_interactive_error),
+				    ret,
+				    failed,
+				    talloc_asprintf(mem_ctx,
+						    "Testing InteractiveLogon with krb5\n"
+						    ));
+
+		if (usercreds[0].network_login) {
+			torture_assert_goto(torture,
+					    test_SamLogon(p, mem_ctx, torture, creds,
+							  usercreds[0].comment,
+							  usercreds[0].domain,
+							  usercreds[0].username,
+							  usercreds[0].password,
+							  usercreds[0].parameter_control,
+							  usercreds[0].expected_network_error,
+							  usercreds[0].old_password,
+							  1),
+					    ret,
+					    failed,
+					    talloc_asprintf(mem_ctx,
+							    "Testing SamLogon with krb5\n"
+							    ));
+		}
 	}
 failed:
 	torture_assert(torture, handle_minPwdAge(torture, mem_ctx, false),

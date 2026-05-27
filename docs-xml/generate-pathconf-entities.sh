@@ -17,5 +17,7 @@ echo "
 <!ENTITY pathconfig.NTP_SIGND_SOCKET_DIR '\${prefix}/var/lib/ntp_signd'>
 <!ENTITY pathconfig.MITKDCPATH           '\${prefix}/sbin/krb5kdc'>
 <!ENTITY pathconfig.SAMBA_DATADIR        '\${prefix}/var/samba'>
+<!ENTITY pathconfig.CTDB_DATADIR         '\${prefix}/share/ctdb'>
 <!ENTITY pathconfig.CONFIGFILE           '\${prefix}/etc/smb.conf'>
+<!ENTITY pathconfig.HIMMELBLAUD_HSM_PIN_PATH '\${prefix}/var/lib/himmelblaud/hsm-pin'>
 "

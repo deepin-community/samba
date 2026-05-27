@@ -84,7 +84,7 @@ struct cli_state;
 struct tevent_req *rpc_transport_np_init_send(TALLOC_CTX *mem_ctx,
 					      struct tevent_context *ev,
 					      struct cli_state *cli,
-					      const struct ndr_interface_table *table);
+					      const char *pipe_name);
 NTSTATUS rpc_transport_np_init_recv(struct tevent_req *req,
 				    TALLOC_CTX *mem_ctx,
 				    struct rpc_cli_transport **presult);
@@ -99,5 +99,6 @@ NTSTATUS rpc_transport_sock_init(TALLOC_CTX *mem_ctx, int fd,
 NTSTATUS rpc_transport_tstream_init(TALLOC_CTX *mem_ctx,
 				struct tstream_context **stream,
 				struct rpc_cli_transport **presult);
-
+struct tstream_context *rpc_transport_get_tstream(
+		struct rpc_cli_transport *transport);
 #endif /* _RPC_CLIENT_RPC_TRANSPORT_H_ */

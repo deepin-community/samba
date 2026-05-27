@@ -1,0 +1,6 @@
+# begin-remove-after: trixie
+diversion-for-unknown-file lib/systemd/system/samba-ad-dc.service [preinst:*]
+systemd-diversion lib/systemd/system/samba-ad-dc.service [preinst:*]
+# Breaks+Replaces upgraded to Conflicts for DEP17 + /usr-move
+conflicts-with-version samba (<< 2:4.20.1+dfsg-2~)
+# end-remove-after

@@ -134,7 +134,6 @@ void ndr_print_winbindd_domain(struct ndr_print *ndr,
 	ndr_print_lsa_TrustType(ndr, "domain_type", r->domain_type);
 	ndr_print_lsa_TrustAttributes(ndr, "domain_trust_attribs", r->domain_trust_attribs);
 	ndr_print_bool(ndr, "initialized", r->initialized);
-	ndr_print_bool(ndr, "native_mode", r->native_mode);
 	ndr_print_bool(ndr, "active_directory", r->active_directory);
 	ndr_print_bool(ndr, "primary", r->primary);
 	ndr_print_bool(ndr, "internal", r->internal);
@@ -154,7 +153,7 @@ void ndr_print_winbindd_domain(struct ndr_print *ndr,
 	ndr_print_uint32(ndr, "sequence_number", r->sequence_number);
 	ndr_print_NTSTATUS(ndr, "last_status", r->last_status);
 	ndr_print_winbindd_cm_conn(ndr, "conn", &r->conn);
-	for (i=0; i<lp_winbind_max_domain_connections(); i++) {
+	for (i=0; i<talloc_array_length(r->children); i++) {
 		ndr_print_winbindd_child(ndr, "children", &r->children[i]);
 	}
 	ndr_print_ptr(ndr, "check_online_event", r->check_online_event);

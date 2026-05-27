@@ -24,12 +24,14 @@ type mail >/dev/null 2>&1 || exit 0
 	echo "was called for PID $1 ($BINARYNAME)."
 	echo
 
-	echo "This means there was a problem with the program, such as a segfault."
+	echo "This means the program found itself in a state from which it could not continue."
+	echo "It could be caused by misconfiguration, a segfault, memory allocation failure,"
+	echo "data corruption, or some other problem."
 
 	if [ -z "$BINARYNAME" ]; then
 		echo "However, the executable could not be found for process $1."
-		echo "It may have died unexpectedly, or you may not have permission to debug"
-		echo "the process."
+		echo "It may have died unexpectedly, or this script may not have permission to"
+		echo "debug the process."
 		exit 1
 	fi
 
@@ -43,7 +45,7 @@ type mail >/dev/null 2>&1 || exit 0
 
 	echo "Below is a backtrace for this process generated with gdb, which shows"
 	echo "the state of the program at the time the error occurred.  The Samba log"
-	echo "files may contain additional information about the problem."
+	echo "files should contain additional information about the problem."
 	echo 
 	echo "If the problem persists, you are encouraged to first install the"
 	echo "samba-dbgsym package, which contains the debugging symbols for the Samba"

@@ -1,4 +1,4 @@
-/* 
+/*
    Unix SMB/CIFS implementation.
    SMB transaction2 handling
 
@@ -11,12 +11,12 @@
    it under the terms of the GNU General Public License as published by
    the Free Software Foundation; either version 3 of the License, or
    (at your option) any later version.
-   
+
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
    GNU General Public License for more details.
-   
+
    You should have received a copy of the GNU General Public License
    along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
@@ -208,7 +208,7 @@ Byte offset   Type     name                description
 #define SMB_QUERY_FS_DEVICE_INFO        0x104
 #define SMB_QUERY_FS_ATTRIBUTE_INFO     0x105
 #if 0
-#define SMB_QUERY_FS_QUOTA_INFO		
+#define SMB_QUERY_FS_QUOTA_INFO
 #endif
 
 #define l2_vol_fdateCreation 0
@@ -341,7 +341,7 @@ Byte offset   Type     name                description
 #define FSCC_FILE_MAXIMUM_INFORMATION			55
 
 /* As yet undefined FSCC_ code for POSIX info level. */
-#define SMB2_FILE_POSIX_INFORMATION			100
+#define FSCC_FILE_POSIX_INFORMATION			100
 
 /* MS-FSCC 2.4 File System Information Classes */
 
@@ -354,6 +354,9 @@ Byte offset   Type     name                description
 #define FSCC_FS_FULL_SIZE_INFORMATION			7
 #define FSCC_FS_OBJECTID_INFORMATION			8
 #define FSCC_FS_SECTOR_SIZE_INFORMATION			11
+
+/* As yet undefined FSCC_ code for POSIX info level. */
+#define FSCC_FS_POSIX_INFORMATION			100
 
 /* NT passthrough levels... */
 
@@ -411,8 +414,6 @@ Byte offset   Type     name                description
 #define SMB2_FILE_RENAME_INFORMATION_INTERNAL		(FSCC_FILE_RENAME_INFORMATION + SMB2_INFO_SPECIAL)
 #define SMB2_FILE_FULL_EA_INFORMATION			(FSCC_FILE_FULL_EA_INFORMATION + SMB2_INFO_SPECIAL)
 #define SMB2_FILE_ALL_INFORMATION			(FSCC_FILE_ALL_INFORMATION + SMB2_INFO_SPECIAL)
-#define SMB2_FILE_POSIX_INFORMATION_INTERNAL		(SMB2_FILE_POSIX_INFORMATION + SMB2_INFO_SPECIAL)
-#define SMB2_FS_POSIX_INFORMATION_INTERNAL		1100
 
 /* NT passthrough levels for qfsinfo. */
 

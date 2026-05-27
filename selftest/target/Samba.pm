@@ -16,11 +16,13 @@ use IO::Poll qw(POLLIN);
 sub new($$$$$) {
 	my ($classname, $bindir, $srcdir, $server_maxtime,
 	    $opt_socket_wrapper_pcap, $opt_socket_wrapper_keep_pcap,
+	    $opt_libpam_matrix_so_path,
 	    $default_ldb_backend) = @_;
 
 	my $self = {
 	    opt_socket_wrapper_pcap => $opt_socket_wrapper_pcap,
 	    opt_socket_wrapper_keep_pcap => $opt_socket_wrapper_keep_pcap,
+	    opt_libpam_matrix_so_path => $opt_libpam_matrix_so_path,
 	};
 	$self->{samba3} = new Samba3($self, $bindir, $srcdir, $server_maxtime);
 	$self->{samba4} = new Samba4($self, $bindir, $srcdir, $server_maxtime, $default_ldb_backend);
@@ -176,6 +178,14 @@ sub nss_wrapper_winbind_so_path($) {
 	    $ret = abs_path($ret);
 	}
 	return $ret;
+}
+
+sub pam_matrix_so_path($) {
+	my ($self) = @_;
+	my $SambaCtx = $self;
+	$SambaCtx = $self->{SambaCtx} if defined($self->{SambaCtx});
+
+	return $SambaCtx->{opt_libpam_matrix_so_path};
 }
 
 sub copy_file_content($$)
@@ -342,10 +352,12 @@ sub mk_krb5_conf($$)
 
 	if (defined($ENV{MITKRB5})) {
 		print KRB5CONF "
- # Set the grace clocskew to 5 seconds
+ # Set the grace clockskew to 5 seconds
  # This is especially required by samba3.raw.session krb5 and
  # reauth tests when not using Heimdal
  clockskew = 5
+ # To allow the FL 2000 DC to still work for now
+ allow_rc4 = yes
     ";
 	}
 
@@ -793,6 +805,20 @@ sub get_env_for_process
 	if (defined($env_vars->{OPENSSL_FORCE_FIPS_MODE})) {
 		$proc_envs->{OPENSSL_FORCE_FIPS_MODE} = $env_vars->{OPENSSL_FORCE_FIPS_MODE};
 	}
+
+	if (defined($env_vars->{PAM_WRAPPER})) {
+		$proc_envs->{PAM_WRAPPER} = $env_vars->{PAM_WRAPPER};
+	}
+	if (defined($env_vars->{PAM_WRAPPER_KEEP_DIR})) {
+		$proc_envs->{PAM_WRAPPER_KEEP_DIR} = $env_vars->{PAM_WRAPPER_KEEP_DIR};
+	}
+	if (defined($env_vars->{PAM_WRAPPER_SERVICE_DIR})) {
+		$proc_envs->{PAM_WRAPPER_SERVICE_DIR} = $env_vars->{PAM_WRAPPER_SERVICE_DIR};
+	}
+	if (defined($env_vars->{PAM_WRAPPER_DEBUGLEVEL})) {
+		$proc_envs->{PAM_WRAPPER_DEBUGLEVEL} = $env_vars->{PAM_WRAPPER_DEBUGLEVEL};
+	}
+
 	return $proc_envs;
 }
 
@@ -919,6 +945,13 @@ my @exported_envvars = (
 	"TRUST_E_BOTH_DOMAIN",
 	"TRUST_E_BOTH_REALM",
 
+	# stuff related to a trusted NT4 domain,
+	# used for one-way trust fl2008r2dc <- nt4_dc
+	"NT4_TRUST_SERVER",
+	"NT4_TRUST_SERVER_IP",
+	"NT4_TRUST_DOMAIN",
+	"NT4_TRUST_DOMSID",
+
 	# domain controller stuff
 	"DC_SERVER",
 	"DC_SERVER_IP",
@@ -935,7 +968,7 @@ my @exported_envvars = (
 	"SAMSID",
 
 	# only use these 2 as a last resort. Some tests need to test both client-
-	# side and server-side. In this case, run as default client, ans access
+	# side and server-side. In this case, run as default client, and access
 	# server's smb.conf as needed, typically using:
 	#  param.LoadParm(filename_for_non_global_lp=os.environ['SERVERCONFFILE'])
 	"SERVERCONFFILE",
@@ -984,6 +1017,8 @@ my @exported_envvars = (
 	"RESOLV_WRAPPER_HOSTS",
 
 	# ctdb stuff
+	"CTDB_TEST_MODE",
+	"CTDB_PREFIX",
 	"NUM_NODES",
 	"CTDB_BASE",
 	"CTDB_SOCKET",

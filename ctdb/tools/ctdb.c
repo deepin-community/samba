@@ -33,6 +33,7 @@
 #include "version.h"
 #include "lib/util/debug.h"
 #include "lib/util/samba_util.h"
+#include "lib/util/util_file.h"
 #include "lib/util/sys_rw.h"
 #include "lib/util/smb_strtox.h"
 
@@ -46,6 +47,9 @@
 #include "common/system_socket.h"
 #include "client/client.h"
 #include "client/client_sync.h"
+#include "conf/cluster_conf.h"
+#include "conf/ctdb_config.h"
+#include "conf/node.h"
 
 #define TIMEOUT()	timeval_current_ofs(options.timelimit, 0)
 
@@ -70,6 +74,7 @@ static struct {
 	int printrecordflags;
 } options;
 
+struct conf_context *config_ctx;
 static poptContext pc;
 
 struct ctdb_context {
@@ -81,6 +86,16 @@ struct ctdb_context {
 };
 
 static void usage(const char *command);
+
+static int disable_takeover_runs(TALLOC_CTX *mem_ctx,
+				 struct ctdb_context *ctdb,
+				 uint32_t timeout,
+				 uint32_t *pnn_list,
+				 int count);
+static int send_ipreallocated_control_to_nodes(TALLOC_CTX *mem_ctx,
+					       struct ctdb_context *ctdb,
+					       uint32_t *pnn_list,
+					       int count);
 
 /*
  * Utility Functions
@@ -452,125 +467,19 @@ static bool ctdb_same_ip(ctdb_sock_addr *ip1, ctdb_sock_addr *ip2)
 	return ret;
 }
 
-/* Append a node to a node map with given address and flags */
-static bool node_map_add(struct ctdb_node_map *nodemap,
-			 const char *nstr, uint32_t flags)
-{
-	ctdb_sock_addr addr;
-	uint32_t num;
-	struct ctdb_node_and_flags *n;
-	int ret;
-
-	ret = ctdb_sock_addr_from_string(nstr, &addr, false);
-	if (ret != 0) {
-		fprintf(stderr, "Invalid IP address %s\n", nstr);
-		return false;
-	}
-
-	num = nodemap->num;
-	nodemap->node = talloc_realloc(nodemap, nodemap->node,
-				       struct ctdb_node_and_flags, num+1);
-	if (nodemap->node == NULL) {
-		return false;
-	}
-
-	n = &nodemap->node[num];
-	n->addr = addr;
-	n->pnn = num;
-	n->flags = flags;
-
-	nodemap->num = num+1;
-	return true;
-}
-
-/* Read a nodes file into a node map */
-static struct ctdb_node_map *ctdb_read_nodes_file(TALLOC_CTX *mem_ctx,
-						  const char *nlist)
-{
-	char **lines;
-	int nlines;
-	int i;
-	struct ctdb_node_map *nodemap;
-
-	nodemap = talloc_zero(mem_ctx, struct ctdb_node_map);
-	if (nodemap == NULL) {
-		return NULL;
-	}
-
-	lines = file_lines_load(nlist, &nlines, 0, mem_ctx);
-	if (lines == NULL) {
-		return NULL;
-	}
-
-	while (nlines > 0 && strcmp(lines[nlines-1], "") == 0) {
-		nlines--;
-	}
-
-	for (i=0; i<nlines; i++) {
-		char *node;
-		uint32_t flags;
-		size_t len;
-
-		node = lines[i];
-		/* strip leading spaces */
-		while((*node == ' ') || (*node == '\t')) {
-			node++;
-		}
-
-		len = strlen(node);
-
-		/* strip trailing spaces */
-		while ((len > 1) &&
-		       ((node[len-1] == ' ') || (node[len-1] == '\t')))
-		{
-			node[len-1] = '\0';
-			len--;
-		}
-
-		if (len == 0) {
-			continue;
-		}
-		if (*node == '#') {
-			/* A "deleted" node is a node that is
-			   commented out in the nodes file.  This is
-			   used instead of removing a line, which
-			   would cause subsequent nodes to change
-			   their PNN. */
-			flags = NODE_FLAGS_DELETED;
-			node = discard_const("0.0.0.0");
-		} else {
-			flags = 0;
-		}
-		if (! node_map_add(nodemap, node, flags)) {
-			talloc_free(lines);
-			TALLOC_FREE(nodemap);
-			return NULL;
-		}
-	}
-
-	talloc_free(lines);
-	return nodemap;
-}
-
-static struct ctdb_node_map *read_nodes_file(TALLOC_CTX *mem_ctx, uint32_t pnn)
+static struct ctdb_node_map *read_nodes(TALLOC_CTX *mem_ctx, uint32_t pnn)
 {
 	struct ctdb_node_map *nodemap;
-	const char *nodes_list = NULL;
-
-	const char *basedir = getenv("CTDB_BASE");
-	if (basedir == NULL) {
-		basedir = CTDB_ETCDIR;
-	}
-	nodes_list = talloc_asprintf(mem_ctx, "%s/nodes", basedir);
-	if (nodes_list == NULL) {
+	const char *nodes_source = cluster_conf_nodes_list(mem_ctx, config_ctx);
+	if (nodes_source == NULL) {
 		fprintf(stderr, "Memory allocation error\n");
 		return NULL;
 	}
 
-	nodemap = ctdb_read_nodes_file(mem_ctx, nodes_list);
+	nodemap = ctdb_read_nodes(mem_ctx, nodes_source);
 	if (nodemap == NULL) {
-		fprintf(stderr, "Failed to read nodes file \"%s\"\n",
-			nodes_list);
+		fprintf(stderr, "Failed to read nodes from \"%s\"\n",
+			nodes_source);
 		return NULL;
 	}
 
@@ -1110,9 +1019,6 @@ static int control_ping(TALLOC_CTX *mem_ctx, struct ctdb_context *ctdb,
 	       ctdb->cmd_pnn, timeval_elapsed(&tv), num_clients);
 	return 0;
 }
-
-const char *runstate_to_string(enum ctdb_runstate runstate);
-enum ctdb_runstate runstate_from_string(const char *runstate_str);
 
 static int control_runstate(TALLOC_CTX *mem_ctx, struct ctdb_context *ctdb,
 			    int argc, const char **argv)
@@ -3497,7 +3403,7 @@ static int control_listnodes(TALLOC_CTX *mem_ctx, struct ctdb_context *ctdb,
 		usage("listnodes");
 	}
 
-	nodemap = read_nodes_file(mem_ctx, CTDB_UNKNOWN_PNN);
+	nodemap = read_nodes(mem_ctx, CTDB_UNKNOWN_PNN);
 	if (nodemap == NULL) {
 		return 1;
 	}
@@ -3750,7 +3656,7 @@ static int control_reloadnodes(TALLOC_CTX *mem_ctx, struct ctdb_context *ctdb,
 		return 1;
 	}
 
-	file_nodemap = read_nodes_file(mem_ctx, ctdb->pnn);
+	file_nodemap = read_nodes(mem_ctx, ctdb->pnn);
 	if (file_nodemap == NULL) {
 		return 1;
 	}
@@ -3846,14 +3752,8 @@ static int moveip(TALLOC_CTX *mem_ctx, struct ctdb_context *ctdb,
 	uint32_t *pnn_list;
 	unsigned int i;
 	int ret, count;
-
-	ret = ctdb_message_disable_ip_check(mem_ctx, ctdb->ev, ctdb->client,
-					    CTDB_BROADCAST_CONNECTED,
-					    2*options.timelimit);
-	if (ret != 0) {
-		fprintf(stderr, "Failed to disable IP check\n");
-		return ret;
-	}
+	uint32_t *connected_pnn = NULL;
+	int connected_count;
 
 	ret = ctdb_ctrl_get_public_ips(mem_ctx, ctdb->ev, ctdb->client,
 				       pnn, TIMEOUT(), false, &pubip_list);
@@ -3886,6 +3786,34 @@ static int moveip(TALLOC_CTX *mem_ctx, struct ctdb_context *ctdb,
 		return 1;
 	}
 
+	connected_count = list_of_connected_nodes(nodemap,
+						  CTDB_UNKNOWN_PNN,
+						  mem_ctx,
+						  &connected_pnn);
+	if (connected_count <= 0) {
+		fprintf(stderr, "Memory allocation error\n");
+		return 1;
+	}
+
+	/*
+	 * Disable takeover runs on all connected nodes.  A reply
+	 * indicating success is needed from each node so all nodes
+	 * will need to be active.
+	 *
+	 * A check could be added to not allow reloading of IPs when
+	 * there are disconnected nodes.  However, this should
+	 * probably be left up to the administrator.
+	 */
+	ret = disable_takeover_runs(mem_ctx,
+				    ctdb,
+				    2*options.timelimit,
+				    connected_pnn,
+				    connected_count);
+	if (ret != 0) {
+		fprintf(stderr, "Failed to disable takeover runs\n");
+		return ret;
+	}
+
 	pubip.pnn = pnn;
 	pubip.addr = *addr;
 	ctdb_req_control_release_ip(&request, &pubip);
@@ -3905,7 +3833,24 @@ static int moveip(TALLOC_CTX *mem_ctx, struct ctdb_context *ctdb,
 		return ret;
 	}
 
-	return 0;
+	/*
+	 * It isn't strictly necessary to wait until takeover runs are
+	 * re-enabled but doing so can't hurt.
+	 */
+	ret = disable_takeover_runs(mem_ctx,
+				    ctdb,
+				    0,
+				    connected_pnn,
+				    connected_count);
+	if (ret != 0) {
+		fprintf(stderr, "Failed to enable takeover runs\n");
+		return ret;
+	}
+
+	return send_ipreallocated_control_to_nodes(mem_ctx,
+						   ctdb,
+						   connected_pnn,
+						   connected_count);
 }
 
 static int control_moveip(TALLOC_CTX *mem_ctx, struct ctdb_context *ctdb,
@@ -4031,6 +3976,17 @@ static int control_addip(TALLOC_CTX *mem_ctx, struct ctdb_context *ctdb,
 		return ret;
 	}
 
+	/*
+	 * CTDB_CONTROL_ADD_PUBLIC_IP will implicitly trigger
+	 * CTDB_SRVID_TAKEOVER_RUN broadcast to all connected nodes.
+	 *
+	 * That means CTDB_{CONTROL,EVENT,SRVID}_IPREALLOCATED is
+	 * triggered at the end of the takeover run...
+	 *
+	 * So we don't need to call ipreallocate() nor
+	 * send_ipreallocated_control_to_nodes() here...
+	 */
+
 	return 0;
 }
 
@@ -4085,6 +4041,21 @@ static int control_delip(TALLOC_CTX *mem_ctx, struct ctdb_context *ctdb,
 			ctdb->cmd_pnn);
 		return ret;
 	}
+
+	/*
+	 * CTDB_CONTROL_DEL_PUBLIC_IP only marks the public ip
+	 * with pending_delete if it's still in use.
+	 *
+	 * Any later takeover run will really move the public ip
+	 * away from the local node and finally removes it.
+	 *
+	 * That means CTDB_{CONTROL,EVENT,SRVID}_IPREALLOCATED is
+	 * triggered at the end of the takeover run that actually
+	 * moves the public ip away.
+	 *
+	 * So we don't need to call ipreallocate() nor
+	 * send_ipreallocated_control_to_nodes() here...
+	 */
 
 	return 0;
 }
@@ -4767,7 +4738,7 @@ static bool find_node_xpnn(TALLOC_CTX *mem_ctx, uint32_t *pnn)
 	struct ctdb_node_map *nodemap;
 	unsigned int i;
 
-	nodemap = read_nodes_file(mem_ctx, CTDB_UNKNOWN_PNN);
+	nodemap = read_nodes(mem_ctx, CTDB_UNKNOWN_PNN);
 	if (nodemap == NULL) {
 		return false;
 	}
@@ -5626,7 +5597,7 @@ static int control_checktcpport(TALLOC_CTX *mem_ctx, struct ctdb_context *ctdb,
 		return errno;
 	}
 
-	bzero(&sin, sizeof(sin));
+	ZERO_STRUCT(sin);
 	sin.sin_family = AF_INET;
 	sin.sin_port = htons(port);
 	ret = bind(s, (struct sockaddr *)&sin, sizeof(sin));
@@ -5913,6 +5884,32 @@ fail:
 	ctdb_client_remove_message_handler(ctdb->ev, ctdb->client,
 					   disable.srvid, &state);
 	return ret;
+}
+
+static int send_ipreallocated_control_to_nodes(TALLOC_CTX *mem_ctx,
+					       struct ctdb_context *ctdb,
+					       uint32_t *pnn_list,
+					       int count)
+{
+	struct ctdb_req_control request;
+	int ret;
+
+	ctdb_req_control_ipreallocated(&request);
+	ret = ctdb_client_control_multi(mem_ctx,
+					ctdb->ev,
+					ctdb->client,
+					pnn_list,
+					count,
+					TIMEOUT(),
+					&request,
+					NULL,  /* perr_list */
+					NULL); /* preply */
+	if (ret != 0) {
+		fprintf(stderr, "Failed to send ipreallocated\n");
+		return ret;
+	}
+
+	return 0;
 }
 
 static int control_reloadips(TALLOC_CTX *mem_ctx, struct ctdb_context *ctdb,
@@ -6301,6 +6298,12 @@ static int process_command(const struct ctdb_cmd *cmd, int argc,
 		goto fail;
 	}
 
+	ret = ctdb_config_load(tmp_ctx, &config_ctx, false);
+	if (ret != 0) {
+		fprintf(stderr, "Failed to load configuration\n");
+		goto fail;
+	}
+
 	if (cmd->without_daemon) {
 		if (options.pnn != -1) {
 			fprintf(stderr,
@@ -6376,10 +6379,12 @@ static int process_command(const struct ctdb_cmd *cmd, int argc,
 	}
 
 	ret = cmd->fn(tmp_ctx, ctdb, argc-1, argv+1);
+	config_ctx = NULL;
 	talloc_free(tmp_ctx);
 	return ret;
 
 fail:
+	config_ctx = NULL;
 	talloc_free(tmp_ctx);
 	return 1;
 }

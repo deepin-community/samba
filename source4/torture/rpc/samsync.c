@@ -339,7 +339,7 @@ static bool samsync_handle_domain(struct torture_context *tctx, TALLOC_CTX *mem_
 			   int database_id, struct netr_DELTA_ENUM *delta)
 {
 	struct netr_DELTA_DOMAIN *domain = delta->delta_union.domain;
-	struct dom_sid *dom_sid;
+	struct dom_sid *dom_sid = NULL;
 	struct samr_QueryDomainInfo q[14]; /* q[0] will be unused simple for clarity */
 	union samr_DomainInfo *info[14];
 	uint16_t levels[] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 12, 13};
@@ -933,9 +933,11 @@ static bool samsync_handle_secret(struct torture_context *tctx,
   We would like to do this, but it is NOT_SUPPORTED on win2k3
   TEST_SEC_DESC_EQUAL(secret->sdbuf, lsa, &sec_handle);
 */
-	status = dcerpc_fetch_session_key(samsync_state->p_lsa, &session_key);
+	status = dcerpc_binding_handle_transport_session_key(samsync_state->b_lsa,
+							     mem_ctx,
+							     &session_key);
 	if (!NT_STATUS_IS_OK(status)) {
-		torture_comment(tctx, "dcerpc_fetch_session_key failed - %s\n", nt_errstr(status));
+		torture_comment(tctx, "transport_session_key failed - %s\n", nt_errstr(status));
 		return false;
 	}
 

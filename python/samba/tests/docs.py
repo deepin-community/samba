@@ -217,10 +217,11 @@ class SmbDotConfTests(TestCase):
         'max open files',
         'include system krb5 conf',
         'smbd max async dosmode',
+        'dns hostname',
     ])
 
     def setUp(self):
-        super(SmbDotConfTests, self).setUp()
+        super().setUp()
         # create a minimal smb.conf file for testparm
         self.smbconf = os.path.join(self.tempdir, "paramtestsmb.conf")
         f = open(self.smbconf, 'w')
@@ -257,7 +258,7 @@ class SmbDotConfTests(TestCase):
             self.fail("Unable to load parameters")
 
     def tearDown(self):
-        super(SmbDotConfTests, self).tearDown()
+        super().tearDown()
         os.unlink(self.smbconf)
         os.unlink(self.blankconf)
 

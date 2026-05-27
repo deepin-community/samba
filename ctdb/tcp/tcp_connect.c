@@ -32,8 +32,12 @@
 #include "ctdb_private.h"
 
 #include "common/system.h"
+#include "common/system_socket.h"
 #include "common/common.h"
 #include "common/logging.h"
+#include "common/path.h"
+
+#include "protocol/protocol_util.h"
 
 #include "ctdb_tcp.h"
 
@@ -318,10 +322,15 @@ static void ctdb_listen_event(struct tevent_context *ev, struct tevent_fd *fde,
 
 	node = ctdb_ip_to_node(ctdb, &addr);
 	if (node == NULL) {
-		D_ERR("Refused connection from unknown node %s\n",
-		      ctdb_addr_to_str(&addr));
-		close(fd);
-		return;
+		char *t = ctdb_sock_addr_to_string(ctcp, &addr, true);
+		if (t == NULL) {
+			DBG_ERR("Refused connection from unparsable node\n");
+			goto failed;
+		}
+
+		D_ERR("Refused connection from unknown node %s\n", t);
+		talloc_free(t);
+		goto failed;
 	}
 
 	tnode = talloc_get_type_abort(node->transport_data,
@@ -329,24 +338,21 @@ static void ctdb_listen_event(struct tevent_context *ev, struct tevent_fd *fde,
 	if (tnode == NULL) {
 		/* This can't happen - see ctdb_tcp_initialise() */
 		DBG_ERR("INTERNAL ERROR setting up connection from node %s\n",
-			ctdb_addr_to_str(&addr));
-		close(fd);
-		return;
+			node->name);
+		goto failed;
 	}
 
 	if (tnode->in_queue != NULL) {
 		DBG_ERR("Incoming queue active, rejecting connection from %s\n",
-			ctdb_addr_to_str(&addr));
-		close(fd);
-		return;
+			node->name);
+		goto failed;
 	}
 
 	ret = set_blocking(fd, false);
 	if (ret != 0) {
 		DBG_ERR("Failed to set socket non-blocking (%s)\n",
 			strerror(errno));
-		close(fd);
-		return;
+		goto failed;
 	}
 
 	set_close_on_exec(fd);
@@ -370,11 +376,10 @@ static void ctdb_listen_event(struct tevent_context *ev, struct tevent_fd *fde,
 					   ctdb_tcp_read_cb,
 					   node,
 					   "ctdbd-%s",
-					   ctdb_addr_to_str(&addr));
+					   node->name);
 	if (tnode->in_queue == NULL) {
 		DBG_ERR("Failed to set up incoming queue\n");
-		close(fd);
-		return;
+		goto failed;
 	}
 
        /*
@@ -384,41 +389,137 @@ static void ctdb_listen_event(struct tevent_context *ev, struct tevent_fd *fde,
 	if (tnode->out_queue != NULL) {
 		node->ctdb->upcalls->node_connected(node);
 	}
+
+	return;
+
+failed:
+	close(fd);
  }
 
+static int ctdb_tcp_listen_addr(struct ctdb_context *ctdb,
+				ctdb_sock_addr *addr,
+				bool strict)
+{
+	struct ctdb_tcp *ctcp = talloc_get_type_abort(
+		ctdb->transport_data, struct ctdb_tcp);
+	ctdb_sock_addr sock;
+	int sock_size;
+	int one = 1;
+	struct tevent_fd *fde = NULL;
+	int ret;
+
+	sock = *addr;
+	ctcp->listen_fd = -1;
+
+	switch (sock.sa.sa_family) {
+	case AF_INET:
+		sock_size = sizeof(sock.ip);
+		break;
+	case AF_INET6:
+		sock_size = sizeof(sock.ip6);
+		break;
+	default:
+		DBG_ERR("Unknown family %u\n", sock.sa.sa_family);
+		goto failed;
+	}
+
+	ctcp->listen_fd = socket(sock.sa.sa_family, SOCK_STREAM, IPPROTO_TCP);
+	if (ctcp->listen_fd == -1) {
+		DBG_ERR("Socket failed - %s (%d)\n", strerror(errno), errno);
+		goto failed;
+	}
+
+	set_close_on_exec(ctcp->listen_fd);
+
+	ret = setsockopt(ctcp->listen_fd,
+			 SOL_SOCKET,
+			 SO_REUSEADDR,
+			 (char *)&one,
+			 sizeof(one));
+	if (ret == -1) {
+		DBG_WARNING("Failed to set REUSEADDR on fd - %s (%d)\n",
+			    strerror(errno),
+			    errno);
+	}
+
+	ret =bind(ctcp->listen_fd, (struct sockaddr * )&sock, sock_size);
+	if (ret != 0) {
+		if (strict || errno != EADDRNOTAVAIL) {
+			DBG_ERR("Failed to bind() to socket - %s (%d)\n",
+				strerror(errno),
+				errno);
+		} else {
+			DBG_DEBUG("Failed to bind() to socket - %s (%d)\n",
+				  strerror(errno),
+				  errno);
+		}
+		goto failed;
+	}
+
+	ret = listen(ctcp->listen_fd, 10);
+	if (ret == -1) {
+		DBG_ERR("Failed to listen() on socket - %s (%d)\n",
+			strerror(errno),
+			errno);
+		goto failed;
+	}
+
+	fde = tevent_add_fd(ctdb->ev,
+			    ctcp,
+			    ctcp->listen_fd,
+			    TEVENT_FD_READ,
+			    ctdb_listen_event,
+			    ctdb);
+	tevent_fd_set_auto_close(fde);
+
+	return 0;
+
+failed:
+	if (ctcp->listen_fd != -1) {
+		close(ctcp->listen_fd);
+		ctcp->listen_fd = -1;
+	}
+	return -1;
+}
 
 /*
   automatically find which address to listen on
 */
 static int ctdb_tcp_listen_automatic(struct ctdb_context *ctdb)
 {
-	struct ctdb_tcp *ctcp = talloc_get_type(ctdb->transport_data,
-						struct ctdb_tcp);
-        ctdb_sock_addr sock;
 	int lock_fd;
 	unsigned int i;
-	const char *lock_path = CTDB_RUNDIR "/.socket_lock";
+	char *lock_path = NULL;
 	struct flock lock;
-	int one = 1;
-	int sock_size;
-	struct tevent_fd *fde;
+	struct ctdb_sys_local_ips_context *ips_ctx = NULL;
+	int ret;
 
-	/* If there are no nodes, then it won't be possible to find
+	/*
+	 * If there are no nodes, then it won't be possible to find
 	 * the first one.  Log a failure and short circuit the whole
 	 * process.
 	 */
 	if (ctdb->num_nodes == 0) {
-		DEBUG(DEBUG_CRIT,("No nodes available to attempt bind to - is the nodes file empty?\n"));
+		D_ERR("No nodes available to attempt bind to - "
+		      "is the nodes file empty?\n");
 		return -1;
 	}
 
-	/* in order to ensure that we don't get two nodes with the
-	   same address, we must make the bind() and listen() calls
-	   atomic. The SO_REUSEADDR setsockopt only prevents double
-	   binds if the first socket is in LISTEN state  */
+	/*
+	 * In order to ensure that we don't get two nodes with the
+	 * same address, we must make the bind() and listen() calls
+	 * atomic. The SO_REUSEADDR setsockopt only prevents double
+	 * binds if the first socket is in LISTEN state.
+	 */
+	lock_path = path_rundir_append(ctdb, ".socket_lock");
+	if (lock_path == NULL) {
+		DBG_ERR("Memory allocation error\n");
+		return -1;
+	}
 	lock_fd = open(lock_path, O_RDWR|O_CREAT, 0666);
 	if (lock_fd == -1) {
-		DEBUG(DEBUG_CRIT,("Unable to open %s\n", lock_path));
+		DBG_ERR("Unable to open %s\n", lock_path);
+		talloc_free(lock_path);
 		return -1;
 	}
 
@@ -429,102 +530,76 @@ static int ctdb_tcp_listen_automatic(struct ctdb_context *ctdb)
 	lock.l_pid = 0;
 
 	if (fcntl(lock_fd, F_SETLKW, &lock) != 0) {
-		DEBUG(DEBUG_CRIT,("Unable to lock %s\n", lock_path));
+		DBG_ERR("Unable to lock %s\n", lock_path);
 		close(lock_fd);
+		talloc_free(lock_path);
 		return -1;
+	}
+	talloc_free(lock_path);
+
+	ret = ctdb_sys_local_ips_init(ctdb, &ips_ctx);
+	if (ret != 0) {
+		/*
+		 * What to do?  The point here is to allow CTDB to
+		 * bind to the local IP address from the nodes list if
+		 * net.ipv4.ip_nonlocal_bind = 1, which probably just
+		 * Linux... though other platforms may have a similar
+		 * setting.  Let's go ahead and skip checking
+		 * addresses this way.  That way, a platform with a
+		 * replacement implementation of getifaddrs() that
+		 * just returns, say, ENOSYS can still proceed and see
+		 * if it can bind/listen on each address.
+		 */
+		DBG_WARNING(
+			"Failed to get local addresses, depending on bind\n");
+		ips_ctx = NULL; /* Just in case */
 	}
 
 	for (i=0; i < ctdb->num_nodes; i++) {
 		if (ctdb->nodes[i]->flags & NODE_FLAGS_DELETED) {
 			continue;
 		}
-		sock = ctdb->nodes[i]->address;
 
-		switch (sock.sa.sa_family) {
-		case AF_INET:
-			sock_size = sizeof(sock.ip);
-			break;
-		case AF_INET6:
-			sock_size = sizeof(sock.ip6);
-			break;
-		default:
-			DEBUG(DEBUG_ERR, (__location__ " unknown family %u\n",
-				sock.sa.sa_family));
-			continue;
+		if (ips_ctx != NULL) {
+			bool have_ip = ctdb_sys_local_ip_check(
+				ips_ctx, &ctdb->nodes[i]->address);
+
+			if (!have_ip) {
+				continue;
+			}
 		}
 
-		ctcp->listen_fd = socket(sock.sa.sa_family, SOCK_STREAM, IPPROTO_TCP);
-		if (ctcp->listen_fd == -1) {
-			ctdb_set_error(ctdb, "socket failed\n");
-			continue;
-		}
-
-		set_close_on_exec(ctcp->listen_fd);
-
-	        if (setsockopt(ctcp->listen_fd,SOL_SOCKET,SO_REUSEADDR,
-			       (char *)&one,sizeof(one)) == -1) {
-			DEBUG(DEBUG_WARNING, ("Failed to set REUSEADDR on fd - %s\n",
-					      strerror(errno)));
-		}
-
-		if (bind(ctcp->listen_fd, (struct sockaddr * )&sock, sock_size) == 0) {
+		ret = ctdb_tcp_listen_addr(ctdb,
+					   &ctdb->nodes[i]->address,
+					   false);
+		if (ret == 0) {
 			break;
 		}
-
-		if (errno == EADDRNOTAVAIL) {
-			DEBUG(DEBUG_DEBUG,(__location__ " Failed to bind() to socket. %s(%d)\n",
-					strerror(errno), errno));
-		} else {
-			DEBUG(DEBUG_ERR,(__location__ " Failed to bind() to socket. %s(%d)\n",
-					strerror(errno), errno));
-		}
-
-		close(ctcp->listen_fd);
-		ctcp->listen_fd = -1;
 	}
+
+	TALLOC_FREE(ips_ctx);
 
 	if (i == ctdb->num_nodes) {
-		DEBUG(DEBUG_CRIT,("Unable to bind to any of the node addresses - giving up\n"));
-		goto failed;
+		D_ERR("Unable to bind to any node address - giving up\n");
+		return -1;
 	}
+
 	ctdb->address = talloc_memdup(ctdb,
 				      &ctdb->nodes[i]->address,
 				      sizeof(ctdb_sock_addr));
 	if (ctdb->address == NULL) {
-		ctdb_set_error(ctdb, "Out of memory at %s:%d",
-			       __FILE__, __LINE__);
-		goto failed;
+		DBG_ERR("Memory allocation error\n");
+		return -1;
 	}
 
-	ctdb->name = talloc_asprintf(ctdb, "%s:%u",
-				     ctdb_addr_to_str(ctdb->address),
-				     ctdb_addr_to_port(ctdb->address));
+	ctdb->name = talloc_strdup(ctdb, ctdb->nodes[i]->name);
 	if (ctdb->name == NULL) {
-		ctdb_set_error(ctdb, "Out of memory at %s:%d",
-			       __FILE__, __LINE__);
-		goto failed;
-	}
-	DEBUG(DEBUG_INFO,("ctdb chose network address %s\n", ctdb->name));
-
-	if (listen(ctcp->listen_fd, 10) == -1) {
-		goto failed;
+		DBG_ERR("Memory allocation error\n");
+		return -1;
 	}
 
-	fde = tevent_add_fd(ctdb->ev, ctcp, ctcp->listen_fd, TEVENT_FD_READ,
-			    ctdb_listen_event, ctdb);
-	tevent_fd_set_auto_close(fde);
-
-	close(lock_fd);
-
+	D_INFO("ctdb chose network address %s\n", ctdb->name);
 	return 0;
-
-failed:
-	close(lock_fd);
-	if (ctcp->listen_fd != -1) {
-		close(ctcp->listen_fd);
-		ctcp->listen_fd = -1;
-	}
-	return -1;
 }
 
 
@@ -533,67 +608,15 @@ failed:
 */
 int ctdb_tcp_listen(struct ctdb_context *ctdb)
 {
-	struct ctdb_tcp *ctcp = talloc_get_type(ctdb->transport_data,
-						struct ctdb_tcp);
-        ctdb_sock_addr sock;
-	int sock_size;
-	int one = 1;
-	struct tevent_fd *fde;
+	int ret;
 
 	/* we can either auto-bind to the first available address, or we can
 	   use a specified address */
 	if (!ctdb->address) {
-		return ctdb_tcp_listen_automatic(ctdb);
+		ret = ctdb_tcp_listen_automatic(ctdb);
+		return ret;
 	}
 
-	sock = *ctdb->address;
-
-	switch (sock.sa.sa_family) {
-	case AF_INET:
-		sock_size = sizeof(sock.ip);
-		break;
-	case AF_INET6:
-		sock_size = sizeof(sock.ip6);
-		break;
-	default:
-		DEBUG(DEBUG_ERR, (__location__ " unknown family %u\n",
-			sock.sa.sa_family));
-		goto failed;
-	}
-
-	ctcp->listen_fd = socket(sock.sa.sa_family, SOCK_STREAM, IPPROTO_TCP);
-	if (ctcp->listen_fd == -1) {
-		ctdb_set_error(ctdb, "socket failed\n");
-		return -1;
-	}
-
-	set_close_on_exec(ctcp->listen_fd);
-
-        if (setsockopt(ctcp->listen_fd,SOL_SOCKET,SO_REUSEADDR,(char *)&one,sizeof(one)) == -1) {
-		DEBUG(DEBUG_WARNING, ("Failed to set REUSEADDR on fd - %s\n",
-				      strerror(errno)));
-	}
-
-	if (bind(ctcp->listen_fd, (struct sockaddr * )&sock, sock_size) != 0) {
-		DEBUG(DEBUG_ERR,(__location__ " Failed to bind() to socket. %s(%d)\n", strerror(errno), errno));
-		goto failed;
-	}
-
-	if (listen(ctcp->listen_fd, 10) == -1) {
-		goto failed;
-	}
-
-	fde = tevent_add_fd(ctdb->ev, ctcp, ctcp->listen_fd, TEVENT_FD_READ,
-			    ctdb_listen_event, ctdb);
-	tevent_fd_set_auto_close(fde);
-
-	return 0;
-
-failed:
-	if (ctcp->listen_fd != -1) {
-		close(ctcp->listen_fd);
-	}
-	ctcp->listen_fd = -1;
-	return -1;
+	ret = ctdb_tcp_listen_addr(ctdb, ctdb->address, true);
+	return ret;
 }
-

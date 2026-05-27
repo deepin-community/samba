@@ -1,0 +1,5 @@
+#! /bin/sh
+me="${0##*/}"
+command -v python3 >/dev/null && exec /usr/libexec/samba/$me "$@"
+echo "$me: E: This program requires python3.  Please install python3-minimal package to use it." >&2
+exit 42

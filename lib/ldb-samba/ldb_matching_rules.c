@@ -31,6 +31,9 @@
 
 #undef strcasecmp
 
+#undef DBGC_CLASS
+#define DBGC_CLASS DBGC_LDB
+
 static int ldb_eval_transitive_filter_helper(TALLOC_CTX *mem_ctx,
 					     struct ldb_context *ldb,
 					     const char *attr,
@@ -74,6 +77,11 @@ static int ldb_eval_transitive_filter_helper(TALLOC_CTX *mem_ctx,
 			     attrs,
 			     DSDB_MARK_REQ_UNTRUSTED);
 	if (ret != LDB_SUCCESS) {
+		DBG_NOTICE("search failure (%d: %s) looking for '%s' on '%s'\n",
+			   ret,
+			   ldb_strerror(ret),
+			   attr,
+			   ldb_dn_get_linearized(to_visit->dn));
 		talloc_free(tmp_ctx);
 		return ret;
 	}
@@ -346,7 +354,7 @@ static int ldb_comparator_trans(struct ldb_context *ldb,
  * where the value is a number of hours since the start of 1601.
  *
  * This allows the caller to find records that should become a DNS
- * tomestone, despite that information being deep within an NDR packed
+ * tombstone, despite that information being deep within an NDR packed
  * object
  */
 static int dsdb_match_for_dns_to_tombstone_time(struct ldb_context *ldb,

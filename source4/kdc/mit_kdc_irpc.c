@@ -36,6 +36,7 @@
 #include "db-glue.h"
 #include "sdb.h"
 #include "mit_kdc_irpc.h"
+#include "lib/crypto/gmsa.h"
 
 #undef DBGC_CLASS
 #define DBGC_CLASS DBGC_KERBEROS
@@ -62,6 +63,15 @@ static NTSTATUS netr_samlogon_generic_logon(struct irpc_message *msg,
 	struct sdb_keys skeys;
 	unsigned int i;
 	const uint8_t *d = NULL;
+	NTTIME now;
+	bool time_ok;
+
+	time_ok = gmsa_current_time(&now);
+	if (!time_ok) {
+		return NT_STATUS_UNSUCCESSFUL;
+	}
+
+	*mki_ctx->db_ctx->current_nttime_ull = now;
 
 	/* There is no reply to this request */
 	r->out.generic_reply = data_blob(NULL, 0);
@@ -104,8 +114,8 @@ static NTSTATUS netr_samlogon_generic_logon(struct irpc_message *msg,
 				      lpcfg_realm(mki_ctx->task->lp_ctx),
 				      NULL);
 	if (code != 0) {
-		DEBUG(0, ("Failed to create krbtgt@%s principal!\n",
-			  lpcfg_realm(mki_ctx->task->lp_ctx)));
+		DBG_ERR("Failed to create krbtgt@%s principal!\n",
+			lpcfg_realm(mki_ctx->task->lp_ctx));
 		return NT_STATUS_NO_MEMORY;
 	}
 
@@ -118,8 +128,8 @@ static NTSTATUS netr_samlogon_generic_logon(struct irpc_message *msg,
 			       &sentry);
 	krb5_free_principal(mki_ctx->krb5_context, principal);
 	if (code != 0) {
-		DEBUG(0, ("Failed to fetch krbtgt@%s principal entry!\n",
-			  lpcfg_realm(mki_ctx->task->lp_ctx)));
+		DBG_ERR("Failed to fetch krbtgt@%s principal entry!\n",
+			lpcfg_realm(mki_ctx->task->lp_ctx));
 		return NT_STATUS_LOGON_FAILURE;
 	}
 
@@ -136,6 +146,7 @@ static NTSTATUS netr_samlogon_generic_logon(struct irpc_message *msg,
 	 */
 	skeys = sentry.keys;
 
+	code = EINVAL;
 	for (i = 0; i < skeys.len; i++) {
 		krb5_keyblock krbtgt_keyblock = skeys.val[i].key;
 
@@ -159,7 +170,7 @@ static NTSTATUS netr_samlogon_generic_logon(struct irpc_message *msg,
 
 NTSTATUS samba_setup_mit_kdc_irpc(struct task_server *task)
 {
-	struct samba_kdc_base_context base_ctx;
+	struct samba_kdc_base_context base_ctx = {};
 	struct mit_kdc_irpc_context *mki_ctx;
 	NTSTATUS status;
 	int code;
@@ -172,6 +183,11 @@ NTSTATUS samba_setup_mit_kdc_irpc(struct task_server *task)
 
 	base_ctx.ev_ctx = task->event_ctx;
 	base_ctx.lp_ctx = task->lp_ctx;
+
+	base_ctx.current_nttime_ull = talloc_zero(mki_ctx, unsigned long long);
+	if (base_ctx.current_nttime_ull == NULL) {
+		return NT_STATUS_NO_MEMORY;
+	}
 
 	/* db-glue.h */
 	status = samba_kdc_setup_db_ctx(mki_ctx,

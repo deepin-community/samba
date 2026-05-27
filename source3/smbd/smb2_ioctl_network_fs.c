@@ -185,7 +185,7 @@ static NTSTATUS fsctl_srv_copychunk_loop(struct tevent_req *req)
 	 * Windows).
 	 *
 	 * Or it can be a special macOS copyfile request, so we send this into
-	 * the VFS, vfs_fruit if loaded implements the macOS copyile semantics.
+	 * the VFS, vfs_fruit if loaded implements the macOS copyfile semantics.
 	 */
 	if (state->cc_copy.chunk_count > 0) {
 		struct srv_copychunk *chunk = NULL;
@@ -362,6 +362,7 @@ static NTSTATUS fsctl_network_iface_info(TALLOC_CTX *mem_ctx,
 					 uint32_t in_max_output,
 					 DATA_BLOB *out_output)
 {
+	struct samba_sockaddr xconn_srv_addr = { .sa_socklen = 0, };
 	struct fsctl_net_iface_info *array = NULL;
 	struct fsctl_net_iface_info *first = NULL;
 	struct fsctl_net_iface_info *last = NULL;
@@ -369,6 +370,7 @@ static NTSTATUS fsctl_network_iface_info(TALLOC_CTX *mem_ctx,
 	size_t num_ifaces;
 	enum ndr_err_code ndr_err;
 	struct cluster_movable_ips *cluster_movable_ips = NULL;
+	ssize_t sret;
 	int ret;
 
 	if (in_input->length != 0) {
@@ -410,6 +412,14 @@ static NTSTATUS fsctl_network_iface_info(TALLOC_CTX *mem_ctx,
 		}
 	}
 
+	sret = tsocket_address_bsd_sockaddr(xconn->local_address,
+					    &xconn_srv_addr.u.sa,
+					    sizeof(xconn_srv_addr.u.ss));
+	if (sret < 0) {
+		return NT_STATUS_INTERNAL_ERROR;
+	}
+	xconn_srv_addr.sa_socklen = sret;
+
 	for (i=0; i < num_ifaces; i++) {
 		struct fsctl_net_iface_info *cur = &array[i];
 		const struct interface *iface = get_interface(i);
@@ -440,7 +450,18 @@ static NTSTATUS fsctl_network_iface_info(TALLOC_CTX *mem_ctx,
 			return NT_STATUS_NO_MEMORY;
 		}
 
-		if (cluster_movable_ips != NULL) {
+		if (sockaddr_equal(ifsa, &xconn_srv_addr.u.sa)) {
+			/*
+			 * We can announce the ip of the current connection even
+			 * if it is a moveable cluster address... as the client
+			 * is already connected to it.
+			 *
+			 * It means in a typical ctdb cluster, where we
+			 * only have public addresses, the client can at least
+			 * have more than one multichannel'ed connection to the
+			 * public ip.
+			 */
+		} else if (cluster_movable_ips != NULL) {
 			bool is_movable_ip = find_in_cluster_movable_ips(
 						cluster_movable_ips,
 						ifss);
@@ -530,7 +551,7 @@ static NTSTATUS fsctl_validate_neg_info(TALLOC_CTX *mem_ctx,
 	if (lp_server_max_protocol() <= PROTOCOL_SMB2_02) {
 		/*
 		 * With SMB 2.02 we didn't get the
-		 * capabitities, client guid, security mode
+		 * capabilities, client guid, security mode
 		 * and dialects the client would have offered.
 		 *
 		 * So we behave compatible with a true
@@ -600,10 +621,7 @@ static NTSTATUS fsctl_validate_neg_info(TALLOC_CTX *mem_ctx,
 		return NT_STATUS_ACCESS_DENIED;
 	}
 
-	status = GUID_to_ndr_buf(&conn->smb2.server.guid, &out_guid_buf);
-	if (!NT_STATUS_IS_OK(status)) {
-		return status;
-	}
+	GUID_to_ndr_buf(&conn->smb2.server.guid, &out_guid_buf);
 
 	*out_output = data_blob_talloc(mem_ctx, NULL, 0x18);
 	if (out_output->data == NULL) {

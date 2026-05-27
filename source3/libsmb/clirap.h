@@ -29,34 +29,20 @@ struct cli_state;
 
 /* The following definitions come from libsmb/clirap.c  */
 
-bool cli_api(struct cli_state *cli,
-	     char *param, int prcnt, int mprcnt,
-	     char *data, int drcnt, int mdrcnt,
-	     char **rparam, unsigned int *rprcnt,
-	     char **rdata, unsigned int *rdrcnt);
-int cli_RNetShareEnum(struct cli_state *cli, void (*fn)(const char *, uint32_t, const char *, void *), void *state);
-bool cli_NetServerEnum(struct cli_state *cli, char *workgroup, uint32_t stype,
-		       void (*fn)(const char *, uint32_t, const char *, void *),
-		       void *state);
-bool cli_oem_change_password(struct cli_state *cli, const char *user, const char *new_password,
-                             const char *old_password);
-struct tevent_req *cli_qpathinfo1_send(TALLOC_CTX *mem_ctx,
-				       struct tevent_context *ev,
-				       struct cli_state *cli,
-				       const char *fname);
-NTSTATUS cli_qpathinfo1_recv(struct tevent_req *req,
-			     time_t *change_time,
-			     time_t *access_time,
-			     time_t *write_time,
-			     off_t *size,
-			     uint32_t *pattr);
-NTSTATUS cli_qpathinfo1(struct cli_state *cli,
-			const char *fname,
-			time_t *change_time,
-			time_t *access_time,
-			time_t *write_time,
-			off_t *size,
-			uint32_t *pattr);
+NTSTATUS cli_RNetShareEnum(
+	struct cli_state *cli,
+	void (*fn)(const char *, uint32_t, const char *, void *),
+	void *state);
+NTSTATUS cli_NetServerEnum(
+	struct cli_state *cli,
+	char *workgroup,
+	uint32_t stype,
+	void (*fn)(const char *, uint32_t, const char *, void *),
+	void *state);
+NTSTATUS cli_oem_change_password(struct cli_state *cli,
+				 const char *user,
+				 const char *new_password,
+				 const char *old_password);
 NTSTATUS cli_setpathinfo_ext(struct cli_state *cli, const char *fname,
 			     struct timespec create_time,
 			     struct timespec access_time,
@@ -91,15 +77,20 @@ NTSTATUS cli_qpathinfo2_recv(struct tevent_req *req,
 			     struct timespec *access_time,
 			     struct timespec *write_time,
 			     struct timespec *change_time,
-			     off_t *size, uint32_t *pattr,
-			     SMB_INO_T *ino);
-NTSTATUS cli_qpathinfo2(struct cli_state *cli, const char *fname,
+			     off_t *size,
+			     uint32_t *pattr,
+			     SMB_INO_T *ino,
+			     mode_t *mode);
+NTSTATUS cli_qpathinfo2(struct cli_state *cli,
+			const char *fname,
 			struct timespec *create_time,
 			struct timespec *access_time,
 			struct timespec *write_time,
 			struct timespec *change_time,
-			off_t *size, uint32_t *pattr,
-			SMB_INO_T *ino);
+			off_t *size,
+			uint32_t *pattr,
+			SMB_INO_T *ino,
+			mode_t *mode);
 NTSTATUS cli_qpathinfo3(struct cli_state *cli, const char *fname,
 			struct timespec *create_time,
 			struct timespec *access_time,
@@ -155,10 +146,6 @@ NTSTATUS cli_qpathinfo_basic_recv(struct tevent_req *req,
 				  SMB_STRUCT_STAT *sbuf, uint32_t *attributes);
 NTSTATUS cli_qpathinfo_basic(struct cli_state *cli, const char *name,
 			     SMB_STRUCT_STAT *sbuf, uint32_t *attributes);
-NTSTATUS cli_qpathinfo_standard(struct cli_state *cli, const char *fname,
-				uint64_t *allocated, uint64_t *size,
-				uint32_t *nlinks,
-				bool *is_del_pending, bool *is_dir);
 NTSTATUS cli_qpathinfo_alt_name(struct cli_state *cli, const char *fname, fstring alt_name);
 struct tevent_req *cli_qpathinfo_send(TALLOC_CTX *mem_ctx,
 				      struct tevent_context *ev,
@@ -174,16 +161,23 @@ NTSTATUS cli_qpathinfo(TALLOC_CTX *mem_ctx, struct cli_state *cli,
 
 struct tevent_req *cli_qfileinfo_send(TALLOC_CTX *mem_ctx,
 				      struct tevent_context *ev,
-				      struct cli_state *cli, uint16_t fnum,
-				      uint16_t level, uint32_t min_rdata,
+				      struct cli_state *cli,
+				      uint16_t fnum,
+				      uint16_t fscc_level,
+				      uint32_t min_rdata,
 				      uint32_t max_rdata);
 NTSTATUS cli_qfileinfo_recv(struct tevent_req *req, TALLOC_CTX *mem_ctx,
 			    uint16_t *recv_flags2,
 			    uint8_t **rdata, uint32_t *num_rdata);
-NTSTATUS cli_qfileinfo(TALLOC_CTX *mem_ctx, struct cli_state *cli,
-		       uint16_t fnum, uint16_t level, uint32_t min_rdata,
-		       uint32_t max_rdata, uint16_t *recv_flags2,
-		       uint8_t **rdata, uint32_t *num_rdata);
+NTSTATUS cli_qfileinfo(TALLOC_CTX *mem_ctx,
+		       struct cli_state *cli,
+		       uint16_t fnum,
+		       uint16_t fscc_level,
+		       uint32_t min_rdata,
+		       uint32_t max_rdata,
+		       uint16_t *recv_flags2,
+		       uint8_t **rdata,
+		       uint32_t *num_rdata);
 
 struct tevent_req *cli_flush_send(TALLOC_CTX *mem_ctx,
 				  struct tevent_context *ev,

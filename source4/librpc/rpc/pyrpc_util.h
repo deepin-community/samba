@@ -34,7 +34,7 @@ void PyErr_SetDCERPCStatus(struct dcerpc_pipe *p, NTSTATUS status);
 
 typedef NTSTATUS (*py_dcerpc_call_fn) (struct dcerpc_binding_handle *, TALLOC_CTX *, void *);
 typedef bool (*py_data_pack_fn) (PyObject *args, PyObject *kwargs, void *r);
-typedef PyObject *(*py_data_unpack_fn) (void *r);
+typedef PyObject *(*py_data_unpack_fn) (void *r, bool raise_result_exception);
 
 struct PyNdrRpcMethodDef {
 	const char *name;
@@ -58,6 +58,10 @@ PyObject *py_return_ndr_struct(const char *module_name, const char *type_name,
 			       TALLOC_CTX *r_ctx, void *r);
 
 PyObject *PyString_FromStringOrNULL(const char *str);
+
+PyObject *PyBytes_FromUtf16StringOrNULL(const unsigned char *str);
+
+unsigned char *PyUtf16String_FromBytes(TALLOC_CTX *mem_ctx, PyObject *value);
 
 PyObject *pyrpc_import_union(PyTypeObject *type, TALLOC_CTX *mem_ctx, int level,
 			     const void *in, const char *typename);

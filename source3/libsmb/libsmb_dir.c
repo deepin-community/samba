@@ -186,10 +186,8 @@ static int add_dirplus(SMBCFILE *dir, struct file_info *finfo)
 	info->atime_ts = finfo->atime_ts;
 	info->ctime_ts = finfo->ctime_ts;
 	info->mtime_ts = finfo->mtime_ts;
-	info->gid = finfo->gid;
 	info->attrs = finfo->attr;
 	info->size = finfo->size;
-	info->uid = finfo->uid;
 	info->name = SMB_STRDUP(finfo->name);
 	if (info->name == NULL) {
 		SAFE_FREE(info);
@@ -702,11 +700,12 @@ SMBC_opendir_ctx(SMBCCTX *context,
 
                         /* Now, list the stuff ... */
 
-                        if (!cli_NetServerEnum(srv->cli,
-                                               workgroup,
-                                               SV_TYPE_DOMAIN_ENUM,
-                                               list_unique_wg_fn,
-                                               (void *)dir)) {
+			status = cli_NetServerEnum(srv->cli,
+						   workgroup,
+						   SV_TYPE_DOMAIN_ENUM,
+						   list_unique_wg_fn,
+						   (void *)dir);
+			if (!NT_STATUS_IS_OK(status)) {
                                 continue;
                         }
                 }
@@ -763,6 +762,7 @@ SMBC_opendir_ctx(SMBCCTX *context,
 				 */
 				char *wgroup = server;
 				fstring buserver;
+				NTSTATUS status;
 
 				dir->dir_type = SMBC_SERVER;
 
@@ -821,10 +821,12 @@ SMBC_opendir_ctx(SMBCCTX *context,
 				}
 
 				/* Now, list the servers ... */
-				if (!cli_NetServerEnum(srv->cli, wgroup,
-                                                       0x0000FFFE, list_fn,
-						       (void *)dir)) {
-
+				status = cli_NetServerEnum(srv->cli,
+							   wgroup,
+							   0x0000FFFE,
+							   list_fn,
+							   (void *)dir);
+				if (!NT_STATUS_IS_OK(status)) {
 					if (dir) {
 						SAFE_FREE(dir->fname);
 						SAFE_FREE(dir);
@@ -871,21 +873,12 @@ SMBC_opendir_ctx(SMBCCTX *context,
 					 * Only call cli_RNetShareEnum()
 					 * on SMB1 connections, not SMB2+.
 					 */
-					int rc = cli_RNetShareEnum(srv->cli,
-							       list_fn,
-							       (void *)dir);
-					if (rc != 0) {
-						status = cli_nt_error(srv->cli);
-					} else {
-						status = NT_STATUS_OK;
-					}
+					status = cli_RNetShareEnum(
+						srv->cli,
+						list_fn,
+						(void *)dir);
 				}
 				if (!NT_STATUS_IS_OK(status)) {
-					/*
-					 * Set cli->raw_status so SMBC_errno()
-					 * will correctly return the error.
-					 */
-					srv->cli->raw_status = status;
 					if (dir != NULL) {
 						SAFE_FREE(dir->fname);
 						SAFE_FREE(dir);
@@ -998,12 +991,13 @@ SMBC_opendir_ctx(SMBCCTX *context,
                                         }
                                 }
 
-                                /*
-                                 * If there was an error and the server is no
-                                 * good any more...
-                                 */
-                                if (cli_is_error(targetcli) &&
-                                    smbc_getFunctionCheckServer(context)(context, srv)) {
+				/*
+				 * There was an error (we're in the
+				 * !NT_STATUS_IS_OK branch) and the
+				 * server good any more...
+				 */
+				if (smbc_getFunctionCheckServer(
+					    context)(context, srv)) {
 
                                         /* ... then remove it. */
                                         if (smbc_getFunctionRemoveUnusedServer(context)(context,
@@ -2030,7 +2024,7 @@ SMBC_chmod_ctx(SMBCCTX *context,
 		TALLOC_FREE(frame);
 		return -1;  /* errno set by SMBC_server */
 	}
-	
+
 	creds = context->internal->creds;
 
 	/*d_printf(">>>unlink: resolving %s\n", path);*/
@@ -2421,13 +2415,13 @@ SMBC_rename_ctx(SMBCCTX *ocontext,
 		TALLOC_FREE(frame);
 		return -1;
 	}
-	
+
 	/* set the credentials to make DFS work */
 	smbc_set_credentials_with_fallback(ncontext,
 					   workgroup,
 				           user2,
 				           password2);
-	
+
 	/*d_printf(">>>rename: resolved path as %s\n", targetpath1);*/
 	/*d_printf(">>>rename: resolving %s\n", path2);*/
 	ncreds = ncontext->internal->creds;
@@ -2452,9 +2446,9 @@ SMBC_rename_ctx(SMBCCTX *ocontext,
 		return -1;
 	}
 
-	if (!NT_STATUS_IS_OK(
-		cli_rename(targetcli1, targetpath1, targetpath2, false))) {
-		int eno = SMBC_errno(ocontext, targetcli1);
+	status = cli_rename(targetcli1, targetpath1, targetpath2, false);
+	if (!NT_STATUS_IS_OK(status)) {
+		int eno = cli_status_to_errno(status);
 
 		if (eno != EEXIST ||
 		    !NT_STATUS_IS_OK(cli_unlink(targetcli1, targetpath2,

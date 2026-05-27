@@ -505,27 +505,6 @@ _kdc_set_e_text(astgs_request_t r, const char *fmt, ...)
     kdc_log(r->context, r->config, 4, "%s", e_text);
 }
 
-/*
- * Override the e-data field to be returned in an error reply. The data will be
- * owned by the KDC and eventually will be freed with krb5_data_free().
- */
-krb5_error_code
-kdc_set_e_data(astgs_request_t r, heim_octet_string e_data)
-{
-    if (r->e_data == NULL) {
-	ALLOC(r->e_data);
-	if (r->e_data == NULL) {
-	    return ENOMEM;
-	}
-    } else {
-	krb5_data_free(r->e_data);
-    }
-
-    *r->e_data = e_data;
-
-    return 0;
-}
-
 void
 _kdc_log_timestamp(astgs_request_t r, const char *type,
 		   KerberosTime authtime, KerberosTime *starttime,
@@ -1082,7 +1061,7 @@ pa_enc_ts_decrypt_kvno(astgs_request_t r,
     krb5_crypto_destroy(r->context, crypto);
     /*
      * Since the user might have several keys with the same
-     * enctype but with diffrent salting, we need to try all
+     * enctype but with different salting, we need to try all
      * the keys with the same enctype.
      */
     if (ret) {
@@ -1146,7 +1125,7 @@ pa_enc_ts_validate(astgs_request_t r, const PA_DATA *pa)
     ret = pa_enc_ts_decrypt_kvno(r, kvno, &enc_data, &ts_data, &pa_key);
     if (ret == KRB5KDC_ERR_ETYPE_NOSUPP) {
 	char *estr;
-	_kdc_set_e_text(r, "No key matching entype");
+	_kdc_set_e_text(r, "No key matching enctype");
 	if(krb5_enctype_to_string(r->context, enc_data.etype, &estr))
 	    estr = NULL;
 	if(estr == NULL)
@@ -1225,6 +1204,9 @@ pa_enc_ts_validate(astgs_request_t r, const PA_DATA *pa)
 	goto out;
     }
     free_EncryptedData(&enc_data);
+    if (ret) {
+	goto out;
+    }
     ret = decode_PA_ENC_TS_ENC(ts_data.data,
 			       ts_data.length,
 			       &p,
@@ -1232,7 +1214,7 @@ pa_enc_ts_validate(astgs_request_t r, const PA_DATA *pa)
     krb5_data_free(&ts_data);
     if(ret){
 	ret = KRB5KDC_ERR_PREAUTH_FAILED;
-	_kdc_r_log(r, 4, "Failed to decode PA-ENC-TS_ENC -- %s",
+	_kdc_r_log(r, 4, "Failed to decode PA-ENC-TS-ENC -- %s",
 		   r->cname);
 	goto out;
     }
@@ -1403,6 +1385,7 @@ struct kdc_patypes {
 #define PA_REPLACE_REPLY_KEY	8   /* PA mech replaces reply key */
 #define PA_USES_LONG_TERM_KEY	16  /* PA mech uses client's long-term key */
 #define PA_USES_FAST_COOKIE	32  /* Multi-step PA mech maintains state in PA-FX-COOKIE */
+#define PA_HARDWARE_AUTH	64  /* PA mech uses hardware authentication */
     krb5_error_code (*validate)(astgs_request_t, const PA_DATA *pa);
     krb5_error_code (*finalize_pac)(astgs_request_t r);
     void (*cleanup)(astgs_request_t r);
@@ -1412,11 +1395,11 @@ static const struct kdc_patypes pat[] = {
 #ifdef PKINIT
     {
 	KRB5_PADATA_PK_AS_REQ, "PK-INIT(ietf)",
-        PA_ANNOUNCE | PA_SYNTHETIC_OK | PA_REPLACE_REPLY_KEY,
+        PA_ANNOUNCE | PA_SYNTHETIC_OK | PA_REPLACE_REPLY_KEY | PA_HARDWARE_AUTH,
 	pa_pkinit_validate, NULL, NULL
     },
     {
-	KRB5_PADATA_PK_AS_REQ_WIN, "PK-INIT(win2k)", PA_ANNOUNCE | PA_REPLACE_REPLY_KEY,
+	KRB5_PADATA_PK_AS_REQ_WIN, "PK-INIT(win2k)", PA_ANNOUNCE | PA_REPLACE_REPLY_KEY | PA_HARDWARE_AUTH,
 	pa_pkinit_validate, NULL, NULL
     },
     {
@@ -1867,7 +1850,7 @@ get_pa_etype_info2(krb5_context context,
 }
 
 /*
- * Return 0 if the client have only older enctypes, this is for
+ * Return 0 if the client has only older enctypes, this is for
  * determining if the server should send ETYPE_INFO2 or not.
  */
 
@@ -2245,7 +2228,6 @@ generate_pac(astgs_request_t r, const Key *skey, const Key *tkey,
 	     krb5_boolean is_tgs)
 {
     krb5_error_code ret;
-    krb5_data data;
     uint16_t rodc_id;
     krb5_principal client;
     krb5_const_principal canon_princ = NULL;
@@ -2310,18 +2292,18 @@ generate_pac(astgs_request_t r, const Key *skey, const Key *tkey,
 	    return ret;
     }
 
-    ret = _krb5_pac_sign(r->context,
-			 r->pac,
-			 r->et.authtime,
-			 client,
-			 &skey->key, /* Server key */
-			 &tkey->key, /* TGS key */
-			 rodc_id,
-			 NULL, /* UPN */
-			 canon_princ,
-			 FALSE, /* add_full_sig */
-			 is_tgs ? &r->pac_attributes : NULL,
-			 &data);
+    ret = _krb5_kdc_pac_sign_ticket(r->context,
+				    r->pac,
+				    client,
+				    &skey->key, /* Server key */
+				    &tkey->key, /* TGS key */
+				    rodc_id,
+				    NULL, /* UPN */
+				    canon_princ,
+				    !is_tgs, /* add_ticket_sig */
+				    !is_tgs, /* add_full_sig */
+				    &r->et,
+				    is_tgs ? &r->pac_attributes : NULL);
     krb5_free_principal(r->context, client);
     krb5_pac_free(r->context, r->pac);
     r->pac = NULL;
@@ -2330,9 +2312,6 @@ generate_pac(astgs_request_t r, const Key *skey, const Key *tkey,
 		   r->cname);
 	return ret;
     }
-    
-    ret = _kdc_tkt_insert_pac(r->context, &r->et, &data);
-    krb5_data_free(&data);
 
     return ret;
 }
@@ -2712,6 +2691,13 @@ _kdc_as_rep(astgs_request_t r)
                     ret = KRB5KDC_ERR_C_PRINCIPAL_UNKNOWN;
                     goto out;
                 }
+                if (!(pat[n].flags & PA_HARDWARE_AUTH)) {
+                    ret = _kdc_hwauth_policy(r);
+                    if (ret) {
+                        kdc_log(r->context, config, 4, "Hardware authentication required for %s", r->cname);
+                        goto out;
+                    }
+                }
 		kdc_audit_addkv((kdc_request_t)r, KDC_AUDIT_VIS, "pa", "%s",
 				pat[n].name);
 		ret = pat[n].validate(r, pa);
@@ -2916,7 +2902,7 @@ _kdc_as_rep(astgs_request_t r)
     if(r->client->flags.postdate && r->server->flags.postdate)
 	r->et.flags.may_postdate = f.allow_postdate;
     else if (f.allow_postdate){
-	_kdc_set_e_text(r, "Ticket may not be postdate");
+	_kdc_set_e_text(r, "Ticket may not be postdateable");
 	ret = KRB5KDC_ERR_POLICY;
 	goto out;
     }
@@ -2957,7 +2943,7 @@ _kdc_as_rep(astgs_request_t r)
 	_kdc_fix_time(&b->till);
 	t = *b->till;
 
-	/* be careful not overflowing */
+	/* be careful not to overflow */
 
         /*
          * Pre-auth can override r->client->max_life if configured.
@@ -3096,7 +3082,7 @@ _kdc_as_rep(astgs_request_t r)
     }
 
     /*
-     * Check and session and reply keys
+     * Check session and reply keys
      */
 
     if (r->session_key.keytype == ETYPE_NULL) {
@@ -3106,7 +3092,7 @@ _kdc_as_rep(astgs_request_t r)
     }
 
     if (r->reply_key.keytype == ETYPE_NULL) {
-	_kdc_set_e_text(r, "Client have no reply key");
+	_kdc_set_e_text(r, "Client has no reply key");
 	ret = KRB5KDC_ERR_CLIENT_NOTYET;
 	goto out;
     }
@@ -3118,13 +3104,6 @@ _kdc_as_rep(astgs_request_t r)
     ret = copy_EncryptionKey(&r->session_key, &r->ek.key);
     if (ret)
 	goto out;
-
-    /* Add the PAC */
-    if (!r->et.flags.anonymous) {
-	ret = generate_pac(r, skey, krbtgt_key, is_tgs);
-	if (ret)
-	    goto out;
-    }
 
     if (r->client->flags.synthetic) {
 	ret = add_synthetic_princ_ad(r);
@@ -3169,6 +3148,18 @@ _kdc_as_rep(astgs_request_t r)
 	}
     }
 
+    /* Add the PAC */
+    if (!r->et.flags.anonymous) {
+	ret = generate_pac(r, skey, krbtgt_key, is_tgs);
+	if (ret)
+	    goto out;
+    }
+
+    /*
+     * No more changes to the ticket (r->et) from this point on, lest
+     * the checksums in the PAC be invalidated.
+     */
+
     /*
      * Last chance for plugins to update reply
      */
@@ -3190,7 +3181,7 @@ _kdc_as_rep(astgs_request_t r)
 	goto out;
 
     /*
-     * Check if message too large
+     * Check if message is too large
      */
     if (r->datagram_reply && r->reply->length > config->max_datagram_reply_length) {
 	krb5_data_free(r->reply);

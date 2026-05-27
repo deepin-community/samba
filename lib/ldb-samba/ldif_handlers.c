@@ -38,6 +38,9 @@
 #include "../lib/util/asn1.h"
 #include "lib/util/smb_strtox.h"
 
+#undef DBGC_CLASS
+#define DBGC_CLASS DBGC_LDB
+
 /*
   use ndr_print_* to convert a NDR formatted blob to a ldif formatted blob
 
@@ -91,8 +94,14 @@ static int ldif_read_objectSid(struct ldb_context *ldb, void *mem_ctx,
 	struct dom_sid sid;
 	if (in->length > DOM_SID_STR_BUFLEN) {
 		return -1;
+	}
+	if (in->length < 5) { /* "S-1-x" */
+		return -1;
+	}
+	if (in->data[0] != 'S' && in->data[0] != 's') {
+		return -1;
 	} else {
-		char p[in->length+1];
+		char p[DOM_SID_STR_BUFLEN + 1];
 		memcpy(p, in->data, in->length);
 		p[in->length] = '\0';
 
@@ -110,6 +119,7 @@ static int ldif_read_objectSid(struct ldb_context *ldb, void *mem_ctx,
 		ndr_err = ndr_push_struct_into_fixed_blob(out, &sid,
 				(ndr_push_flags_fn_t)ndr_push_dom_sid);
 		if (!NDR_ERR_CODE_IS_SUCCESS(ndr_err)) {
+			TALLOC_FREE(out->data);
 			return -1;
 		}
 	}
@@ -137,49 +147,40 @@ int ldif_write_objectSid(struct ldb_context *ldb, void *mem_ctx,
 	return 0;
 }
 
-bool ldif_comparision_objectSid_isString(const struct ldb_val *v)
-{
-	if (v->length < 3) {
-		return false;
-	}
-
-	if (strncmp("S-", (const char *)v->data, 2) != 0) return false;
-
-	return true;
-}
-
 /*
   compare two objectSids
+
+  If the SIDs seem to be strings, they are converted to binary form.
 */
 static int ldif_comparison_objectSid(struct ldb_context *ldb, void *mem_ctx,
 				    const struct ldb_val *v1, const struct ldb_val *v2)
 {
-	if (ldif_comparision_objectSid_isString(v1) && ldif_comparision_objectSid_isString(v2)) {
-		return ldb_comparison_binary(ldb, mem_ctx, v1, v2);
-	} else if (ldif_comparision_objectSid_isString(v1)
-		   && !ldif_comparision_objectSid_isString(v2)) {
-		struct ldb_val v;
-		int ret;
-		if (ldif_read_objectSid(ldb, mem_ctx, v1, &v) != 0) {
-			/* Perhaps not a string after all */
-			return ldb_comparison_binary(ldb, mem_ctx, v1, v2);
-		}
-		ret = ldb_comparison_binary(ldb, mem_ctx, &v, v2);
-		talloc_free(v.data);
-		return ret;
-	} else if (!ldif_comparision_objectSid_isString(v1)
-		   && ldif_comparision_objectSid_isString(v2)) {
-		struct ldb_val v;
-		int ret;
-		if (ldif_read_objectSid(ldb, mem_ctx, v2, &v) != 0) {
-			/* Perhaps not a string after all */
-			return ldb_comparison_binary(ldb, mem_ctx, v1, v2);
-		}
-		ret = ldb_comparison_binary(ldb, mem_ctx, v1, &v);
-		talloc_free(v.data);
-		return ret;
+	struct ldb_val parsed_1 = {.data = NULL};
+	struct ldb_val parsed_2 = {.data = NULL};
+	int ret;
+	/*
+	 * If the ldb_vals look like SID strings (i.e. start with "S-"
+	 * or "s-"), we treat them as strings.
+	 *
+	 * It is not really possible for a blob to be both a SID string and a
+	 * SID struct -- the first two bytes of a struct dom_sid (including in
+	 * NDR form) are the version (1), and the number of sub-auths (<= 15),
+	 * neither of which are close to 'S' or '-'.
+	 */
+	ret = ldif_read_objectSid(ldb, mem_ctx, v1, &parsed_1);
+	if (ret == 0) {
+		v1 = &parsed_1;
 	}
-	return ldb_comparison_binary(ldb, mem_ctx, v1, v2);
+	ret = ldif_read_objectSid(ldb, mem_ctx, v2, &parsed_2);
+	if (ret == 0) {
+		v2 = &parsed_2;
+	}
+
+	ret = ldb_comparison_binary(ldb, mem_ctx, v1, v2);
+
+	TALLOC_FREE(parsed_1.data);
+	TALLOC_FREE(parsed_2.data);
+	return ret;
 }
 
 /*
@@ -188,13 +189,11 @@ static int ldif_comparison_objectSid(struct ldb_context *ldb, void *mem_ctx,
 static int ldif_canonicalise_objectSid(struct ldb_context *ldb, void *mem_ctx,
 				      const struct ldb_val *in, struct ldb_val *out)
 {
-	if (ldif_comparision_objectSid_isString(in)) {
-		if (ldif_read_objectSid(ldb, mem_ctx, in, out) != 0) {
-			/* Perhaps not a string after all */
-			return ldb_handler_copy(ldb, mem_ctx, in, out);
-		}
+	/* First try as a string SID */
+	if (ldif_read_objectSid(ldb, mem_ctx, in, out) == 0) {
 		return 0;
 	}
+	/* not a string after all */
 	return ldb_handler_copy(ldb, mem_ctx, in, out);
 }
 
@@ -203,10 +202,9 @@ static int extended_dn_read_SID(struct ldb_context *ldb, void *mem_ctx,
 {
 	struct dom_sid sid;
 	enum ndr_err_code ndr_err;
-	if (ldif_comparision_objectSid_isString(in)) {
-		if (ldif_read_objectSid(ldb, mem_ctx, in, out) == 0) {
-			return 0;
-		}
+
+	if (ldif_read_objectSid(ldb, mem_ctx, in, out) == 0) {
+		return 0;
 	}
 
 	/* Perhaps not a string after all */
@@ -223,6 +221,7 @@ static int extended_dn_read_SID(struct ldb_context *ldb, void *mem_ctx,
 	ndr_err = ndr_pull_struct_blob_all_noalloc(out, &sid,
 					   (ndr_pull_flags_fn_t)ndr_pull_dom_sid);
 	if (!NDR_ERR_CODE_IS_SUCCESS(ndr_err)) {
+		TALLOC_FREE(out->data);
 		return -1;
 	}
 	return 0;
@@ -549,7 +548,7 @@ static int ldif_write_schemaInfo(struct ldb_context *ldb, void *mem_ctx,
 				 const struct ldb_val *in, struct ldb_val *out)
 {
 	return ldif_write_NDR(ldb, mem_ctx, in, out,
-			      sizeof(struct repsFromToBlob),
+			      sizeof(struct schemaInfoBlob),
 			      (ndr_pull_flags_fn_t)ndr_pull_schemaInfoBlob,
 			      (ndr_print_fn_t)ndr_print_schemaInfoBlob,
 			      true);
@@ -729,7 +728,7 @@ static int ldif_write_prefixMap(struct ldb_context *ldb, void *mem_ctx,
 		oid_blob = data_blob_const(blob->ctr.dsdb.mappings[i].oid.binary_oid,
 					   blob->ctr.dsdb.mappings[i].oid.length);
 		if (!ber_read_partial_OID_String(blob, oid_blob, &partial_oid)) {
-			DEBUG(0, ("ber_read_partial_OID failed on prefixMap item with id: 0x%X",
+			DEBUG(0, ("ber_read_partial_OID failed on prefixMap item with id: 0x%X\n",
 				  blob->ctr.dsdb.mappings[i].id_prefix));
 			goto failed;
 		}
@@ -1148,22 +1147,41 @@ static int samba_ldb_dn_link_comparison(struct ldb_context *ldb, void *mem_ctx,
 	struct ldb_dn *dn1 = NULL, *dn2 = NULL;
 	int ret;
 
+	/*
+	 * In a sort context, Deleted DNs get shifted to the end.
+	 * They never match in an equality
+	 */
 	if (dsdb_dn_is_deleted_val(v1)) {
-		/* If the DN is deleted, then we can't search for it */
-		return -1;
-	}
-
-	if (dsdb_dn_is_deleted_val(v2)) {
-		/* If the DN is deleted, then we can't search for it */
+		if (! dsdb_dn_is_deleted_val(v2)) {
+			return 1;
+		}
+		/*
+		 * They are both deleted!
+		 *
+		 * The soundest thing to do at this point is carry on
+		 * and compare the DNs normally. This matches the
+		 * behaviour of samba_dn_extended_match() below.
+		 */
+	} else if (dsdb_dn_is_deleted_val(v2)) {
 		return -1;
 	}
 
 	dn1 = ldb_dn_from_ldb_val(mem_ctx, ldb, v1);
-	if ( ! ldb_dn_validate(dn1)) return -1;
-
 	dn2 = ldb_dn_from_ldb_val(mem_ctx, ldb, v2);
+
+	if ( ! ldb_dn_validate(dn1)) {
+		TALLOC_FREE(dn1);
+		if ( ! ldb_dn_validate(dn2)) {
+			TALLOC_FREE(dn2);
+			return 0;
+		}
+		TALLOC_FREE(dn2);
+		return 1;
+	}
+
 	if ( ! ldb_dn_validate(dn2)) {
-		talloc_free(dn1);
+		TALLOC_FREE(dn1);
+		TALLOC_FREE(dn2);
 		return -1;
 	}
 

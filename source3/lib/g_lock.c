@@ -53,12 +53,13 @@ struct g_lock {
 static bool g_lock_parse(uint8_t *buf, size_t buflen, struct g_lock *lck)
 {
 	struct server_id exclusive;
-	size_t num_shared, shared_len;
+	size_t num_shared, shared_len, data_len;
 	uint64_t unique_lock_epoch;
 	uint64_t unique_data_epoch;
 
 	if (buflen < (SERVER_ID_BUF_LENGTH + /* exclusive */
-		      sizeof(uint64_t) +     /* seqnum */
+		      sizeof(uint64_t) +     /* unique_lock_epoch */
+		      sizeof(uint64_t) +     /* unique_data_epoch */
 		      sizeof(uint32_t))) {   /* num_shared */
 		struct g_lock ret = {
 			.exclusive.pid = 0,
@@ -93,15 +94,16 @@ static bool g_lock_parse(uint8_t *buf, size_t buflen, struct g_lock *lck)
 	}
 
 	shared_len = num_shared * SERVER_ID_BUF_LENGTH;
+	data_len = buflen - shared_len;
 
 	*lck = (struct g_lock) {
 		.exclusive = exclusive,
 		.num_shared = num_shared,
-		.shared = buf,
+		.shared = num_shared == 0 ? NULL : buf,
 		.unique_lock_epoch = unique_lock_epoch,
 		.unique_data_epoch = unique_data_epoch,
-		.datalen = buflen-shared_len,
-		.data = buf+shared_len,
+		.datalen = data_len,
+		.data = data_len == 0 ? NULL : buf + shared_len,
 	};
 
 	return true;
@@ -360,7 +362,7 @@ NTSTATUS g_lock_lock_cb_dump(struct g_lock_lock_cb_state *cb_state,
 {
 	struct g_lock *lck = cb_state->lck;
 
-	/* We allow a cn_fn only for G_LOCK_WRITE for now... */
+	/* We allow a cb_fn only for G_LOCK_WRITE for now... */
 	SMB_ASSERT(lck->num_shared == 0);
 
 	fn(lck->exclusive,
@@ -1018,7 +1020,7 @@ struct tevent_req *g_lock_lock_send(TALLOC_CTX *mem_ctx,
 	};
 
 	/*
-	 * We allow a cn_fn only for G_LOCK_WRITE for now.
+	 * We allow a cb_fn only for G_LOCK_WRITE for now.
 	 *
 	 * It's all we currently need and it makes a few things
 	 * easier to implement.
@@ -1238,7 +1240,7 @@ NTSTATUS g_lock_lock(struct g_lock_ctx *ctx, TDB_DATA key,
 	SMB_ASSERT(!ctx->busy);
 
 	/*
-	 * We allow a cn_fn only for G_LOCK_WRITE for now.
+	 * We allow a cb_fn only for G_LOCK_WRITE for now.
 	 *
 	 * It's all we currently need and it makes a few things
 	 * easier to implement.
@@ -1556,6 +1558,29 @@ static int g_lock_locks_fn(struct db_record *rec, void *priv)
 	return state->fn(key, state->private_data);
 }
 
+int g_lock_locks_read(struct g_lock_ctx *ctx,
+		      int (*fn)(TDB_DATA key, void *private_data),
+		      void *private_data)
+{
+	struct g_lock_locks_state state;
+	NTSTATUS status;
+	int count;
+
+	SMB_ASSERT(!ctx->busy);
+
+	state.fn = fn;
+	state.private_data = private_data;
+
+	status = dbwrap_traverse_read(ctx->db,
+				      g_lock_locks_fn,
+				      &state,
+				      &count);
+	if (!NT_STATUS_IS_OK(status)) {
+		return -1;
+	}
+	return count;
+}
+
 int g_lock_locks(struct g_lock_ctx *ctx,
 		 int (*fn)(TDB_DATA key, void *private_data),
 		 void *private_data)
@@ -1569,7 +1594,7 @@ int g_lock_locks(struct g_lock_ctx *ctx,
 	state.fn = fn;
 	state.private_data = private_data;
 
-	status = dbwrap_traverse_read(ctx->db, g_lock_locks_fn, &state, &count);
+	status = dbwrap_traverse(ctx->db, g_lock_locks_fn, &state, &count);
 	if (!NT_STATUS_IS_OK(status)) {
 		return -1;
 	}

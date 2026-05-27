@@ -318,7 +318,7 @@ enum dn_compare_result {
  *
  * Compare two parsed_dn structures, using GUID ordering.
  * To avoid the overhead of parsing the DN's this function does a binary
- * compare first. The DN's tre only parsed if they are not equal at a binary
+ * compare first. The DN's are only parsed if they are not equal at a binary
  * level.
  *
  * @param ctx talloc context that will own the parsed dsdb_dn
@@ -385,7 +385,7 @@ static enum dn_compare_result dn_compare(
  *
  * Get the DN of a users primary group as a printable string.
  *
- * @param mem_ctx Talloc context the the returned string will be allocated on.
+ * @param mem_ctx Talloc context the returned string will be allocated on.
  * @param module The ldb module
  * @param account_sid The SID for the uses account.
  * @param primary_group_rid The RID for the users primary group.
@@ -518,7 +518,7 @@ static void log_primary_group_change(
 		if (request->operation == LDB_ADD) {
 			/*
 			 * Have just added a user, generate a groupChange
-			 * message indicating the user has been added to thier
+			 * message indicating the user has been added to their
 			 * new PrimaryGroup.
 			 */
 		}

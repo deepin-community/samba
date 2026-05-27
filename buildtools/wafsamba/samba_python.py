@@ -114,7 +114,7 @@ def SAMBA_PYTHON(bld, name,
     # including Python.h. If the macro is defined, length is a Py_ssize_t
     # rather than an int.
 
-    # Because <Python.h> if often included before includes.h/config.h
+    # Because <Python.h> is often included before includes.h/config.h
     # This must be in the -D compiler options
     cflags += ' -DPY_SSIZE_T_CLEAN=1'
 
@@ -153,5 +153,3 @@ def pyembed_libname(bld, name):
         return name
 
 Build.BuildContext.pyembed_libname = pyembed_libname
-
-

@@ -32,6 +32,7 @@
 #include "libcli/security/security.h"
 #include "system/filesys.h"
 #include "param/param.h"
+#include "param/loadparm.h"
 #include "librpc/rpc/dcerpc_proto.h"
 #include "libcli/composite/composite.h"
 #include "lib/events/events.h"
@@ -46,7 +47,7 @@ bool test_netlogon_ex_ops(struct dcerpc_pipe *p, struct torture_context *tctx,
 			  struct netlogon_creds_CredentialState *creds)
 {
 	NTSTATUS status;
-	struct netr_LogonSamLogonEx r;
+	struct netr_LogonSamLogonEx r = {};
 	struct netr_NetworkInfo ninfo;
 	union netr_LogonLevel logon;
 	union netr_Validation validation;
@@ -63,6 +64,7 @@ bool test_netlogon_ex_ops(struct dcerpc_pipe *p, struct torture_context *tctx,
 	struct netr_SamBaseInfo *base = NULL;
 	const char *crypto_alg = "";
 	bool can_do_validation_6 = true;
+	enum dcerpc_AuthType auth_type = DCERPC_AUTH_TYPE_NONE;
 	enum dcerpc_AuthLevel auth_level = DCERPC_AUTH_LEVEL_NONE;
 
 	if (lpcfg_client_lanman_auth(tctx->lp_ctx)) {
@@ -136,7 +138,7 @@ bool test_netlogon_ex_ops(struct dcerpc_pipe *p, struct torture_context *tctx,
 		}
 	}
 
-	dcerpc_binding_handle_auth_info(b, NULL, &auth_level);
+	dcerpc_binding_handle_auth_info(b, &auth_type, &auth_level);
 	if (auth_level == DCERPC_AUTH_LEVEL_PRIVACY) {
 		r.in.validation_level = 6;
 
@@ -207,22 +209,21 @@ bool test_netlogon_ex_ops(struct dcerpc_pipe *p, struct torture_context *tctx,
 		dump_data(1, base->key.key, 16);
 		dump_data(1, base->LMSessKey.key, 8);
 
-		if (creds->negotiate_flags & NETLOGON_NEG_SUPPORTS_AES) {
-			netlogon_creds_aes_decrypt(creds, base->key.key, 16);
-			netlogon_creds_aes_decrypt(creds, base->LMSessKey.key, 8);
-		} else if (creds->negotiate_flags & NETLOGON_NEG_ARCFOUR) {
-			netlogon_creds_arcfour_crypt(creds, base->key.key, 16);
-			netlogon_creds_arcfour_crypt(creds, base->LMSessKey.key, 8);
-		}
+		status = netlogon_creds_decrypt_samlogon_validation(creds,
+								    r.in.validation_level,
+								    r.out.validation,
+								    auth_type,
+								    auth_level);
+		torture_assert_ntstatus_ok(tctx, status, "decrypt_samlogon_validation");
 
-		DEBUG(1,("decryped keys validation_level %d\n",
+		DEBUG(1,("decrypted keys validation_level %d\n",
 			validation_levels[i]));
 
 		dump_data(1, base->key.key, 16);
 		dump_data(1, base->LMSessKey.key, 8);
 
 		if (!can_do_validation_6) {
-			/* we cant compare against unencrypted keys */
+			/* we can't compare against unencrypted keys */
 			continue;
 		}
 
@@ -247,7 +248,11 @@ static bool test_netlogon_ex_bug14932(struct dcerpc_pipe *p,
 				      struct netlogon_creds_CredentialState *creds)
 {
 	NTSTATUS status;
-	struct netr_LogonSamLogonEx r;
+	struct netr_LogonSamLogonEx r = {
+		.in = {
+			.flags = 0,
+		}
+	};
 	struct netr_NetworkInfo ninfo;
 	union netr_LogonLevel logon;
 	union netr_Validation validation;
@@ -276,6 +281,7 @@ static bool test_netlogon_ex_bug14932(struct dcerpc_pipe *p,
 	struct netr_SamBaseInfo *base = NULL;
 	const char *crypto_alg = "";
 	bool can_do_validation_6 = true;
+	enum dcerpc_AuthType auth_type = DCERPC_AUTH_TYPE_NONE;
 	enum dcerpc_AuthLevel auth_level = DCERPC_AUTH_LEVEL_NONE;
 
 	flags |= CLI_CRED_NTLMv2_AUTH;
@@ -341,7 +347,7 @@ static bool test_netlogon_ex_bug14932(struct dcerpc_pipe *p,
 		}
 	}
 
-	dcerpc_binding_handle_auth_info(b, NULL, &auth_level);
+	dcerpc_binding_handle_auth_info(b, &auth_type, &auth_level);
 	if (auth_level == DCERPC_AUTH_LEVEL_PRIVACY) {
 		r.in.validation_level = 6;
 
@@ -412,22 +418,21 @@ static bool test_netlogon_ex_bug14932(struct dcerpc_pipe *p,
 		dump_data(1, base->key.key, 16);
 		dump_data(1, base->LMSessKey.key, 8);
 
-		if (creds->negotiate_flags & NETLOGON_NEG_SUPPORTS_AES) {
-			netlogon_creds_aes_decrypt(creds, base->key.key, 16);
-			netlogon_creds_aes_decrypt(creds, base->LMSessKey.key, 8);
-		} else if (creds->negotiate_flags & NETLOGON_NEG_ARCFOUR) {
-			netlogon_creds_arcfour_crypt(creds, base->key.key, 16);
-			netlogon_creds_arcfour_crypt(creds, base->LMSessKey.key, 8);
-		}
+		status = netlogon_creds_decrypt_samlogon_validation(creds,
+								    r.in.validation_level,
+								    r.out.validation,
+								    auth_type,
+								    auth_level);
+		torture_assert_ntstatus_ok(tctx, status, "decrypt_samlogon_validation");
 
-		DEBUG(1,("decryped keys validation_level %d\n",
+		DEBUG(1,("decrypted keys validation_level %d\n",
 			validation_levels[i]));
 
 		dump_data(1, base->key.key, 16);
 		dump_data(1, base->LMSessKey.key, 8);
 
 		if (!can_do_validation_6) {
-			/* we cant compare against unencrypted keys */
+			/* we can't compare against unencrypted keys */
 			continue;
 		}
 
@@ -516,15 +521,27 @@ static bool test_samr_ops(struct torture_context *tctx,
 /*
   do some lsa ops using the schannel connection
  */
-static bool test_lsa_ops(struct torture_context *tctx, struct dcerpc_pipe *p)
+static bool test_lsa_ops(struct torture_context *tctx, struct dcerpc_pipe *p,
+		         struct cli_credentials *credentials)
 {
 	struct lsa_GetUserName r;
 	bool ret = true;
 	struct lsa_String *account_name_p = NULL;
 	struct lsa_String *authority_name_p = NULL;
 	struct dcerpc_binding_handle *b = p->binding_handle;
+	enum dcerpc_AuthType auth_type = DCERPC_AUTH_TYPE_NONE;
+	enum dcerpc_AuthLevel auth_level = DCERPC_AUTH_LEVEL_NONE;
+	const char *expected_account_name = "ANONYMOUS LOGON";
+	const char *expected_authority_name = "NT AUTHORITY";
 
 	torture_comment(tctx, "\nTesting GetUserName\n");
+
+	dcerpc_binding_handle_auth_info(b, &auth_type, &auth_level);
+
+	if (auth_type != DCERPC_AUTH_TYPE_SCHANNEL) {
+		expected_account_name = cli_credentials_get_username(credentials);
+		expected_authority_name = cli_credentials_get_domain(credentials);
+	}
 
 	r.in.system_name = "\\";
 	r.in.account_name = &account_name_p;
@@ -545,9 +562,9 @@ static bool test_lsa_ops(struct torture_context *tctx, struct dcerpc_pipe *p)
 			return false;
 		}
 
-		if (strcmp(account_name_p->string, "ANONYMOUS LOGON") != 0) {
+		if (!strequal(account_name_p->string, expected_account_name)) {
 			torture_comment(tctx, "GetUserName returned wrong user: %s, expected %s\n",
-			       account_name_p->string, "ANONYMOUS LOGON");
+			       account_name_p->string, expected_account_name);
 			/* FIXME: gd */
 			if (!torture_setting_bool(tctx, "samba3", false)) {
 				return false;
@@ -557,9 +574,9 @@ static bool test_lsa_ops(struct torture_context *tctx, struct dcerpc_pipe *p)
 			return false;
 		}
 
-		if (strcmp(authority_name_p->string, "NT AUTHORITY") != 0) {
+		if (!strequal(authority_name_p->string, expected_authority_name)) {
 			torture_comment(tctx, "GetUserName returned wrong user: %s, expected %s\n",
-			       authority_name_p->string, "NT AUTHORITY");
+			       authority_name_p->string, expected_authority_name);
 			/* FIXME: gd */
 			if (!torture_setting_bool(tctx, "samba3", false)) {
 				return false;
@@ -591,6 +608,7 @@ static bool test_schannel(struct torture_context *tctx,
 	struct netlogon_creds_CredentialState *creds;
 	struct cli_credentials *credentials;
 	enum dcerpc_transport_t transport;
+	uint32_t requested_flags;
 
 	join_ctx = torture_join_domain(tctx,
 				       talloc_asprintf(tctx, "%s%d", TEST_MACHINE_NAME, i),
@@ -602,6 +620,19 @@ static bool test_schannel(struct torture_context *tctx,
 
 	status = dcerpc_binding_set_flags(b, dcerpc_flags, DCERPC_AUTH_OPTIONS);
 	torture_assert_ntstatus_ok(tctx, status, "set flags");
+
+	transport = dcerpc_binding_get_transport(b);
+
+	if (transport == NCALRPC &&
+	    dcerpc_flags & DCERPC_SCHANNEL_KRB5)
+	{
+		torture_skip(tctx, "Skip DCERPC_SCHANNEL_KRB5 for ncalrpc");
+	}
+	if (cli_credentials_get_realm(credentials) == NULL &&
+	    dcerpc_flags & DCERPC_SCHANNEL_KRB5)
+	{
+		torture_skip(tctx, "Skip DCERPC_SCHANNEL_KRB5 for NT4 Domain");
+	}
 
 	status = dcerpc_pipe_connect_b(tctx, &p, b, &ndr_table_samr,
 				       credentials, tctx->ev, tctx->lp_ctx);
@@ -630,8 +661,11 @@ static bool test_schannel(struct torture_context *tctx,
 	creds = cli_credentials_get_netlogon_creds(credentials);
 	torture_assert(tctx, (creds != NULL), "schannel creds");
 
+	requested_flags = creds->client_requested_flags;
+
 	/* checks the capabilities */
-	torture_assert(tctx, test_netlogon_capabilities(p_netlogon, tctx, credentials, creds),
+	torture_assert(tctx,
+		       test_netlogon_capabilities(p_netlogon, tctx, credentials, requested_flags, creds),
 		       "Failed to process schannel secured capability ops (on fresh connection)");
 
 	/* do a couple of logins */
@@ -646,7 +680,6 @@ static bool test_schannel(struct torture_context *tctx,
 		       "Failed to process schannel secured NETLOGON EX for BUG 14932");
 
 	/* we *MUST* use ncacn_np for openpolicy etc. */
-	transport = dcerpc_binding_get_transport(b);
 	status = dcerpc_binding_set_transport(b, NCACN_NP);
 	torture_assert_ntstatus_ok(tctx, status, "set transport");
 
@@ -659,7 +692,7 @@ static bool test_schannel(struct torture_context *tctx,
 				      credentials, tctx->ev, tctx->lp_ctx),
 		"failed to connect lsarpc with schannel");
 
-	torture_assert(tctx, test_lsa_ops(tctx, p_lsa),
+	torture_assert(tctx, test_lsa_ops(tctx, p_lsa, credentials),
 		"Failed to process schannel secured LSA ops");
 
 	talloc_free(p_lsa);
@@ -719,8 +752,11 @@ static bool test_schannel(struct torture_context *tctx,
 						  tctx, &p_netlogon2);
 	torture_assert_ntstatus_ok(tctx, status, "Failed to create secondary connection");
 
+	requested_flags = creds->client_requested_flags;
+
 	/* checks the capabilities */
-	torture_assert(tctx, test_netlogon_capabilities(p_netlogon2, tctx, credentials, creds),
+	torture_assert(tctx,
+		       test_netlogon_capabilities(p_netlogon2, tctx, credentials, requested_flags, creds),
 		       "Failed to process schannel secured capability ops (on fresh connection)");
 
 	/* Try the schannel-only SamLogonEx operation */
@@ -849,6 +885,12 @@ bool torture_rpc_schannel(struct torture_context *torture)
 		uint16_t acct_flags;
 		uint32_t dcerpc_flags;
 	} tests[] = {
+		/*
+		 * Note the order of these combinations is important
+		 * otherwise exceptions like:
+		 * 'server schannel require seal:schannel2$ = no'
+		 * in selftest/target/Samba4.pm get out of sync.
+		 */
 		{ ACB_WSTRUST,   DCERPC_SCHANNEL | DCERPC_SIGN | DCERPC_SCHANNEL_AUTO},
 		{ ACB_WSTRUST,   DCERPC_SCHANNEL | DCERPC_SEAL | DCERPC_SCHANNEL_AUTO},
 		{ ACB_WSTRUST,   DCERPC_SCHANNEL | DCERPC_SIGN | DCERPC_SCHANNEL_128},
@@ -860,7 +902,11 @@ bool torture_rpc_schannel(struct torture_context *torture)
 		{ ACB_SVRTRUST,  DCERPC_SCHANNEL | DCERPC_SIGN | DCERPC_SCHANNEL_128 },
 		{ ACB_SVRTRUST,  DCERPC_SCHANNEL | DCERPC_SEAL | DCERPC_SCHANNEL_128 },
 		{ ACB_SVRTRUST,  DCERPC_SCHANNEL | DCERPC_SIGN | DCERPC_SCHANNEL_AES },
-		{ ACB_SVRTRUST,  DCERPC_SCHANNEL | DCERPC_SEAL | DCERPC_SCHANNEL_AES }
+		{ ACB_SVRTRUST,  DCERPC_SCHANNEL | DCERPC_SEAL | DCERPC_SCHANNEL_AES },
+		{ ACB_WSTRUST,   DCERPC_SCHANNEL | DCERPC_SIGN | DCERPC_SCHANNEL_KRB5},
+		{ ACB_WSTRUST,   DCERPC_SCHANNEL | DCERPC_SEAL | DCERPC_SCHANNEL_KRB5},
+		{ ACB_SVRTRUST,  DCERPC_SCHANNEL | DCERPC_SIGN | DCERPC_SCHANNEL_KRB5},
+		{ ACB_SVRTRUST,  DCERPC_SCHANNEL | DCERPC_SEAL | DCERPC_SCHANNEL_KRB5},
 	};
 	int i;
 
@@ -1248,6 +1294,8 @@ bool torture_rpc_schannel_bench1(struct torture_context *torture)
 		struct dcerpc_pipe *net_pipe;
 		struct netr_Authenticator credential, return_authenticator;
 		struct samr_Password new_password;
+		enum dcerpc_AuthType auth_type;
+		enum dcerpc_AuthLevel auth_level;
 
 		status = dcerpc_pipe_connect_b(s, &net_pipe, s->b,
 					       &ndr_table_netlogon,
@@ -1272,7 +1320,14 @@ bool torture_rpc_schannel_bench1(struct torture_context *torture)
 
 		creds_state = cli_credentials_get_netlogon_creds(
 			s->wks_creds1);
-		netlogon_creds_des_encrypt(creds_state, &new_password);
+		dcerpc_binding_handle_auth_info(net_pipe->binding_handle,
+						&auth_type,
+						&auth_level);
+		status = netlogon_creds_encrypt_samr_Password(creds_state,
+							      &new_password,
+							      auth_type,
+							      auth_level);
+		torture_assert_ntstatus_ok(torture, status, "encrypt_samr_Password");
 		netlogon_creds_client_authenticator(creds_state, &credential);
 
 		torture_assert_ntstatus_ok(torture, dcerpc_netr_ServerPasswordSet_r(net_pipe->binding_handle, torture, &pwset),

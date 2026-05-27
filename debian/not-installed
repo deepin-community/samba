@@ -2,3 +2,19 @@ etc/sysconfig/samba
 usr/share/man/man7/traffic_replay.7
 usr/share/man/man7/traffic_learner.7
 usr/share/samba/setup
+usr/share/man/man1/log2pcap.1
+# new experimental windows search client
+usr/bin/wspsearch
+usr/share/man/man1/wspsearch.1
+# downgrade db to pre-4.8 version, hardly needed anymore:
+usr/sbin/samba_downgrade_db
+usr/share/man/man8/samba_downgrade_db.8
+# 3 files was in python3-ldb-dev:
+usr/include/samba-4.0/pyldb.h
+usr/lib/*/libpyldb-util.cpython-*.so
+usr/lib/*/pkgconfig/pyldb-util.cpython-*.pc
+# 3 files was in python3-ldb-dev:
+# development files for the python library
+usr/include/pytalloc.h
+usr/lib/${DEB_HOST_MULTIARCH}/pkgconfig/pytalloc-util.cpython-*.pc
+usr/lib/${DEB_HOST_MULTIARCH}/libpytalloc-util.cpython-*.so

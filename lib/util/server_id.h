@@ -24,17 +24,42 @@
 
 struct server_id;
 
-struct server_id_buf { char buf[48]; }; /* probably a bit too large ... */
+struct server_id_buf {
+	/*
+	 * 4294967295 uses 10 chars
+	 * 18446744073709551615 uses 20 chars
+	 *
+	 * We have these combinations:
+	 * - "disconnected"
+	 * - PID64
+	 * - PID64.TASK32
+	 * - VNN32:PID64.TASK32
+	 *
+	 * The largest has 10 + 1 + 20 + 1 + 10 + 1 = 43 chars
+	 *
+	 * Optionally we allow :UNIQUE64 added,
+	 * which adds 21 chars, so we are at 64 chars
+	 * and that's 8 byte aligned.
+	 */
+	char buf[64];
+};
 
 bool server_id_same_process(const struct server_id *p1,
 			    const struct server_id *p2);
 int server_id_cmp(const struct server_id *p1, const struct server_id *p2);
 bool server_id_equal(const struct server_id *p1, const struct server_id *p2);
 char *server_id_str_buf(struct server_id id, struct server_id_buf *dst);
-size_t server_id_str_buf_unique(struct server_id id, char *buf, size_t buflen);
+char *server_id_str_buf_unique_ex(struct server_id id,
+				  char unique_delimiter,
+				  struct server_id_buf *dst);
+char *server_id_str_buf_unique(struct server_id id,
+			       struct server_id_buf *dst);
 
 struct server_id server_id_from_string(uint32_t local_vnn,
 				       const char *pid_string);
+struct server_id server_id_from_string_ex(uint32_t local_vnn,
+					  char unique_delimiter,
+					  const char *pid_string);
 
 /**
  * Set the serverid to the special value that represents a disconnected

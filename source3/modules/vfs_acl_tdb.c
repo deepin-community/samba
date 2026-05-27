@@ -58,7 +58,7 @@ static bool acl_tdb_init(void)
 
 	become_root();
 	acl_db = db_open(NULL, dbname, 0, TDB_DEFAULT, O_RDWR|O_CREAT, 0600,
-			 DBWRAP_LOCK_ORDER_1, DBWRAP_FLAG_NONE);
+			 DBWRAP_LOCK_ORDER_2, DBWRAP_FLAG_NONE);
 	unbecome_root();
 
 	if (acl_db == NULL) {
@@ -102,7 +102,7 @@ static NTSTATUS acl_tdb_delete(vfs_handle_struct *handle,
 	uint8_t id_buf[16];
 
 	/* For backwards compatibility only store the dev/inode. */
-	push_file_id_16((char *)id_buf, &id);
+	push_file_id_16(id_buf, &id);
 
 	status = dbwrap_delete(db, make_tdb_data(id_buf, sizeof(id_buf)));
 	return status;
@@ -131,7 +131,7 @@ static NTSTATUS fget_acl_blob(TALLOC_CTX *ctx,
 	id = vfs_file_id_from_sbuf(handle->conn, &fsp->fsp_name->st);
 
 	/* For backwards compatibility only store the dev/inode. */
-	push_file_id_16((char *)id_buf, &id);
+	push_file_id_16(id_buf, &id);
 
 	status = dbwrap_fetch(db,
 			      ctx,
@@ -179,7 +179,7 @@ static NTSTATUS store_acl_blob_fsp(vfs_handle_struct *handle,
 	id = vfs_file_id_from_sbuf(handle->conn, &fsp->fsp_name->st);
 
 	/* For backwards compatibility only store the dev/inode. */
-	push_file_id_16((char *)id_buf, &id);
+	push_file_id_16(id_buf, &id);
 
 	status = dbwrap_store(
 		db, make_tdb_data(id_buf, sizeof(id_buf)), data, 0);
@@ -195,38 +195,43 @@ static int unlinkat_acl_tdb(vfs_handle_struct *handle,
 			const struct smb_filename *smb_fname,
 			int flags)
 {
-	struct smb_filename *smb_fname_tmp = NULL;
-	struct db_context *db = acl_db;
-	int ret = -1;
+	struct stat_ex st = {};
+	int ret;
 
-	smb_fname_tmp = cp_smb_filename_nostream(talloc_tos(), smb_fname);
-	if (smb_fname_tmp == NULL) {
-		errno = ENOMEM;
-		goto out;
-	}
-
-	ret = vfs_stat(handle->conn, smb_fname_tmp);
-	if (ret == -1) {
-		goto out;
+	if (!is_named_stream(smb_fname)) {
+		if (VALID_STAT(smb_fname->st)) {
+			st = smb_fname->st;
+		} else {
+			ret = SMB_VFS_NEXT_FSTATAT(handle,
+						   dirfsp,
+						   smb_fname,
+						   &st,
+						   AT_SYMLINK_NOFOLLOW);
+			if (ret == -1) {
+				return ret;
+			}
+		}
 	}
 
 	if (flags & AT_REMOVEDIR) {
-		ret = rmdir_acl_common(handle,
-				dirfsp,
-				smb_fname_tmp);
+		ret = rmdir_acl_common(handle, dirfsp, smb_fname);
 	} else {
-		ret = unlink_acl_common(handle,
-				dirfsp,
-				smb_fname_tmp,
-				flags);
+		ret = unlink_acl_common(handle, dirfsp, smb_fname, flags);
 	}
 
 	if (ret == -1) {
-		goto out;
+		return -1;
 	}
 
-	acl_tdb_delete(handle, db, &smb_fname_tmp->st);
- out:
+	if (is_named_stream(smb_fname)) {
+		/*
+		 * ACLs only stored for basenames
+		 */
+		return ret;
+	}
+
+	acl_tdb_delete(handle, acl_db, &st);
+
 	return ret;
 }
 
@@ -274,23 +279,20 @@ static int connect_acl_tdb(struct vfs_handle_struct *handle,
 
 	if (config->ignore_system_acls) {
 		mode_t create_mask = lp_create_mask(SNUM(handle->conn));
-		char *create_mask_str = NULL;
 
 		if ((create_mask & 0666) != 0666) {
+			char create_mask_str[16];
+
 			create_mask |= 0666;
-			create_mask_str = talloc_asprintf(handle, "0%o",
-							  create_mask);
-			if (create_mask_str == NULL) {
-				DBG_ERR("talloc_asprintf failed\n");
-				return -1;
-			}
+			snprintf(create_mask_str,
+				 sizeof(create_mask_str),
+				 "0%o",
+				 create_mask);
 
 			DBG_NOTICE("setting 'create mask = %s'\n", create_mask_str);
 
 			lp_do_parameter (SNUM(handle->conn),
 					"create mask", create_mask_str);
-
-			TALLOC_FREE(create_mask_str);
 		}
 
 		DBG_NOTICE("setting 'directory mask = 0777', "

@@ -26,15 +26,17 @@
 #include "system/filesys.h"
 #include "smb_krb5.h"
 #include "../librpc/gen_ndr/ndr_misc.h"
+#include "../librpc/gen_ndr/samr.h"
 #include "libads/kerberos_proto.h"
-#include "libads/cldap.h"
+#include "libads/netlogon_ping.h"
 #include "secrets.h"
 #include "../lib/tsocket/tsocket.h"
+#include "../libcli/util/tstream.h"
+#include "../lib/util/tevent_ntstatus.h"
 #include "lib/util/asn1.h"
+#include "librpc/gen_ndr/netlogon.h"
 
 #ifdef HAVE_KRB5
-
-#define LIBADS_CCACHE_NAME "MEMORY:libads"
 
 /*
   we use a prompter to avoid a crash bug in the kerberos libs when
@@ -64,13 +66,13 @@ kerb_prompter(krb5_context ctx, void *data,
 		     prompts[1].type == KRB5_PROMPT_TYPE_NEW_PASSWORD_AGAIN) {
 			/*
 			 * We don't want to change passwords here. We're
-			 * called from heimal when the KDC returns
+			 * called from heimdal when the KDC returns
 			 * KRB5KDC_ERR_KEY_EXPIRED, but at this point we don't
 			 * have the chance to ask the user for a new
 			 * password. If we return 0 (i.e. success), we will be
 			 * spinning in the endless for-loop in
 			 * change_password() in
-			 * source4/heimdal/lib/krb5/init_creds_pw.c:526ff
+			 * third_party/heimdal/lib/krb5/init_creds_pw.c
 			 */
 			return KRB5KDC_ERR_KEY_EXPIRED;
 		}
@@ -100,24 +102,30 @@ kerb_prompter(krb5_context ctx, void *data,
 	return 0;
 }
 
+typedef krb5_error_code (*get_init_creds_fn_t)(krb5_context context,
+					       krb5_creds *creds,
+					       krb5_principal client,
+					       krb5_get_init_creds_opt *options,
+					       void *private_data);
+
 /*
-  simulate a kinit, putting the tgt in the given cache location. If cache_name == NULL
-  place in default cache location.
-  remus@snapserver.com
+  simulate a kinit, putting the tgt in the given cache location.
+  cache_name == NULL is not allowed.
 */
-int kerberos_kinit_password_ext(const char *given_principal,
-				const char *password,
-				int time_offset,
-				time_t *expire_time,
-				time_t *renew_till_time,
-				const char *cache_name,
-				bool request_pac,
-				bool add_netbios_addr,
-				time_t renewable_time,
-				TALLOC_CTX *mem_ctx,
-				char **_canon_principal,
-				char **_canon_realm,
-				NTSTATUS *ntstatus)
+static int kerberos_kinit_generic_once(const char *given_principal,
+				       get_init_creds_fn_t get_init_creds_fn,
+				       void *get_init_creds_private,
+				       int time_offset,
+				       time_t *expire_time,
+				       time_t *renew_till_time,
+				       const char *cache_name,
+				       bool request_pac,
+				       bool add_netbios_addr,
+				       time_t renewable_time,
+				       TALLOC_CTX *mem_ctx,
+				       char **_canon_principal,
+				       char **_canon_realm,
+				       NTSTATUS *ntstatus)
 {
 	TALLOC_CTX *frame = talloc_stackframe();
 	krb5_context ctx = NULL;
@@ -133,6 +141,18 @@ int kerberos_kinit_password_ext(const char *given_principal,
 
 	ZERO_STRUCT(my_creds);
 
+	if (ntstatus) {
+		*ntstatus = NT_STATUS_INTERNAL_ERROR;
+	}
+
+	if (cache_name == NULL) {
+		DBG_DEBUG("Missing ccache for [%s] and config [%s]\n",
+			  given_principal,
+			  getenv("KRB5_CONFIG"));
+		TALLOC_FREE(frame);
+		return EINVAL;
+	}
+
 	code = smb_krb5_init_context_common(&ctx);
 	if (code != 0) {
 		DBG_ERR("kerberos init context failed (%s)\n",
@@ -147,10 +167,10 @@ int kerberos_kinit_password_ext(const char *given_principal,
 
 	DBG_DEBUG("as %s using [%s] as ccache and config [%s]\n",
 		  given_principal,
-		  cache_name ? cache_name: krb5_cc_default_name(ctx),
+		  cache_name,
 		  getenv("KRB5_CONFIG"));
 
-	if ((code = krb5_cc_resolve(ctx, cache_name ? cache_name : krb5_cc_default_name(ctx), &cc))) {
+	if ((code = krb5_cc_resolve(ctx, cache_name, &cc))) {
 		goto out;
 	}
 
@@ -192,9 +212,8 @@ int kerberos_kinit_password_ext(const char *given_principal,
 		krb5_get_init_creds_opt_set_address_list(opt, addr->addrs);
 	}
 
-	if ((code = krb5_get_init_creds_password(ctx, &my_creds, me, discard_const_p(char,password),
-						 kerb_prompter, discard_const_p(char, password),
-						 0, NULL, opt))) {
+	code = get_init_creds_fn(ctx, &my_creds, me, opt, get_init_creds_private);
+	if (code != 0) {
 		goto out;
 	}
 
@@ -271,6 +290,645 @@ int kerberos_kinit_password_ext(const char *given_principal,
 	return code;
 }
 
+struct kerberos_kinit_password_ext_private {
+	const char *password;
+};
+
+static krb5_error_code kerberos_kinit_password_ext_cb(krb5_context context,
+						      krb5_creds *creds,
+						      krb5_principal client,
+						      krb5_get_init_creds_opt *options,
+						      void *private_data)
+{
+	struct kerberos_kinit_password_ext_private *ep =
+		(struct kerberos_kinit_password_ext_private *)private_data;
+	krb5_deltat start_time = 0;
+	const char *in_tkt_service = NULL;
+
+	return krb5_get_init_creds_password(context, creds, client,
+					    discard_const_p(char, ep->password),
+					    kerb_prompter,
+					    discard_const_p(char, ep->password),
+					    start_time,
+					    in_tkt_service,
+					    options);
+}
+
+/*
+  simulate a kinit, putting the tgt in the given cache location.
+  cache_name == NULL is not allowed.
+*/
+int kerberos_kinit_password_ext(const char *given_principal,
+				const char *password,
+				int time_offset,
+				time_t *expire_time,
+				time_t *renew_till_time,
+				const char *cache_name,
+				bool request_pac,
+				bool add_netbios_addr,
+				time_t renewable_time,
+				TALLOC_CTX *mem_ctx,
+				char **_canon_principal,
+				char **_canon_realm,
+				NTSTATUS *ntstatus)
+{
+	struct kerberos_kinit_password_ext_private ep = {
+		.password = password,
+	};
+
+	return kerberos_kinit_generic_once(given_principal,
+					   kerberos_kinit_password_ext_cb,
+					   &ep,
+					   time_offset,
+					   expire_time,
+					   renew_till_time,
+					   cache_name,
+					   request_pac,
+					   add_netbios_addr,
+					   renewable_time,
+					   mem_ctx,
+					   _canon_principal,
+					   _canon_realm,
+					   ntstatus);
+}
+
+struct kerberos_transaction_cache {
+	struct tsocket_address *local_addr;
+	struct tsocket_address *kdc_addr;
+	uint32_t timeout_msec;
+};
+
+static NTSTATUS kerberos_transaction_cache_create(
+	const char *explicit_kdc,
+	uint32_t timeout_msec,
+	TALLOC_CTX *mem_ctx,
+	struct kerberos_transaction_cache **_kc)
+{
+	struct kerberos_transaction_cache *kc = NULL;
+	int ret;
+
+	kc = talloc_zero(mem_ctx, struct kerberos_transaction_cache);
+	if (kc == NULL) {
+		return NT_STATUS_NO_MEMORY;
+	}
+	kc->timeout_msec = timeout_msec;
+
+	/* parse the address of explicit kdc */
+	ret = tsocket_address_inet_from_strings(kc,
+						"ip",
+						explicit_kdc,
+						DEFAULT_KRB5_PORT,
+						&kc->kdc_addr);
+	if (ret != 0) {
+		NTSTATUS status = map_nt_error_from_unix_common(errno);
+		TALLOC_FREE(kc);
+		return status;
+	}
+
+	/* get an address for us to use locally */
+	ret = tsocket_address_inet_from_strings(kc,
+						"ip",
+						NULL,
+						0,
+						&kc->local_addr);
+	if (ret != 0) {
+		NTSTATUS status = map_nt_error_from_unix_common(errno);
+		TALLOC_FREE(kc);
+		return status;
+	}
+
+	*_kc = kc;
+	return NT_STATUS_OK;
+}
+
+#ifdef HAVE_KRB5_INIT_CREDS_STEP
+
+struct kerberos_transaction_state {
+	struct tevent_context *ev;
+	struct kerberos_transaction_cache *kc;
+	struct tstream_context *stream;
+	uint8_t in_hdr[4];
+	struct iovec in_iov[2];
+	DATA_BLOB rep_blob;
+};
+
+static void kerberos_transaction_connect_done(struct tevent_req *subreq);
+
+static struct tevent_req *kerberos_transaction_send(
+	TALLOC_CTX *mem_ctx,
+	struct tevent_context *ev,
+	struct kerberos_transaction_cache *kc,
+	const char *realm,
+	const DATA_BLOB req_blob)
+{
+	struct tevent_req *req = NULL;
+	struct kerberos_transaction_state *state = NULL;
+	struct tevent_req *subreq = NULL;
+	struct timeval end;
+
+	req = tevent_req_create(mem_ctx, &state,
+				struct kerberos_transaction_state);
+	if (req == NULL) {
+		return NULL;
+	}
+	state->ev = ev;
+	state->kc = kc;
+
+	PUSH_BE_U32(state->in_hdr, 0, req_blob.length);
+	state->in_iov[0].iov_base = (char *)state->in_hdr;
+	state->in_iov[0].iov_len = 4;
+	state->in_iov[1].iov_base = (char *)req_blob.data;
+	state->in_iov[1].iov_len = req_blob.length;
+
+	end = timeval_current_ofs_msec(state->kc->timeout_msec);
+	if (!tevent_req_set_endtime(req, state->ev, end)) {
+		return tevent_req_post(req, state->ev);
+	}
+
+	subreq = tstream_inet_tcp_connect_send(state,
+					       state->ev,
+					       state->kc->local_addr,
+					       state->kc->kdc_addr);
+	if (tevent_req_nomem(subreq, req)) {
+		return tevent_req_post(req, state->ev);
+	}
+	tevent_req_set_callback(subreq, kerberos_transaction_connect_done, req);
+
+	return req;
+}
+
+static void kerberos_transaction_writev_done(struct tevent_req *subreq);
+static void kerberos_transaction_read_pdu_done(struct tevent_req *subreq);
+
+static void kerberos_transaction_connect_done(struct tevent_req *subreq)
+{
+	struct tevent_req *req =
+		tevent_req_callback_data(subreq,
+		struct tevent_req);
+	struct kerberos_transaction_state *state =
+		tevent_req_data(req,
+		struct kerberos_transaction_state);
+	int ret, sys_errno;
+
+	ret = tstream_inet_tcp_connect_recv(subreq,
+					    &sys_errno,
+					    state,
+					    &state->stream,
+					    NULL);
+	TALLOC_FREE(subreq);
+	if (ret != 0) {
+		NTSTATUS status = map_nt_error_from_unix_common(sys_errno);
+		tevent_req_nterror(req, status);
+		return;
+	}
+
+	subreq = tstream_writev_send(state,
+				     state->ev,
+				     state->stream,
+				     state->in_iov, 2);
+	if (tevent_req_nomem(subreq, req)) {
+		return;
+	}
+	tevent_req_set_callback(subreq, kerberos_transaction_writev_done, req);
+
+	subreq = tstream_read_pdu_blob_send(state,
+					    state->ev,
+					    state->stream,
+					    4, /* initial_read_size */
+					    tstream_full_request_u32,
+					    req);
+	if (tevent_req_nomem(subreq, req)) {
+		return;
+	}
+	tevent_req_set_callback(subreq, kerberos_transaction_read_pdu_done, req);
+}
+
+static void kerberos_transaction_writev_done(struct tevent_req *subreq)
+{
+	struct tevent_req *req =
+		tevent_req_callback_data(subreq,
+		struct tevent_req);
+	int ret, sys_errno;
+
+	ret = tstream_writev_recv(subreq, &sys_errno);
+	TALLOC_FREE(subreq);
+	if (ret == -1) {
+		NTSTATUS status = map_nt_error_from_unix_common(sys_errno);
+		tevent_req_nterror(req, status);
+		return;
+	}
+}
+
+static void kerberos_transaction_read_pdu_done(struct tevent_req *subreq)
+{
+	struct tevent_req *req =
+		tevent_req_callback_data(subreq,
+		struct tevent_req);
+	struct kerberos_transaction_state *state =
+		tevent_req_data(req,
+		struct kerberos_transaction_state);
+	NTSTATUS status;
+
+	status = tstream_read_pdu_blob_recv(subreq, state, &state->rep_blob);
+	TALLOC_FREE(subreq);
+	if (tevent_req_nterror(req, status)) {
+		return;
+	}
+
+	/*
+	 * raw blob has the length in the first 4 bytes,
+	 * which we do not need here.
+	 */
+	memmove(state->rep_blob.data,
+		state->rep_blob.data + 4,
+		state->rep_blob.length - 4);
+	state->rep_blob.length -= 4;
+
+	tevent_req_done(req);
+}
+
+static NTSTATUS kerberos_transaction_recv(struct tevent_req *req,
+					  TALLOC_CTX *mem_ctx,
+					  DATA_BLOB *rep_blob)
+{
+	struct kerberos_transaction_state *state =
+		tevent_req_data(req,
+		struct kerberos_transaction_state);
+	NTSTATUS status;
+
+	if (tevent_req_is_nterror(req, &status)) {
+		tevent_req_received(req);
+		return status;
+	}
+
+	rep_blob->data = talloc_move(mem_ctx, &state->rep_blob.data);
+	rep_blob->length = state->rep_blob.length;
+
+	tevent_req_received(req);
+	return NT_STATUS_OK;
+}
+
+static NTSTATUS kerberos_transaction(
+	struct kerberos_transaction_cache *kc,
+	const char *realm,
+	const DATA_BLOB req_blob,
+	TALLOC_CTX *mem_ctx,
+	DATA_BLOB *rep_blob)
+{
+	TALLOC_CTX *frame = talloc_stackframe();
+	struct tevent_context *ev = NULL;
+	struct tevent_req *req = NULL;
+	NTSTATUS status = NT_STATUS_NO_MEMORY;
+
+	ev = samba_tevent_context_init(frame);
+	if (ev == NULL) {
+		goto fail;
+	}
+	req = kerberos_transaction_send(frame, ev, kc, realm, req_blob);
+	if (req == NULL) {
+		goto fail;
+	}
+	if (!tevent_req_poll_ntstatus(req, ev, &status)) {
+		goto fail;
+	}
+	status = kerberos_transaction_recv(req, mem_ctx, rep_blob);
+ fail:
+	TALLOC_FREE(frame);
+	return status;
+}
+
+#endif /* HAVE_KRB5_INIT_CREDS_STEP */
+
+struct kerberos_kinit_passwords_ext_private {
+	const char *explicit_kdc;
+	uint32_t timeout_msec;
+	struct kerberos_transaction_cache *kc;
+	const char *password;
+	const struct samr_Password *nt_hash;
+};
+
+static krb5_error_code kerberos_kinit_passwords_ext_cb(krb5_context context,
+						       krb5_creds *creds,
+						       krb5_principal client,
+						       krb5_get_init_creds_opt *options,
+						       void *private_data)
+{
+	struct kerberos_kinit_passwords_ext_private *ep =
+		(struct kerberos_kinit_passwords_ext_private *)private_data;
+	TALLOC_CTX *frame = talloc_stackframe();
+	krb5_deltat start_time = 0;
+	krb5_init_creds_context ctx = NULL;
+	krb5_keytab keytab = NULL;
+	krb5_error_code ret;
+#ifdef HAVE_KRB5_INIT_CREDS_STEP
+	DATA_BLOB rep_blob = { .length = 0, };
+#endif /* HAVE_KRB5_INIT_CREDS_STEP */
+
+	ZERO_STRUCTP(creds);
+
+	ret = krb5_init_creds_init(context,
+				   client,
+				   NULL, /* prompter */
+				   NULL, /* prompter_data */
+				   start_time,
+				   options,
+				   &ctx);
+	if (ret) {
+		TALLOC_FREE(frame);
+		return ret;
+	}
+
+	if (ep->password != NULL) {
+		ret = krb5_init_creds_set_password(context, ctx, ep->password);
+		if (ret) {
+			krb5_init_creds_free(context, ctx);
+			TALLOC_FREE(frame);
+			return ret;
+		}
+	} else if (ep->nt_hash != NULL) {
+		const char *keytab_name = "MEMORY:kerberos_kinit_passwords_ext_cb";
+		krb5_keytab_entry entry = { .principal = client, };
+
+		ret = krb5_kt_resolve(context, keytab_name, &keytab);
+		if (ret) {
+			krb5_init_creds_free(context, ctx);
+			TALLOC_FREE(frame);
+			return ret;
+		}
+
+		ret = smb_krb5_keyblock_init_contents(context,
+						      ENCTYPE_ARCFOUR_HMAC,
+						      ep->nt_hash->hash,
+						      ARRAY_SIZE(ep->nt_hash->hash),
+						      KRB5_KT_KEY(&entry));
+		if (ret) {
+			krb5_init_creds_free(context, ctx);
+			krb5_kt_close(context, keytab);
+			TALLOC_FREE(frame);
+			return ret;
+		}
+
+		ret = krb5_kt_add_entry(context, keytab, &entry);
+		krb5_free_keyblock_contents(context, KRB5_KT_KEY(&entry));
+		if (ret) {
+			krb5_init_creds_free(context, ctx);
+			krb5_kt_close(context, keytab);
+			TALLOC_FREE(frame);
+			return ret;
+		}
+
+		ret = krb5_init_creds_set_keytab(context, ctx, keytab);
+		if (ret) {
+			krb5_init_creds_free(context, ctx);
+			krb5_kt_close(context, keytab);
+			TALLOC_FREE(frame);
+			return ret;
+		}
+	} else {
+		ret = EINVAL;
+		krb5_init_creds_free(context, ctx);
+		TALLOC_FREE(frame);
+		return ret;
+	}
+
+	if (ep->kc == NULL) {
+		/*
+		 * Use the logic from the krb5 libraries
+		 * to find the KDC
+		 */
+		ret = krb5_init_creds_get(context, ctx);
+		if (ret) {
+			krb5_init_creds_free(context, ctx);
+			if (keytab != NULL) {
+				krb5_kt_close(context, keytab);
+			}
+			TALLOC_FREE(frame);
+			return ret;
+		}
+
+		goto got_creds;
+	}
+
+#ifdef HAVE_KRB5_INIT_CREDS_STEP
+	while (true) {
+#if defined(HAVE_KRB5_REALM_TYPE)
+		/* Heimdal. */
+		krb5_realm krealm = NULL;
+#else
+		/* MIT */
+		krb5_data krealm = { .length = 0, };
+#endif
+		unsigned int flags = 0;
+		const char *realm = NULL;
+		krb5_data in = { .length = 0, };
+		krb5_data out = { .length = 0, };
+		DATA_BLOB req_blob = { .length = 0, };
+		NTSTATUS status;
+
+		in.data = (void *)rep_blob.data;
+		in.length = rep_blob.length;
+
+		flags = 0;
+		ret = krb5_init_creds_step(context,
+					   ctx,
+					   &in,
+					   &out,
+					   &krealm,
+					   &flags);
+		data_blob_free(&rep_blob);
+		in = (krb5_data) { .length = 0, };
+		if (ret) {
+			krb5_init_creds_free(context, ctx);
+			if (keytab != NULL) {
+				krb5_kt_close(context, keytab);
+			}
+			TALLOC_FREE(frame);
+			return ret;
+		}
+
+		if ((flags & KRB5_INIT_CREDS_STEP_FLAG_CONTINUE) == 0) {
+			smb_krb5_free_data_contents(context, &out);
+#if defined(HAVE_KRB5_REALM_TYPE)
+			/* Heimdal. */
+			SAFE_FREE(krealm);
+#else
+			/* MIT */
+			smb_krb5_free_data_contents(context, &krealm);
+#endif
+			break;
+		}
+
+#if defined(HAVE_KRB5_REALM_TYPE)
+		/* Heimdal. */
+		realm = talloc_strdup(frame, krealm);
+		SAFE_FREE(krealm);
+#else
+		/* MIT */
+		realm = talloc_strndup(frame, krealm.data, krealm.length);
+		smb_krb5_free_data_contents(context, &krealm);
+#endif
+		if (realm == NULL) {
+			smb_krb5_free_data_contents(context, &out);
+			krb5_init_creds_free(context, ctx);
+			if (keytab != NULL) {
+				krb5_kt_close(context, keytab);
+			}
+			TALLOC_FREE(frame);
+			return ENOMEM;
+		}
+
+		req_blob.data = (uint8_t *)out.data;
+		req_blob.length = out.length;
+
+		status = kerberos_transaction(ep->kc,
+					      realm,
+					      req_blob,
+					      frame,
+					      &rep_blob);
+		smb_krb5_free_data_contents(context, &out);
+		req_blob = (DATA_BLOB) { .length = 0, };
+		if (!NT_STATUS_IS_OK(status)) {
+			ret = map_errno_from_nt_status(status);
+			krb5_init_creds_free(context, ctx);
+			if (keytab != NULL) {
+				krb5_kt_close(context, keytab);
+			}
+			TALLOC_FREE(frame);
+			return ret;
+		}
+	}
+#else /* HAVE_KRB5_INIT_CREDS_STEP */
+#ifdef USING_EMBEDDED_HEIMDAL
+#error missing HAVE_KRB5_INIT_CREDS_STEP
+#endif /* USING_EMBEDDED_HEIMDAL */
+	/* Caller should already check! */
+	smb_panic("krb5_init_creds_step not available");
+#endif /* HAVE_KRB5_INIT_CREDS_STEP */
+
+got_creds:
+	ret = krb5_init_creds_get_creds(context, ctx, creds);
+	if (ret) {
+		krb5_init_creds_free(context, ctx);
+		if (keytab != NULL) {
+			krb5_kt_close(context, keytab);
+		}
+		TALLOC_FREE(frame);
+		return ret;
+	}
+
+	krb5_init_creds_free(context, ctx);
+	if (keytab != NULL) {
+		krb5_kt_close(context, keytab);
+	}
+	TALLOC_FREE(frame);
+	return 0;
+}
+
+/*
+  simulate a kinit, putting the tgt in the given cache location.
+  cache_name == NULL is not allowed.
+  This tries all given passwords until we don't get
+  KDC_ERR_PREAUTH_FAILED.
+  If passwords[i] is NULL it falls back to nt_hashes[i]
+*/
+int kerberos_kinit_passwords_ext(const char *given_principal,
+				 uint8_t num_passwords,
+				 const char * const *passwords,
+				 const struct samr_Password * const *nt_hashes,
+				 uint8_t *used_idx,
+				 const char *explicit_kdc,
+				 const char *cache_name,
+				 TALLOC_CTX *mem_ctx,
+				 char **_canon_principal,
+				 char **_canon_realm,
+				 NTSTATUS *ntstatus)
+{
+	TALLOC_CTX *frame = talloc_stackframe();
+	struct kerberos_kinit_passwords_ext_private ep = {
+		.explicit_kdc = explicit_kdc,
+		.timeout_msec = 15*1000,
+	};
+	NTSTATUS status;
+	krb5_error_code ret;
+	uint8_t i;
+	krb5_error_code first_ret = EINVAL;
+	NTSTATUS first_status = NT_STATUS_UNSUCCESSFUL;
+
+	if (num_passwords == 0) {
+		TALLOC_FREE(frame);
+		return EINVAL;
+	}
+	if (num_passwords >= INT8_MAX) {
+		TALLOC_FREE(frame);
+		return EINVAL;
+	}
+
+#ifndef HAVE_KRB5_INIT_CREDS_STEP
+	if (ep.explicit_kdc != NULL) {
+		DBG_ERR("Using explicit_kdc requires krb5_init_creds_step!\n");
+		TALLOC_FREE(frame);
+		return EINVAL;
+	}
+#endif /* ! HAVE_KRB5_INIT_CREDS_STEP */
+
+	DBG_DEBUG("explicit_kdc[%s] given_principal[%s] "
+		  "num_passwords[%u] cache_name[%s]\n",
+		  ep.explicit_kdc,
+		  given_principal,
+		  num_passwords,
+		  cache_name);
+
+	if (ep.explicit_kdc != NULL) {
+		status = kerberos_transaction_cache_create(ep.explicit_kdc,
+							   ep.timeout_msec,
+							   frame,
+							   &ep.kc);
+		if (!NT_STATUS_IS_OK(status)) {
+			TALLOC_FREE(frame);
+			return map_errno_from_nt_status(status);
+		}
+	}
+
+	for (i = 0; i < num_passwords; i++) {
+		ep.password = passwords[i];
+		ep.nt_hash = nt_hashes[i];
+
+		ret = kerberos_kinit_generic_once(given_principal,
+						  kerberos_kinit_passwords_ext_cb,
+						  &ep,
+						  0, /* time_offset */
+						  0, /* expire_time */
+						  0, /* renew_till_time */
+						  cache_name,
+						  true, /* request_pac */
+						  NULL, /* add_netbios_addr */
+						  0,    /* renewable_time */
+						  mem_ctx,
+						  _canon_principal,
+						  _canon_realm,
+						  ntstatus);
+		if (ret == 0) {
+			*used_idx = i;
+			TALLOC_FREE(frame);
+			return 0;
+		}
+		if (i == 0) {
+			first_ret = ret;
+			first_status = *ntstatus;
+		}
+		if (ret != KRB5KDC_ERR_PREAUTH_FAILED) {
+			*used_idx = i;
+			TALLOC_FREE(frame);
+			return ret;
+		}
+	}
+
+	*used_idx = 0;
+	*ntstatus = first_status;
+	TALLOC_FREE(frame);
+	return first_ret;
+}
+
 int ads_kdestroy(const char *cc_name)
 {
 	krb5_error_code code;
@@ -284,23 +942,25 @@ int ads_kdestroy(const char *cc_name)
 		return code;
 	}
 
-	if (!cc_name) {
-		if ((code = krb5_cc_default(ctx, &cc))) {
-			krb5_free_context(ctx);
-			return code;
-		}
-	} else {
-		if ((code = krb5_cc_resolve(ctx, cc_name, &cc))) {
-			DEBUG(3, ("ads_kdestroy: krb5_cc_resolve failed: %s\n",
-				  error_message(code)));
-			krb5_free_context(ctx);
-			return code;
-		}
+	/*
+	 * This should not happen, if
+	 * we need that behaviour we
+	 * should add an ads_kdestroy_default()
+	 */
+	SMB_ASSERT(cc_name != NULL);
+
+	code = krb5_cc_resolve(ctx, cc_name, &cc);
+	if (code != 0) {
+		DBG_NOTICE("krb5_cc_resolve(%s) failed: %s\n",
+			   cc_name, error_message(code));
+		krb5_free_context(ctx);
+		return code;
 	}
 
-	if ((code = krb5_cc_destroy (ctx, cc))) {
-		DEBUG(3, ("ads_kdestroy: krb5_cc_destroy failed: %s\n",
-			error_message(code)));
+	code = krb5_cc_destroy(ctx, cc);
+	if (code != 0) {
+		DBG_ERR("krb5_cc_destroy(%s) failed: %s\n",
+			cc_name, error_message(code));
 	}
 
 	krb5_free_context (ctx);
@@ -345,14 +1005,13 @@ int create_kerberos_key_from_string(krb5_context context,
 
 int kerberos_kinit_password(const char *principal,
 			    const char *password,
-			    int time_offset,
 			    const char *cache_name)
 {
 	return kerberos_kinit_password_ext(principal,
 					   password,
-					   time_offset,
 					   0,
-					   0,
+					   NULL,
+					   NULL,
 					   cache_name,
 					   False,
 					   False,
@@ -429,7 +1088,6 @@ static char *get_kdc_ip_string(char *mem_ctx,
 	size_t num_dcs;
 	struct sockaddr_storage *dc_addrs = NULL;
 	struct tsocket_address **dc_addrs2 = NULL;
-	const struct tsocket_address * const *dc_addrs3 = NULL;
 	char *result = NULL;
 	struct netlogon_samlogon_response **responses = NULL;
 	NTSTATUS status;
@@ -437,23 +1095,22 @@ static char *get_kdc_ip_string(char *mem_ctx,
 	char *kdc_str = NULL;
 	char *canon_sockaddr = NULL;
 
-	SMB_ASSERT(pss != NULL);
+	kdc_str = talloc_strdup(frame, "");
 
-	canon_sockaddr = print_canonical_sockaddr_with_port(frame, pss);
-	if (canon_sockaddr == NULL) {
-		goto out;
-	}
+	if (pss != NULL) {
+		canon_sockaddr = print_canonical_sockaddr_with_port(frame, pss);
+		if (canon_sockaddr == NULL) {
+			goto out;
+		}
 
-	kdc_str = talloc_asprintf(frame,
-				  "\t\tkdc = %s\n",
-				  canon_sockaddr);
-	if (kdc_str == NULL) {
-		goto out;
-	}
+		talloc_asprintf_addbuf(&kdc_str,
+				       "\t\tkdc = %s\n",
+				       canon_sockaddr);
 
-	ok = sockaddr_storage_to_samba_sockaddr(&sa, pss);
-	if (!ok) {
-		goto out;
+		ok = sockaddr_storage_to_samba_sockaddr(&sa, pss);
+		if (!ok) {
+			goto out;
+		}
 	}
 
 	/*
@@ -523,10 +1180,12 @@ static char *get_kdc_ip_string(char *mem_ctx,
 	DBG_DEBUG("%zu additional KDCs to test\n", num_dcs);
 	if (num_dcs == 0) {
 		/*
-		 * We do not have additional KDCs, but we have the one passed
-		 * in via `pss`. So just use that one and leave.
+		 * We do not have additional KDCs, but if we have one passed
+		 * in via `pss` just use that one, otherwise fail
 		 */
-		result = talloc_move(mem_ctx, &kdc_str);
+		if (pss != NULL) {
+			result = talloc_move(mem_ctx, &kdc_str);
+		}
 		goto out;
 	}
 
@@ -554,39 +1213,67 @@ static char *get_kdc_ip_string(char *mem_ctx,
 		}
 	}
 
-	dc_addrs3 = (const struct tsocket_address * const *)dc_addrs2;
-
-	status = cldap_multi_netlogon(talloc_tos(),
-			dc_addrs3, num_dcs,
-			realm, lp_netbios_name(),
-			NETLOGON_NT_VERSION_5 | NETLOGON_NT_VERSION_5EX,
-			MIN(num_dcs, 3), timeval_current_ofs(3, 0), &responses);
+	status = netlogon_pings(talloc_tos(), /* mem_ctx */
+				lp_client_netlogon_ping_protocol(), /* proto */
+				dc_addrs2, /* servers */
+				num_dcs,   /* num_servers */
+				(struct netlogon_ping_filter){
+					.ntversion = NETLOGON_NT_VERSION_5 |
+						     NETLOGON_NT_VERSION_5EX,
+					.domain = realm,
+					.hostname = lp_netbios_name(),
+					.acct_ctrl = -1,
+					.required_flags = DS_KDC_REQUIRED,
+				},
+				MIN(num_dcs, 3),	   /* wanted_servers */
+				timeval_current_ofs(3, 0), /* timeout */
+				&responses);
 	TALLOC_FREE(dc_addrs2);
-	dc_addrs3 = NULL;
 
 	if (!NT_STATUS_IS_OK(status)) {
-		DEBUG(10,("get_kdc_ip_string: cldap_multi_netlogon failed: "
-			  "%s\n", nt_errstr(status)));
+		DBG_DEBUG("netlogon_pings failed: %s\n", nt_errstr(status));
+		/*
+		 * netlogon_pings() failed, but if we have one passed
+		 * in via `pss` just just use that one, otherwise fail
+		 */
+		if (pss != NULL) {
+			result = talloc_move(mem_ctx, &kdc_str);
+		}
 		goto out;
 	}
 
 	for (i=0; i<num_dcs; i++) {
-		char *new_kdc_str;
+		struct NETLOGON_SAM_LOGON_RESPONSE_EX *cldap_reply = NULL;
+		char addr[INET6_ADDRSTRLEN];
 
 		if (responses[i] == NULL) {
 			continue;
 		}
 
-		/* Append to the string - inefficient but not done often. */
-		new_kdc_str = talloc_asprintf_append(
-				kdc_str,
-				"\t\tkdc = %s\n",
-				print_canonical_sockaddr_with_port(
-					mem_ctx, &dc_addrs[i]));
-		if (new_kdc_str == NULL) {
-			goto out;
+		if (responses[i]->ntver != NETLOGON_NT_VERSION_5EX) {
+			continue;
 		}
-		kdc_str = new_kdc_str;
+
+		print_sockaddr(addr, sizeof(addr), &dc_addrs[i]);
+
+		cldap_reply = &responses[i]->data.nt5_ex;
+
+		if (cldap_reply->pdc_dns_name != NULL) {
+			status = check_negative_conn_cache(
+				realm,
+				cldap_reply->pdc_dns_name);
+			if (!NT_STATUS_IS_OK(status)) {
+				/* propagate blacklisting from name to ip */
+				add_failed_connection_entry(realm, addr, status);
+				continue;
+			}
+		}
+
+		/* Append to the string - inefficient but not done often. */
+		talloc_asprintf_addbuf(&kdc_str,
+				       "\t\tkdc = %s\n",
+				       print_canonical_sockaddr_with_port(
+					       mem_ctx, &dc_addrs[i]));
 	}
 
 	result = talloc_move(mem_ctx, &kdc_str);
@@ -693,6 +1380,15 @@ bool create_local_private_krb5_conf_for_domain(const char *realm,
 	char *enctypes = NULL;
 	const char *include_system_krb5 = "";
 	mode_t mask;
+	/*
+	 * The default will be 15 seconds, it can be changed in the smb.conf:
+	 * [global]
+	 *   krb5:request_timeout = 30
+	 */
+	int timeout_sec = lp_parm_int(-1,
+				      "krb5",
+				      "request_timeout",
+				      15 /* default */);
 
 	if (!lp_create_krb5_conf()) {
 		return false;
@@ -704,7 +1400,7 @@ bool create_local_private_krb5_conf_for_domain(const char *realm,
 		return false;
 	}
 
-	if (domain == NULL || pss == NULL) {
+	if (domain == NULL) {
 		return false;
 	}
 
@@ -762,6 +1458,12 @@ bool create_local_private_krb5_conf_for_domain(const char *realm,
 	file_contents =
 	    talloc_asprintf(fname,
 			    "[libdefaults]\n"
+#ifdef SAMBA4_USES_HEIMDAL
+			    "\tkdc_timeout = %d\n"
+#else
+			    "\trequest_timeout = %ds\n"
+			    "\tudp_preference_limit = 0\n"
+#endif
 			    "\tdefault_realm = %s\n"
 			    "%s"
 			    "\tdns_lookup_realm = false\n"
@@ -771,6 +1473,7 @@ bool create_local_private_krb5_conf_for_domain(const char *realm,
 			    "\t%s = {\n"
 			    "%s\t}\n"
 			    "%s\n",
+			    timeout_sec,
 			    realm_upper,
 			    enctypes,
 			    realm_upper,

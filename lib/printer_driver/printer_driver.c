@@ -22,15 +22,7 @@
 #include "rpc_client/init_spoolss.h"
 #include "libgpo/gpo_ini.h"
 #include "printer_driver.h"
-
-#define ADD_TO_ARRAY(mem_ctx, type, elem, array, num) \
-do { \
-	*(array) = talloc_realloc(mem_ctx, (*(array)), type, (*(num))+1); \
-	SMB_ASSERT((*(array)) != NULL); \
-	(*(array))[*(num)] = (elem); \
-	(*(num)) += 1; \
-} while (0)
-
+#include "source3/include/smb_macros.h"
 
 /* GetPrinterDriverDirectory  -> drivers and dependent files */
 #define PRINTER_INF_DIRID_66000
@@ -387,6 +379,9 @@ static NTSTATUS enum_devices_in_toc(struct gp_inifile_context *ctx,
 			status = gp_inifile_enum_section(ctx, decorated_models_section_name,
 							 &num_devices, &devices,
 							 &device_values);
+			if (!NT_STATUS_IS_OK(status)) {
+				return status;
+			}
 			for (d = 0; d < num_devices; d++) {
 
 				DEBUG(11,("processing device: %s\n",
@@ -1153,7 +1148,7 @@ static NTSTATUS setup_driver_by_name(TALLOC_CTX *mem_ctx,
 }
 
 /****************************************************************
- parse the a printer inf file
+ parse a printer inf file
 ****************************************************************/
 
 NTSTATUS driver_inf_parse(TALLOC_CTX *mem_ctx,

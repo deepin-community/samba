@@ -40,6 +40,7 @@ static int wbc_error_to_pam_error(wbcErr status)
 		case WBC_ERR_WINBIND_NOT_AVAILABLE:
 			return PAM_AUTHINFO_UNAVAIL;
 		case WBC_ERR_DOMAIN_NOT_FOUND:
+		case WBC_ERR_NOT_MAPPED:
 			return PAM_AUTHINFO_UNAVAIL;
 		case WBC_ERR_INVALID_RESPONSE:
 			return PAM_BUF_ERR;
@@ -1737,7 +1738,7 @@ static int winbind_auth_request(struct pwb_context *ctx,
 	struct wbcAuthUserInfo *user_info = NULL;
 	struct wbcAuthErrorInfo *error = NULL;
 	int ret = PAM_AUTH_ERR;
-	int i;
+	size_t i;
 	const char *codes[] = {
 		"NT_STATUS_PASSWORD_EXPIRED",
 		"NT_STATUS_PASSWORD_MUST_CHANGE",
@@ -1984,7 +1985,7 @@ static int winbind_chauthtok_request(struct pwb_context *ctx,
 	enum wbcPasswordChangeRejectReason reject_reason = -1;
 	uint32_t flags = 0;
 
-	int i;
+	size_t i;
 	const char *codes[] = {
 		"NT_STATUS_BACKUP_CONTROLLER",
 		"NT_STATUS_DOMAIN_CONTROLLER_NOT_FOUND",
@@ -2143,6 +2144,7 @@ static int valid_user(struct pwb_context *ctx,
 		/* match other insane libwbclient return codes */
 		case WBC_ERR_WINBIND_NOT_AVAILABLE:
 		case WBC_ERR_DOMAIN_NOT_FOUND:
+		case WBC_ERR_NOT_MAPPED:
 			return 1;
 		case WBC_ERR_SUCCESS:
 			return 0;
@@ -2525,11 +2527,12 @@ static char* winbind_upn_to_username(struct pwb_context *ctx,
 	/* Convert the UPN to a SID */
 
 	wbc_status = wbcCtxLookupName(ctx->wbc_ctx, domain, name, &sid, &type);
+	TALLOC_FREE(name);
 	if (!WBC_ERROR_IS_OK(wbc_status)) {
 		return NULL;
 	}
 
-	/* Convert the the SID back to the sAMAccountName */
+	/* Convert the SID back to the sAMAccountName */
 
 	wbc_status = wbcCtxLookupSid(ctx->wbc_ctx, &sid, &domain, &name, &type);
 	if (!WBC_ERROR_IS_OK(wbc_status)) {
@@ -3445,7 +3448,7 @@ int pam_sm_chauthtok(pam_handle_t * pamh, int flags,
 out:
 	{
 		/* Deal with offline errors. */
-		int i;
+		size_t i;
 		const char *codes[] = {
 			"NT_STATUS_DOMAIN_CONTROLLER_NOT_FOUND",
 			"NT_STATUS_NO_LOGON_SERVERS",

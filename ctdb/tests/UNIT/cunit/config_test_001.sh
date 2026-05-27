@@ -36,6 +36,7 @@ ok <<EOF
 	# node address = 
 	# cluster lock = 
 	# recovery lock = 
+	# nodes list = 
 	# leader timeout = 5
 	# leader capability = true
 [database]
@@ -48,6 +49,8 @@ ok <<EOF
 	# debug script = 
 [failover]
 	# disabled = false
+	# shutdown extra timeout = 0
+	# shutdown failover timeout = 10
 [legacy]
 	# realtime scheduling = true
 	# lmaster capability = true

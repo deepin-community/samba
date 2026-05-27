@@ -197,9 +197,9 @@ static NTSTATUS pdb_samba_dsdb_init_sam_from_priv(struct pdb_methods *m,
 	uint64_t n;
 	const DATA_BLOB *blob;
 
-	str = ldb_msg_find_attr_as_string(msg, "samAccountName", NULL);
+	str = ldb_msg_find_attr_as_string(msg, "sAMAccountName", NULL);
 	if (str == NULL) {
-		DEBUG(10, ("no samAccountName\n"));
+		DEBUG(10, ("no sAMAccountName\n"));
 		goto fail;
 	}
 	pdb_set_username(sam, str, PDB_SET);
@@ -531,7 +531,7 @@ static int pdb_samba_dsdb_replace_by_sam(struct pdb_samba_dsdb_state *state,
 	}
 
 	if (need_update(sam, PDB_USERNAME)) {
-		ret |= ldb_msg_add_string(msg, "samAccountName",
+		ret |= ldb_msg_add_string(msg, "sAMAccountName",
 					  pdb_get_username(sam));
 	}
 
@@ -636,17 +636,48 @@ static NTSTATUS pdb_samba_dsdb_getsamupriv(struct pdb_samba_dsdb_state *state,
 				    TALLOC_CTX *mem_ctx,
 				    struct ldb_message **msg)
 {
-	const char * attrs[] = {
-		"lastLogon", "lastLogoff", "pwdLastSet", "accountExpires",
-		"sAMAccountName", "displayName", "homeDirectory",
-		"homeDrive", "scriptPath", "profilePath", "description",
-		"userWorkstations", "comment", "userParameters", "objectSid",
-		"primaryGroupID", "userAccountControl",
-		"msDS-User-Account-Control-Computed", "logonHours",
-		"badPwdCount", "logonCount", "countryCode", "codePage",
-		"unicodePwd", "dBCSPwd", NULL };
+	static const char *attrs[] = {
+		"lastLogon",
+		"lastLogoff",
+		"pwdLastSet",
+		"accountExpires",
+		"sAMAccountName",
+		"displayName",
+		"homeDirectory",
+		"homeDrive",
+		"scriptPath",
+		"profilePath",
+		"description",
+		"userWorkstations",
+		"comment",
+		"userParameters",
+		"objectSid",
+		"primaryGroupID",
+		"userAccountControl",
+		"msDS-User-Account-Control-Computed",
+		"logonHours",
+		"badPwdCount",
+		"logonCount",
+		"countryCode",
+		"codePage",
+		"unicodePwd",
+		"dBCSPwd",
+		/* Required for Group Managed Service Accounts. */
+		"msDS-ManagedPasswordId",
+		"msDS-ManagedPasswordInterval",
+		"objectClass",
+		"whenCreated",
+		NULL};
 
-	int rc = dsdb_search_one(state->ldb, mem_ctx, msg, ldb_get_default_basedn(state->ldb), LDB_SCOPE_SUBTREE, attrs, 0, "%s", filter);
+	int rc = dsdb_search_one(state->ldb,
+				 mem_ctx,
+				 msg,
+				 ldb_get_default_basedn(state->ldb),
+				 LDB_SCOPE_SUBTREE,
+				 attrs,
+				 DSDB_SEARCH_UPDATE_MANAGED_PASSWORDS,
+				 "%s",
+				 filter);
 	if (rc != LDB_SUCCESS) {
 		DEBUG(10, ("ldap_search failed %s\n",
 			   ldb_errstring(state->ldb)));
@@ -711,7 +742,7 @@ static NTSTATUS pdb_samba_dsdb_getsampwnam(struct pdb_methods *m,
 		m->private_data, struct pdb_samba_dsdb_state);
 
 	return pdb_samba_dsdb_getsampwfilter(m, state, sam_acct,
-					 "(&(samaccountname=%s)(objectclass=user))",
+					 "(&(sAMAccountName=%s)(objectclass=user))",
 					 username);
 }
 
@@ -901,7 +932,7 @@ static NTSTATUS pdb_samba_dsdb_getgrfilter(struct pdb_methods *m, GROUP_MAP *map
 {
 	struct pdb_samba_dsdb_state *state = talloc_get_type_abort(
 		m->private_data, struct pdb_samba_dsdb_state);
-	const char *attrs[] = { "objectClass", "objectSid", "description", "samAccountName", "groupType",
+	const char *attrs[] = { "objectClass", "objectSid", "description", "sAMAccountName", "groupType",
 				NULL };
 	struct ldb_message *msg;
 	va_list ap;
@@ -974,17 +1005,17 @@ static NTSTATUS pdb_samba_dsdb_getgrfilter(struct pdb_methods *m, GROUP_MAP *map
 		if (id_map.xid.type == ID_TYPE_GID || id_map.xid.type == ID_TYPE_BOTH) {
 			map->gid = id_map.xid.id;
 		} else {
-			DEBUG(1, (__location__ "Did not get GUID when mapping SID for %s", expression));
+			DEBUG(1, (__location__ "Did not get GUID when mapping SID for %s\n", expression));
 			talloc_free(tmp_ctx);
 			return NT_STATUS_INTERNAL_DB_CORRUPTION;
 		}
 	} else if (samdb_find_attribute(state->ldb, msg, "objectClass", "user")) {
-		DEBUG(1, (__location__ "Got SID_NAME_USER when searching for a group with %s", expression));
+		DEBUG(1, (__location__ "Got SID_NAME_USER when searching for a group with %s\n", expression));
 		talloc_free(tmp_ctx);
 		return NT_STATUS_INTERNAL_DB_CORRUPTION;
 	}
 
-	str = ldb_msg_find_attr_as_string(msg, "samAccountName",
+	str = ldb_msg_find_attr_as_string(msg, "sAMAccountName",
 					  NULL);
 	if (str == NULL) {
 		talloc_free(tmp_ctx);
@@ -1064,7 +1095,7 @@ static NTSTATUS pdb_samba_dsdb_getgrnam(struct pdb_methods *m, GROUP_MAP *map,
 	NTSTATUS status;
 
 	filter = talloc_asprintf(talloc_tos(),
-				 "(&(samaccountname=%s)(objectclass=group))",
+				 "(&(sAMAccountName=%s)(objectclass=group))",
 				 name);
 	if (filter == NULL) {
 		return NT_STATUS_NO_MEMORY;
@@ -1592,7 +1623,8 @@ static NTSTATUS pdb_samba_dsdb_delete_alias(struct pdb_methods *m,
 	}
 
 	if (ldb_transaction_start(state->ldb) != LDB_SUCCESS) {
-		DEBUG(0, ("Failed to start transaction in dsdb_add_domain_alias(): %s\n", ldb_errstring(state->ldb)));
+		DBG_ERR("Failed to start transaction: %s\n",
+			ldb_errstring(state->ldb));
 		talloc_free(tmp_ctx);
 		return NT_STATUS_INTERNAL_ERROR;
 	}
@@ -1948,7 +1980,7 @@ static bool pdb_samba_dsdb_search_filter(struct pdb_methods *m,
 
 		e->acct_flags = samdb_result_acct_flags(res->msgs[i], "userAccountControl");
 		e->account_name = ldb_msg_find_attr_as_string(
-			res->msgs[i], "samAccountName", NULL);
+			res->msgs[i], "sAMAccountName", NULL);
 		if (e->account_name == NULL) {
 			talloc_free(tmp_ctx);
 			return false;
@@ -2022,13 +2054,13 @@ static bool pdb_samba_dsdb_search_aliases(struct pdb_methods *m,
 	return true;
 }
 
-/* 
- * Instead of taking a gid or uid, this function takes a pointer to a 
- * unixid. 
+/*
+ * Instead of taking a gid or uid, this function takes a pointer to a
+ * unixid.
  *
  * This acts as an in-out variable so that the idmap functions can correctly
  * receive ID_TYPE_BOTH, and this function ensures cache details are filled
- * correctly rather than forcing the cache to store ID_TYPE_UID or ID_TYPE_GID. 
+ * correctly rather than forcing the cache to store ID_TYPE_UID or ID_TYPE_GID.
  */
 static bool pdb_samba_dsdb_id_to_sid(struct pdb_methods *m, struct unixid *id,
 				     struct dom_sid *sid)
@@ -2722,12 +2754,7 @@ static bool pdb_samba_dsdb_set_trusteddom_pw(struct pdb_methods *m,
 	}
 
 	for (i = 0; i < old_blob.current.count; i++) {
-		struct AuthenticationInformation *o =
-			&old_blob.current.array[i];
-		struct AuthenticationInformation *p =
-			&new_blob.previous.array[i];
-
-		*p = *o;
+		new_blob.previous.array[i] = old_blob.current.array[i];
 		new_blob.previous.count++;
 	}
 	for (; i < new_blob.count; i++) {
@@ -2855,7 +2882,7 @@ static NTSTATUS pdb_samba_dsdb_enum_trusteddoms(struct pdb_methods *m,
 	status = dsdb_trust_search_tdos(state->ldb, NULL,
 					attrs, tmp_ctx, &res);
 	if (!NT_STATUS_IS_OK(status)) {
-		DBG_ERR("dsdb_trust_search_tdos() - %s ", nt_errstr(status));
+		DBG_ERR("dsdb_trust_search_tdos() - %s\n", nt_errstr(status));
 		TALLOC_FREE(tmp_ctx);
 		return status;
 	}
@@ -3043,7 +3070,7 @@ static NTSTATUS pdb_samba_dsdb_get_trusted_domain(struct pdb_methods *m,
 	status = dsdb_trust_search_tdo(state->ldb, domain, NULL,
 				       attrs, tmp_ctx, &msg);
 	if (!NT_STATUS_IS_OK(status)) {
-		DBG_ERR("dsdb_trust_search_tdo(%s) - %s ",
+		DBG_ERR("dsdb_trust_search_tdo(%s) - %s\n",
 			domain, nt_errstr(status));
 		TALLOC_FREE(tmp_ctx);
 		return status;
@@ -3051,7 +3078,7 @@ static NTSTATUS pdb_samba_dsdb_get_trusted_domain(struct pdb_methods *m,
 
 	status = pdb_samba_dsdb_msg_to_trusted_domain(msg, mem_ctx, &d);
 	if (!NT_STATUS_IS_OK(status)) {
-		DBG_ERR("pdb_samba_dsdb_msg_to_trusted_domain(%s) - %s ",
+		DBG_ERR("pdb_samba_dsdb_msg_to_trusted_domain(%s) - %s\n",
 			domain, nt_errstr(status));
 		TALLOC_FREE(tmp_ctx);
 		return status;
@@ -3092,7 +3119,7 @@ static NTSTATUS pdb_samba_dsdb_get_trusted_domain_by_sid(struct pdb_methods *m,
 	status = dsdb_trust_search_tdo_by_sid(state->ldb, sid,
 					      attrs, tmp_ctx, &msg);
 	if (!NT_STATUS_IS_OK(status)) {
-		DBG_ERR("dsdb_trust_search_tdo_by_sid(%s) - %s ",
+		DBG_ERR("dsdb_trust_search_tdo_by_sid(%s) - %s\n",
 			dom_sid_str_buf(sid, &buf),
 			nt_errstr(status));
 		TALLOC_FREE(tmp_ctx);
@@ -3101,7 +3128,7 @@ static NTSTATUS pdb_samba_dsdb_get_trusted_domain_by_sid(struct pdb_methods *m,
 
 	status = pdb_samba_dsdb_msg_to_trusted_domain(msg, mem_ctx, &d);
 	if (!NT_STATUS_IS_OK(status)) {
-		DBG_ERR("pdb_samba_dsdb_msg_to_trusted_domain(%s) - %s ",
+		DBG_ERR("pdb_samba_dsdb_msg_to_trusted_domain(%s) - %s\n",
 			dom_sid_str_buf(sid, &buf),
 			nt_errstr(status));
 		TALLOC_FREE(tmp_ctx);
@@ -3146,7 +3173,7 @@ static NTSTATUS add_trust_user(TALLOC_CTX *mem_ctx,
 		return NT_STATUS_NO_MEMORY;
 	}
 
-	ret = ldb_msg_add_fmt(msg, "samAccountName", "%s$", netbios_name);
+	ret = ldb_msg_add_fmt(msg, "sAMAccountName", "%s$", netbios_name);
 	if (ret != LDB_SUCCESS) {
 		return NT_STATUS_NO_MEMORY;
 	}
@@ -3491,7 +3518,7 @@ static NTSTATUS delete_trust_user(TALLOC_CTX *mem_ctx,
 			   ldb_get_default_basedn(state->ldb),
 			   &msgs,
 			   attrs,
-			   "samAccountName=%s$",
+			   "sAMAccountName=%s$",
 			   trust_user);
 	if (ret > 1) {
 		return NT_STATUS_INTERNAL_DB_CORRUPTION;
@@ -3633,7 +3660,7 @@ static NTSTATUS pdb_samba_dsdb_enum_trusted_domains(struct pdb_methods *m,
 	status = dsdb_trust_search_tdos(state->ldb, NULL,
 					attrs, tmp_ctx, &res);
 	if (!NT_STATUS_IS_OK(status)) {
-		DBG_ERR("dsdb_trust_search_tdos() - %s ", nt_errstr(status));
+		DBG_ERR("dsdb_trust_search_tdos() - %s\n", nt_errstr(status));
 		TALLOC_FREE(tmp_ctx);
 		return status;
 	}
@@ -3656,7 +3683,7 @@ static NTSTATUS pdb_samba_dsdb_enum_trusted_domains(struct pdb_methods *m,
 
 		status = pdb_samba_dsdb_msg_to_trusted_domain(msg, domains, &d);
 		if (!NT_STATUS_IS_OK(status)) {
-			DBG_ERR("pdb_samba_dsdb_msg_to_trusted_domain() - %s ",
+			DBG_ERR("pdb_samba_dsdb_msg_to_trusted_domain() - %s\n",
 				nt_errstr(status));
 			TALLOC_FREE(tmp_ctx);
 			return status;

@@ -131,8 +131,6 @@ smbc_urlencode(char *dest,
                char *src,
                int max_dest_len)
 {
-        char hex[] = "0123456789ABCDEF";
-
         for (; *src != '\0' && max_dest_len >= 3; src++) {
 
                 if ((*src < '0' &&
@@ -145,8 +143,8 @@ smbc_urlencode(char *dest,
                      *src != '_') ||
                     (*src > 'z')) {
                         *dest++ = '%';
-                        *dest++ = hex[(*src >> 4) & 0x0f];
-                        *dest++ = hex[*src & 0x0f];
+                        *dest++ = nybble_to_hex_upper(*src >> 4);
+                        *dest++ = nybble_to_hex_upper(*src);
                         max_dest_len -= 3;
                 } else {
                         *dest++ = *src;
@@ -262,7 +260,7 @@ SMBC_parse_path(TALLOC_CTX *ctx,
 	/* Watch the test below, we are testing to see if we should exit */
 
 	if (strncmp(p, "//", 2) && strncmp(p, "\\\\", 2)) {
-                DEBUG(1, ("Invalid path (does not begin with smb://"));
+                DEBUG(1, ("Invalid path (does not begin with smb://)\n"));
 		return -1;
 	}
 
@@ -273,7 +271,7 @@ SMBC_parse_path(TALLOC_CTX *ctx,
                 /* There are options.  Null terminate here and point to them */
                 *q++ = '\0';
 
-                DEBUG(4, ("Found options '%s'", q));
+                DEBUG(4, ("Found options '%s'\n", q));
 
 		/* Copy the options */
 		if (pp_options && *pp_options != NULL) {

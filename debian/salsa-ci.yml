@@ -8,3 +8,5 @@ variables:
   SALSA_CI_DISABLE_BLHC: 1
   # cross-building never worked
   SALSA_CI_DISABLE_CROSSBUILD_ARM64: 1
+  # reprotest always fails if build path varies
+  SALSA_CI_REPROTEST_ARGS: --vary=-build_path

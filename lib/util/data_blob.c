@@ -1,19 +1,19 @@
-/* 
+/*
    Unix SMB/CIFS implementation.
    Easy management of byte-length data
    Copyright (C) Andrew Tridgell 2001
    Copyright (C) Andrew Bartlett 2001
-   
+
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
    the Free Software Foundation; either version 3 of the License, or
    (at your option) any later version.
-   
+
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
    GNU General Public License for more details.
-   
+
    You should have received a copy of the GNU General Public License
    along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
@@ -22,6 +22,7 @@
 #include "attr.h"
 #include "data_blob.h"
 #include "lib/util/samba_util.h"
+#include "lib/util/tsort.h"
 
 const DATA_BLOB data_blob_null = { NULL, 0 };
 
@@ -66,7 +67,7 @@ _PUBLIC_ DATA_BLOB data_blob_talloc_named(TALLOC_CTX *mem_ctx, const void *p, si
 }
 
 /**
- construct a zero data blob, using supplied TALLOC_CTX. 
+ construct a zero data blob, using supplied TALLOC_CTX.
  use this sparingly as it initialises data - better to initialise
  yourself if you want specific data in the blob
 **/
@@ -94,7 +95,7 @@ clear a DATA_BLOB's contents
 _PUBLIC_ void data_blob_clear(DATA_BLOB *d)
 {
 	if (d->data) {
-		memset_s(d->data, d->length, 0, d->length);
+		ZERO_ARRAY_LEN(d->data, d->length);
 	}
 }
 
@@ -121,11 +122,12 @@ _PUBLIC_ int data_blob_cmp(const DATA_BLOB *d1, const DATA_BLOB *d2)
 		return 1;
 	}
 	if (d1->data == d2->data) {
-		return d1->length - d2->length;
+		return NUMERIC_CMP(d1->length, d2->length);
 	}
 	ret = memcmp(d1->data, d2->data, MIN(d1->length, d2->length));
 	if (ret == 0) {
-		return d1->length - d2->length;
+		/* Note this ordering is used in conditional aces */
+		return NUMERIC_CMP(d1->length, d2->length);
 	}
 	return ret;
 }
@@ -169,8 +171,10 @@ _PUBLIC_ char *data_blob_hex_string_lower(TALLOC_CTX *mem_ctx, const DATA_BLOB *
 	/* this must be lowercase or w2k8 cannot join a samba domain,
 	   as this routine is used to encode extended DNs and windows
 	   only accepts lowercase hexadecimal numbers */
-	for (i = 0; i < blob->length; i++)
-		slprintf(&hex_string[i*2], 3, "%02x", blob->data[i]);
+	for (i = 0; i < blob->length; i++) {
+		hex_string[i * 2] = nybble_to_hex_lower(blob->data[i] >> 4);
+		hex_string[i * 2 + 1] = nybble_to_hex_lower(blob->data[i]);
+	}
 
 	hex_string[(blob->length*2)] = '\0';
 	return hex_string;
@@ -186,8 +190,10 @@ _PUBLIC_ char *data_blob_hex_string_upper(TALLOC_CTX *mem_ctx, const DATA_BLOB *
 		return NULL;
 	}
 
-	for (i = 0; i < blob->length; i++)
-		slprintf(&hex_string[i*2], 3, "%02X", blob->data[i]);
+	for (i = 0; i < blob->length; i++) {
+		hex_string[i * 2] = nybble_to_hex_upper(blob->data[i] >> 4);
+		hex_string[i * 2 + 1] = nybble_to_hex_upper(blob->data[i]);
+	}
 
 	hex_string[(blob->length*2)] = '\0';
 	return hex_string;
@@ -218,7 +224,7 @@ _PUBLIC_ DATA_BLOB data_blob_string_const_null(const char *str)
 }
 
 /**
- * Create a new data blob from const data 
+ * Create a new data blob from const data
  */
 
 _PUBLIC_ DATA_BLOB data_blob_const(const void *p, size_t length)
@@ -265,7 +271,7 @@ _PUBLIC_ bool data_blob_append(TALLOC_CTX *mem_ctx, DATA_BLOB *blob,
 	if ((const uint8_t *)p + length < (const uint8_t *)p) {
 		return false;
 	}
-	
+
 	if (!data_blob_realloc(mem_ctx, blob, new_len)) {
 		return false;
 	}
@@ -284,7 +290,7 @@ _PUBLIC_ bool data_blob_pad(TALLOC_CTX *mem_ctx, DATA_BLOB *blob,
 	size_t old_len = blob->length;
 	size_t new_len = (old_len + pad - 1) & ~(pad - 1);
 
-	if (new_len < old_len) {
+	if (new_len < old_len || (pad & (pad - 1)) != 0) {
 		return false;
 	}
 

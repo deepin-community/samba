@@ -23,6 +23,7 @@
 #include "system/network.h"
 #include "smbd/smbd.h"
 #include "smbd/globals.h"
+#include "source3/smbd/smbXsrv_session.h"
 #include "smbd/smbXsrv_open.h"
 #include "lib/param/param.h"
 #include "../libcli/smb/smb_common.h"
@@ -314,7 +315,7 @@ static NTSTATUS smbd_initialize_smb2(struct smbXsrv_connection *xconn,
 					xconn->client->raw_ev_ctx,
 					xconn,
 					xconn->transport.sock,
-					TEVENT_FD_READ,
+					TEVENT_FD_ERROR | TEVENT_FD_READ,
 					smbd_smb2_connection_handler,
 					xconn);
 	if (xconn->transport.fde == NULL) {
@@ -385,7 +386,7 @@ void smb2_request_set_async_internal(struct smbd_smb2_request *req,
 	req->async_internal = async_internal;
 }
 
-static struct smbd_smb2_request *smbd_smb2_request_allocate(TALLOC_CTX *mem_ctx)
+static struct smbd_smb2_request *smbd_smb2_request_allocate(struct smbXsrv_connection *xconn)
 {
 	TALLOC_CTX *mem_pool;
 	struct smbd_smb2_request *req;
@@ -400,18 +401,21 @@ static struct smbd_smb2_request *smbd_smb2_request_allocate(TALLOC_CTX *mem_ctx)
 		return NULL;
 	}
 
-	req = talloc_zero(mem_pool, struct smbd_smb2_request);
+	req = talloc(mem_pool, struct smbd_smb2_request);
 	if (req == NULL) {
 		talloc_free(mem_pool);
 		return NULL;
 	}
-	talloc_reparent(mem_pool, mem_ctx, req);
+	talloc_reparent(mem_pool, xconn, req);
 #if 0
 	TALLOC_FREE(mem_pool);
 #endif
-
-	req->last_session_id = UINT64_MAX;
-	req->last_tid = UINT32_MAX;
+	*req = (struct smbd_smb2_request) {
+		.sconn = xconn->client->sconn,
+		.xconn = xconn,
+		.last_session_id = UINT64_MAX,
+		.last_tid = UINT32_MAX,
+	};
 
 	talloc_set_destructor(req, smbd_smb2_request_destructor);
 
@@ -491,6 +495,17 @@ static NTSTATUS smbd_smb2_inbuf_parse_compound(struct smbXsrv_connection *xconn,
 				goto inval;
 			}
 
+			if (!xconn->smb2.got_authenticated_session) {
+				D_INFO("Got SMB2_TRANSFORM header, "
+				       "but not no authenticated session yet "
+				       "client[%s] server[%s]\n",
+				       tsocket_address_string(
+					xconn->remote_address, talloc_tos()),
+				       tsocket_address_string(
+					xconn->local_address, talloc_tos()));
+				goto inval;
+			}
+
 			if (len < SMB2_TF_HDR_SIZE) {
 				DEBUG(1, ("%d bytes left, expected at least %d\n",
 					   (int)len, SMB2_TF_HDR_SIZE));
@@ -513,14 +528,14 @@ static NTSTATUS smbd_smb2_inbuf_parse_compound(struct smbXsrv_connection *xconn,
 
 			status = smb2srv_session_lookup_conn(xconn, uid, now,
 							     &s);
-			if (s == NULL) {
+			if (!NT_STATUS_IS_OK(status)) {
 				status = smb2srv_session_lookup_global(xconn->client,
 								       uid, req, &s);
 			}
-			if (s == NULL) {
-				DEBUG(1, ("invalid session[%llu] in "
-					  "SMB2_TRANSFORM header\n",
-					   (unsigned long long)uid));
+			if (!NT_STATUS_IS_OK(status)) {
+				DBG_WARNING("invalid session[%" PRIu64 "] in "
+					    "SMB2_TRANSFORM header\n",
+					    uid);
 				TALLOC_FREE(iov_alloc);
 				return NT_STATUS_USER_SESSION_DELETED;
 			}
@@ -650,7 +665,6 @@ static NTSTATUS smbd_smb2_request_create(struct smbXsrv_connection *xconn,
 					 const uint8_t *_inpdu, size_t size,
 					 struct smbd_smb2_request **_req)
 {
-	struct smbd_server_connection *sconn = xconn->client->sconn;
 	struct smbd_smb2_request *req;
 	uint32_t protocol_version;
 	uint8_t *inpdu = NULL;
@@ -692,8 +706,6 @@ static NTSTATUS smbd_smb2_request_create(struct smbXsrv_connection *xconn,
 	if (req == NULL) {
 		return NT_STATUS_NO_MEMORY;
 	}
-	req->sconn = sconn;
-	req->xconn = xconn;
 
 	inpdu = talloc_memdup(req, _inpdu, size);
 	if (inpdu == NULL) {
@@ -1709,12 +1721,21 @@ static NTSTATUS smbXsrv_connection_shutdown_recv(struct tevent_req *req)
 	return tevent_req_simple_recv_ntstatus(req);
 }
 
+struct smbd_server_connection_terminate_state {
+	struct smbXsrv_connection *xconn;
+	char *reason;
+};
+
 static void smbd_server_connection_terminate_done(struct tevent_req *subreq)
 {
-	struct smbXsrv_connection *xconn =
-		tevent_req_callback_data(subreq,
-		struct smbXsrv_connection);
+	struct smbd_server_connection_terminate_state *state =
+		tevent_req_callback_data(
+			subreq,
+			struct smbd_server_connection_terminate_state);
+	struct smbXsrv_connection *xconn = state->xconn;
 	struct smbXsrv_client *client = xconn->client;
+	const char *reason = state->reason;
+	size_t num_ok;
 	NTSTATUS status;
 
 	status = smbXsrv_connection_shutdown_recv(subreq);
@@ -1725,14 +1746,36 @@ static void smbd_server_connection_terminate_done(struct tevent_req *subreq)
 
 	DLIST_REMOVE(client->connections, xconn);
 	TALLOC_FREE(xconn);
+
+	num_ok = smbXsrv_client_valid_connections(client);
+	if (num_ok > 0) {
+		return;
+	}
+
+	/*
+	 * The last connection was disconnected
+	 */
+	exit_server_cleanly(reason);
 }
 
 void smbd_server_connection_terminate_ex(struct smbXsrv_connection *xconn,
 					 const char *reason,
 					 const char *location)
 {
+	struct smbd_server_connection_terminate_state *state = NULL;
 	struct smbXsrv_client *client = xconn->client;
+	struct tevent_req *subreq = NULL;
 	size_t num_ok = 0;
+
+	state = talloc_zero(xconn, struct smbd_server_connection_terminate_state);
+	if (state == NULL) {
+		exit_server("smbXsrv_connection_shutdown_send failed");
+	}
+	state->xconn = xconn;
+	state->reason = talloc_strdup(NULL, reason);
+	if (state->reason == NULL) {
+		exit_server("talloc_strdup failed");
+	}
 
 	/*
 	 * Make sure that no new request will be able to use this session.
@@ -1773,25 +1816,16 @@ void smbd_server_connection_terminate_ex(struct smbXsrv_connection *xconn,
 		return;
 	}
 
-	if (num_ok != 0) {
-		struct tevent_req *subreq = NULL;
-
-		subreq = smbXsrv_connection_shutdown_send(client,
-							  client->raw_ev_ctx,
-							  xconn);
-		if (subreq == NULL) {
-			exit_server("smbXsrv_connection_shutdown_send failed");
-		}
-		tevent_req_set_callback(subreq,
-					smbd_server_connection_terminate_done,
-					xconn);
-		return;
+	subreq = smbXsrv_connection_shutdown_send(client,
+						  client->raw_ev_ctx,
+						  xconn);
+	if (subreq == NULL) {
+		exit_server("smbXsrv_connection_shutdown_send failed");
 	}
-
-	/*
-	 * The last connection was disconnected
-	 */
-	exit_server_cleanly(reason);
+	tevent_req_set_callback(subreq,
+				smbd_server_connection_terminate_done,
+				state);
+	return;
 }
 
 void smbd_server_disconnect_client_ex(struct smbXsrv_client *client,
@@ -1924,8 +1958,6 @@ static struct smbd_smb2_request *dup_smb2_req(const struct smbd_smb2_request *re
 		return NULL;
 	}
 
-	newreq->sconn = req->sconn;
-	newreq->xconn = req->xconn;
 	newreq->session = req->session;
 	newreq->do_encryption = req->do_encryption;
 	newreq->do_signing = req->do_signing;
@@ -2459,7 +2491,7 @@ static NTSTATUS smbd_smb2_request_process_cancel(struct smbd_smb2_request *req)
 	uint32_t flags;
 	uint64_t search_message_id;
 	uint64_t search_async_id;
-	uint64_t found_id;
+	uint64_t found_id = 0;
 
 	inhdr = SMBD_SMB2_IN_HDR_PTR(req);
 
@@ -3040,6 +3072,7 @@ NTSTATUS smbd_smb2_request_dispatch(struct smbd_smb2_request *req)
 	bool signing_required = false;
 	bool encryption_desired = false;
 	bool encryption_required = false;
+	bool session_expired = false;
 
 	inhdr = SMBD_SMB2_IN_HDR_PTR(req);
 
@@ -3088,6 +3121,9 @@ NTSTATUS smbd_smb2_request_dispatch(struct smbd_smb2_request *req)
 		signing_required = x->global->signing_flags & SMBXSRV_SIGNING_REQUIRED;
 		encryption_desired = x->global->encryption_flags & SMBXSRV_ENCRYPTION_DESIRED;
 		encryption_required = x->global->encryption_flags & SMBXSRV_ENCRYPTION_REQUIRED;
+		session_expired =
+			NT_STATUS_EQUAL(session_status,
+					NT_STATUS_NETWORK_SESSION_EXPIRED);
 	}
 
 	req->async_internal = false;
@@ -3103,10 +3139,11 @@ NTSTATUS smbd_smb2_request_dispatch(struct smbd_smb2_request *req)
 		uint64_t tf_session_id = BVAL(intf, SMB2_TF_SESSION_ID);
 
 		if (x != NULL && x->global->session_wire_id != tf_session_id) {
-			DEBUG(0,("smbd_smb2_request_dispatch: invalid session_id"
-				 "in SMB2_HDR[%llu], SMB2_TF[%llu]\n",
-				 (unsigned long long)x->global->session_wire_id,
-				 (unsigned long long)tf_session_id));
+			DBG_ERR("invalid session_id "
+				"in SMB2_HDR[%" PRIu64 "], SMB2_TF[%" PRIu64
+				"]\n",
+				x->global->session_wire_id,
+				tf_session_id);
 			/*
 			 * TODO: windows allows this...
 			 * should we drop the connection?
@@ -3160,7 +3197,7 @@ NTSTATUS smbd_smb2_request_dispatch(struct smbd_smb2_request *req)
 		 * This check is mostly for giving the correct error code
 		 * for compounded requests.
 		 */
-		if (!NT_STATUS_IS_OK(session_status)) {
+		if (!session_expired && !NT_STATUS_IS_OK(session_status)) {
 			return smbd_smb2_request_error(req, NT_STATUS_INVALID_PARAMETER);
 		}
 	} else {
@@ -3246,6 +3283,9 @@ NTSTATUS smbd_smb2_request_dispatch(struct smbd_smb2_request *req)
 		}
 
 		if (!NT_STATUS_IS_OK(session_status)) {
+			if (session_expired && opcode == SMB2_OP_CREATE) {
+				req->compound_create_err = session_status;
+			}
 			return smbd_smb2_request_error(req, session_status);
 		}
 	}
@@ -3297,11 +3337,18 @@ NTSTATUS smbd_smb2_request_dispatch(struct smbd_smb2_request *req)
 skipped_signing:
 
 	if (flags & SMB2_HDR_FLAG_CHAINED) {
+		if (!NT_STATUS_IS_OK(req->compound_create_err)) {
+			return smbd_smb2_request_error(req,
+					req->compound_create_err);
+		}
 		req->compound_related = true;
 	}
 
 	if (call->need_session) {
 		if (!NT_STATUS_IS_OK(session_status)) {
+			if (session_expired && opcode == SMB2_OP_CREATE) {
+				req->compound_create_err = session_status;
+			}
 			return smbd_smb2_request_error(req, session_status);
 		}
 	}
@@ -3811,10 +3858,6 @@ static NTSTATUS smbd_smb2_request_reply(struct smbd_smb2_request *req)
 				return gnutls_error_to_ntstatus(rc, NT_STATUS_HASH_NOT_SUPPORTED);
 			}
 		}
-		if (rc < 0) {
-			gnutls_hash_deinit(hash_hnd, NULL);
-			return gnutls_error_to_ntstatus(rc, NT_STATUS_HASH_NOT_SUPPORTED);
-		}
 		gnutls_hash_output(hash_hnd, req->preauth->sha512_value);
 
 		rc = gnutls_hash(hash_hnd,
@@ -4053,6 +4096,16 @@ NTSTATUS smbd_smb2_request_error_ex(struct smbd_smb2_request *req,
 				  (unsigned)ret, errno, nt_errstr(error)));
 			return error;
 		}
+	}
+
+	if (req->compound_related &&
+	    NT_STATUS_EQUAL(status, NT_STATUS_CANCELLED))
+	{
+		/*
+		 * A compound request went async but was cancelled as it was not
+		 * one of the allowed async compound requests.
+		 */
+		status = NT_STATUS_INTERNAL_ERROR;
 	}
 
 	body.data = outhdr + SMB2_HDR_BODY;
@@ -4551,8 +4604,8 @@ static bool is_smb2_recvfile_write(struct smbd_smb2_request_read_state *state)
 
 static NTSTATUS smbd_smb2_request_next_incoming(struct smbXsrv_connection *xconn)
 {
-	struct smbd_server_connection *sconn = xconn->client->sconn;
 	struct smbd_smb2_request_read_state *state = &xconn->smb2.request_read_state;
+	struct smbd_smb2_request *req = NULL;
 	size_t max_send_queue_len;
 	size_t cur_send_queue_len;
 
@@ -4584,14 +4637,22 @@ static NTSTATUS smbd_smb2_request_next_incoming(struct smbXsrv_connection *xconn
 	}
 
 	/* ask for the next request */
-	ZERO_STRUCTP(state);
-	state->req = smbd_smb2_request_allocate(xconn);
-	if (state->req == NULL) {
+	req = smbd_smb2_request_allocate(xconn);
+	if (req == NULL) {
 		return NT_STATUS_NO_MEMORY;
 	}
-	state->req->sconn = sconn;
-	state->req->xconn = xconn;
-	state->min_recv_size = lp_min_receive_file_size();
+	*state = (struct smbd_smb2_request_read_state) {
+		.req = req,
+		.min_recv_size = lp_min_receive_file_size(),
+		._vector = {
+			[0] = (struct iovec) {
+				.iov_base = (void *)state->hdr.nbt,
+				.iov_len = NBT_HDR_SIZE,
+			},
+		},
+		.vector = state->_vector,
+		.count = 1,
+	};
 
 	TEVENT_FD_READABLE(xconn->transport.fde);
 
@@ -4726,7 +4787,40 @@ static int socket_error_from_errno(int ret,
 	return sys_errno;
 }
 
-static NTSTATUS smbd_smb2_flush_send_queue(struct smbXsrv_connection *xconn)
+static NTSTATUS smbd_smb2_advance_send_queue(struct smbXsrv_connection *xconn,
+					     struct smbd_smb2_send_queue **_e,
+					     size_t n)
+{
+	struct smbd_smb2_send_queue *e = *_e;
+	bool ok;
+
+	xconn->ack.unacked_bytes += n;
+
+	ok = iov_advance(&e->vector, &e->count, n);
+	if (!ok) {
+		return NT_STATUS_INTERNAL_ERROR;
+	}
+
+	if (e->count > 0) {
+		return NT_STATUS_RETRY;
+	}
+
+	xconn->smb2.send_queue_len--;
+	DLIST_REMOVE(xconn->smb2.send_queue, e);
+
+	if (e->ack.req == NULL) {
+		*_e = NULL;
+		talloc_free(e->mem_ctx);
+		return NT_STATUS_OK;
+	}
+
+	e->ack.required_acked_bytes = xconn->ack.unacked_bytes;
+	DLIST_ADD_END(xconn->ack.queue, e);
+
+	return NT_STATUS_OK;
+}
+
+static NTSTATUS smbd_smb2_flush_with_sendmsg(struct smbXsrv_connection *xconn)
 {
 	int ret;
 	int err;
@@ -4741,8 +4835,6 @@ static NTSTATUS smbd_smb2_flush_send_queue(struct smbXsrv_connection *xconn)
 	while (xconn->smb2.send_queue != NULL) {
 		struct smbd_smb2_send_queue *e = xconn->smb2.send_queue;
 		unsigned sendmsg_flags = 0;
-		bool ok;
-		struct msghdr msg;
 
 		if (!NT_STATUS_IS_OK(xconn->transport.status)) {
 			/*
@@ -4809,7 +4901,7 @@ static NTSTATUS smbd_smb2_flush_send_queue(struct smbXsrv_connection *xconn)
 			continue;
 		}
 
-		msg = (struct msghdr) {
+		e->msg = (struct msghdr) {
 			.msg_iov = e->vector,
 			.msg_iovlen = e->count,
 		};
@@ -4821,7 +4913,7 @@ static NTSTATUS smbd_smb2_flush_send_queue(struct smbXsrv_connection *xconn)
 		sendmsg_flags |= MSG_DONTWAIT;
 #endif
 
-		ret = sendmsg(xconn->transport.sock, &msg, sendmsg_flags);
+		ret = sendmsg(xconn->transport.sock, &e->msg, sendmsg_flags);
 		if (ret == 0) {
 			/* propagate end of file */
 			return NT_STATUS_INTERNAL_ERROR;
@@ -4839,29 +4931,29 @@ static NTSTATUS smbd_smb2_flush_send_queue(struct smbXsrv_connection *xconn)
 			return status;
 		}
 
-		xconn->ack.unacked_bytes += ret;
-
-		ok = iov_advance(&e->vector, &e->count, ret);
-		if (!ok) {
-			return NT_STATUS_INTERNAL_ERROR;
-		}
-
-		if (e->count > 0) {
-			/* we have more to write */
+		status = smbd_smb2_advance_send_queue(xconn, &e, ret);
+		if (NT_STATUS_EQUAL(status, NT_STATUS_RETRY)) {
+			/* retry later */
 			TEVENT_FD_WRITEABLE(xconn->transport.fde);
 			return NT_STATUS_OK;
 		}
-
-		xconn->smb2.send_queue_len--;
-		DLIST_REMOVE(xconn->smb2.send_queue, e);
-
-		if (e->ack.req == NULL) {
-			talloc_free(e->mem_ctx);
-			continue;
+		if (!NT_STATUS_IS_OK(status)) {
+			smbXsrv_connection_disconnect_transport(xconn,
+								status);
+			return status;
 		}
+	}
 
-		e->ack.required_acked_bytes = xconn->ack.unacked_bytes;
-		DLIST_ADD_END(xconn->ack.queue, e);
+	return NT_STATUS_MORE_PROCESSING_REQUIRED;
+}
+
+static NTSTATUS smbd_smb2_flush_send_queue(struct smbXsrv_connection *xconn)
+{
+	NTSTATUS status;
+
+	status = smbd_smb2_flush_with_sendmsg(xconn);
+	if (!NT_STATUS_EQUAL(status, NT_STATUS_MORE_PROCESSING_REQUIRED)) {
+		return status;
 	}
 
 	/*
@@ -4877,100 +4969,36 @@ static NTSTATUS smbd_smb2_flush_send_queue(struct smbXsrv_connection *xconn)
 	return NT_STATUS_OK;
 }
 
-static NTSTATUS smbd_smb2_io_handler(struct smbXsrv_connection *xconn,
-				     uint16_t fde_flags)
+static NTSTATUS smbd_smb2_advance_incoming(struct smbXsrv_connection *xconn, size_t n)
 {
 	struct smbd_server_connection *sconn = xconn->client->sconn;
 	struct smbd_smb2_request_read_state *state = &xconn->smb2.request_read_state;
 	struct smbd_smb2_request *req = NULL;
 	size_t min_recvfile_size = UINT32_MAX;
-	unsigned recvmsg_flags = 0;
-	int ret;
-	int err;
-	bool retry;
 	NTSTATUS status;
 	NTTIME now;
-	struct msghdr msg;
+	bool ok;
 
-	if (!NT_STATUS_IS_OK(xconn->transport.status)) {
-		/*
-		 * we're not supposed to do any io
-		 */
-		TEVENT_FD_NOT_READABLE(xconn->transport.fde);
-		TEVENT_FD_NOT_WRITEABLE(xconn->transport.fde);
-		return NT_STATUS_OK;
+	ok = iov_advance(&state->vector, &state->count, n);
+	if (!ok) {
+		return NT_STATUS_INTERNAL_ERROR;
 	}
 
-	if (fde_flags & TEVENT_FD_WRITE) {
-		status = smbd_smb2_flush_send_queue(xconn);
-		if (!NT_STATUS_IS_OK(status)) {
-			return status;
-		}
-	}
-
-	if (!(fde_flags & TEVENT_FD_READ)) {
-		return NT_STATUS_OK;
-	}
-
-	if (state->req == NULL) {
-		TEVENT_FD_NOT_READABLE(xconn->transport.fde);
-		return NT_STATUS_OK;
-	}
-
-again:
-	if (!state->hdr.done) {
-		state->hdr.done = true;
-
-		state->vector.iov_base = (void *)state->hdr.nbt;
-		state->vector.iov_len = NBT_HDR_SIZE;
-	}
-
-	msg = (struct msghdr) {
-		.msg_iov = &state->vector,
-		.msg_iovlen = 1,
-	};
-
-#ifdef MSG_NOSIGNAL
-	recvmsg_flags |= MSG_NOSIGNAL;
-#endif
-#ifdef MSG_DONTWAIT
-	recvmsg_flags |= MSG_DONTWAIT;
-#endif
-
-	ret = recvmsg(xconn->transport.sock, &msg, recvmsg_flags);
-	if (ret == 0) {
-		/* propagate end of file */
-		status = NT_STATUS_END_OF_FILE;
-		smbXsrv_connection_disconnect_transport(xconn,
-							status);
-		return status;
-	}
-	err = socket_error_from_errno(ret, errno, &retry);
-	if (retry) {
-		/* retry later */
-		TEVENT_FD_READABLE(xconn->transport.fde);
-		return NT_STATUS_OK;
-	}
-	if (err != 0) {
-		status = map_nt_error_from_unix_common(err);
-		smbXsrv_connection_disconnect_transport(xconn,
-							status);
-		return status;
-	}
-
-	if (ret < state->vector.iov_len) {
-		uint8_t *base;
-		base = (uint8_t *)state->vector.iov_base;
-		base += ret;
-		state->vector.iov_base = (void *)base;
-		state->vector.iov_len -= ret;
-		/* we have more to read */
-		TEVENT_FD_READABLE(xconn->transport.fde);
-		return NT_STATUS_OK;
+	if (state->count > 0) {
+		return NT_STATUS_PENDING;
 	}
 
 	if (state->pktlen > 0) {
-		if (state->doing_receivefile && !is_smb2_recvfile_write(state)) {
+		if (!state->doing_receivefile) {
+			/*
+			 * we have all the data.
+			 */
+			goto got_full;
+		}
+
+		if (!is_smb2_recvfile_write(state)) {
+			size_t ofs = state->pktlen;
+
 			/*
 			 * Not a possible receivefile write.
 			 * Read the rest of the data.
@@ -4985,18 +5013,20 @@ again:
 				return NT_STATUS_NO_MEMORY;
 			}
 
-			state->vector.iov_base = (void *)(state->pktbuf +
-				state->pktlen);
-			state->vector.iov_len = (state->pktfull -
-				state->pktlen);
+			state->_vector[0]  = (struct iovec) {
+				.iov_base = (void *)(state->pktbuf + ofs),
+				.iov_len = (state->pktfull - ofs),
+			};
+			state->vector = state->_vector;
+			state->count = 1;
 
 			state->pktlen = state->pktfull;
-			goto again;
+			return NT_STATUS_RETRY;
 		}
 
 		/*
-		 * Either this is a receivefile write so we've
-		 * done a short read, or if not we have all the data.
+		 * This is a receivefile write so we've
+		 * done a short read.
 		 */
 		goto got_full;
 	}
@@ -5037,10 +5067,14 @@ again:
 		return NT_STATUS_NO_MEMORY;
 	}
 
-	state->vector.iov_base = (void *)state->pktbuf;
-	state->vector.iov_len = state->pktlen;
+	state->_vector[0] = (struct iovec) {
+		.iov_base = (void *)state->pktbuf,
+		.iov_len = state->pktlen,
+	};
+	state->vector = state->_vector;
+	state->count = 1;
 
-	goto again;
+	return NT_STATUS_RETRY;
 
 got_full:
 
@@ -5049,15 +5083,22 @@ got_full:
 			 state->hdr.nbt[0]));
 
 		req = state->req;
-		ZERO_STRUCTP(state);
-		state->req = req;
-		state->min_recv_size = lp_min_receive_file_size();
-		req = NULL;
-		goto again;
+		*state = (struct smbd_smb2_request_read_state) {
+			.req = req,
+			.min_recv_size = lp_min_receive_file_size(),
+			._vector = {
+				[0] = (struct iovec) {
+					.iov_base = (void *)state->hdr.nbt,
+					.iov_len = NBT_HDR_SIZE,
+				},
+			},
+			.vector = state->_vector,
+			.count = 1,
+		};
+		return NT_STATUS_RETRY;
 	}
 
 	req = state->req;
-	state->req = NULL;
 
 	req->request_time = timeval_current();
 	now = timeval_to_nttime(&req->request_time);
@@ -5081,7 +5122,9 @@ got_full:
 		req->smb1req->unread_bytes = state->pktfull - state->pktlen;
 	}
 
-	ZERO_STRUCTP(state);
+	*state = (struct smbd_smb2_request_read_state) {
+		.req = NULL,
+	};
 
 	req->current_idx = 1;
 
@@ -5119,6 +5162,113 @@ got_full:
 	}
 
 	status = smbd_smb2_request_next_incoming(xconn);
+	if (!NT_STATUS_IS_OK(status)) {
+		return status;
+	}
+
+	return NT_STATUS_OK;
+}
+
+static NTSTATUS smbd_smb2_io_handler(struct smbXsrv_connection *xconn,
+				     uint16_t fde_flags)
+{
+	struct smbd_smb2_request_read_state *state = &xconn->smb2.request_read_state;
+	unsigned recvmsg_flags = 0;
+	int ret;
+	int err;
+	bool retry;
+	NTSTATUS status;
+
+	if (!NT_STATUS_IS_OK(xconn->transport.status)) {
+		/*
+		 * we're not supposed to do any io
+		 */
+		TEVENT_FD_NOT_READABLE(xconn->transport.fde);
+		TEVENT_FD_NOT_WRITEABLE(xconn->transport.fde);
+		TEVENT_FD_NOT_WANTERROR(xconn->transport.fde);
+		return NT_STATUS_OK;
+	}
+
+	if (fde_flags & TEVENT_FD_ERROR) {
+		ret = samba_socket_poll_or_sock_error(xconn->transport.sock);
+		if (ret == -1) {
+			err = errno;
+			status = map_nt_error_from_unix_common(err);
+			smbXsrv_connection_disconnect_transport(xconn,
+								status);
+			return status;
+		}
+		/* This should not happen */
+		status = NT_STATUS_REMOTE_DISCONNECT;
+		smbXsrv_connection_disconnect_transport(xconn,
+							status);
+		return status;
+	}
+
+	if (fde_flags & TEVENT_FD_WRITE) {
+		status = smbd_smb2_flush_send_queue(xconn);
+		if (!NT_STATUS_IS_OK(status)) {
+			return status;
+		}
+	}
+
+	if (!(fde_flags & TEVENT_FD_READ)) {
+		return NT_STATUS_OK;
+	}
+
+	if (state->req == NULL) {
+		TEVENT_FD_NOT_READABLE(xconn->transport.fde);
+		return NT_STATUS_OK;
+	}
+
+again:
+
+	state->msg = (struct msghdr) {
+		.msg_iov = state->vector,
+		.msg_iovlen = state->count,
+	};
+
+#ifdef MSG_NOSIGNAL
+	recvmsg_flags |= MSG_NOSIGNAL;
+#endif
+#ifdef MSG_DONTWAIT
+	recvmsg_flags |= MSG_DONTWAIT;
+#endif
+
+	ret = recvmsg(xconn->transport.sock, &state->msg, recvmsg_flags);
+	if (ret == 0) {
+		/* propagate end of file */
+		status = NT_STATUS_END_OF_FILE;
+		smbXsrv_connection_disconnect_transport(xconn,
+							status);
+		return status;
+	}
+	err = socket_error_from_errno(ret, errno, &retry);
+	if (retry) {
+		/* retry later */
+		TEVENT_FD_READABLE(xconn->transport.fde);
+		return NT_STATUS_OK;
+	}
+	if (err != 0) {
+		status = map_nt_error_from_unix_common(err);
+		smbXsrv_connection_disconnect_transport(xconn,
+							status);
+		return status;
+	}
+
+	status = smbd_smb2_advance_incoming(xconn, ret);
+	if (NT_STATUS_EQUAL(status, NT_STATUS_PENDING)) {
+		/* we have more to read */
+		TEVENT_FD_READABLE(xconn->transport.fde);
+		return NT_STATUS_OK;
+	}
+	if (NT_STATUS_EQUAL(status, NT_STATUS_RETRY)) {
+		/*
+		 * smbd_smb2_advance_incoming setup a new vector
+		 * that we should try to read immediately.
+		 */
+		goto again;
+	}
 	if (!NT_STATUS_IS_OK(status)) {
 		return status;
 	}

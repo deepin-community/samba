@@ -84,8 +84,8 @@ krb5_error_code libnet_keytab_init(TALLOC_CTX *mem_ctx,
 					true, /* write_access */
 					&keytab);
 	if (ret) {
-		DEBUG(1,("keytab_init: smb_krb5_open_keytab failed (%s)\n",
-			error_message(ret)));
+		DBG_WARNING("smb_krb5_kt_open_relative failed (%s)\n",
+			    error_message(ret));
 		krb5_free_context(context);
 		return ret;
 	}
@@ -446,6 +446,8 @@ NTSTATUS libnet_keytab_add_to_keytab_entries(TALLOC_CTX *mem_ctx,
 	NT_STATUS_HAVE_NO_MEMORY(entry.name);
 	NT_STATUS_HAVE_NO_MEMORY(entry.principal);
 	NT_STATUS_HAVE_NO_MEMORY(entry.password.data);
+
+	DBG_INFO("%s: kvno:%d enctype:%d\n", entry.principal, kvno, enctype);
 
 	ADD_TO_ARRAY(mem_ctx, struct libnet_keytab_entry, entry,
 		     &ctx->entries, &ctx->count);

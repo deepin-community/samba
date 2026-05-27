@@ -62,7 +62,7 @@ static NTSTATUS test_generate_session_info_pac(struct auth4_context *auth_ctx,
 	tmp_ctx = talloc_named(mem_ctx, 0, "gensec_gssapi_session_info context");
 	NT_STATUS_HAVE_NO_MEMORY(tmp_ctx);
 
-	auth_ctx->private_data = pac_data = talloc_zero(auth_ctx, struct pac_data); 
+	auth_ctx->private_data = pac_data = talloc_zero(auth_ctx, struct pac_data);
 
 	pac_data->pac_blob = *pac_blob;
 
@@ -193,6 +193,8 @@ static bool torture_decode_compare_pac(struct torture_context *tctx,
 	sid_idx++;
 	torture_assert_int_equal(tctx, sid_idx, info->num_sids, "some SIDs still unaccounted for");
 
+	wbcFreeMemory(info);
+
 	return true;
 }
 
@@ -206,7 +208,7 @@ static bool torture_winbind_pac(struct torture_context *tctx,
 	struct gensec_security *gensec_server_context;
 	struct cli_credentials *machine_credentials;
 
-	DATA_BLOB client_to_server, server_to_client;	
+	DATA_BLOB client_to_server, server_to_client;
 
 	struct auth4_context *auth_context;
 	struct auth_session_info *session_info;
@@ -261,7 +263,7 @@ static bool torture_winbind_pac(struct torture_context *tctx,
 	}
 
 	server_to_client = data_blob(NULL, 0);
-	
+
 	do {
 		/* Do a client-server update dance */
 		status = gensec_update(gensec_client_context, tmp_ctx, server_to_client, &client_to_server);
@@ -296,17 +298,17 @@ static bool torture_winbind_pac(struct torture_context *tctx,
 static bool torture_winbind_pac_gssapi(struct torture_context *tctx)
 {
 	return torture_winbind_pac(tctx, "GSSAPI", NULL);
-}	
+}
 
 static bool torture_winbind_pac_gss_spnego(struct torture_context *tctx)
 {
 	return torture_winbind_pac(tctx, "GSS-SPNEGO", NULL);
-}	
+}
 
 static bool torture_winbind_pac_krb5(struct torture_context *tctx)
 {
 	return torture_winbind_pac(tctx, NULL, "krb5");
-}	
+}
 
 NTSTATUS torture_winbind_init(TALLOC_CTX *ctx)
 {

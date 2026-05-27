@@ -17,12 +17,14 @@
 from samba import provision, param
 import os
 import shutil
+import subprocess
 from samba.tests import (env_loadparm, create_test_ou, BlackboxProcessError,
                          BlackboxTestCase, connect_samdb)
 import ldb
 from samba.samdb import SamDB
 from samba.auth import system_session
 from samba import Ldb, dn_from_dns_name
+from samba.netcmd import CommandError
 from samba.netcmd.fsmo import get_fsmo_roleowner
 import re
 from samba import sites
@@ -48,7 +50,7 @@ def get_prim_dom(secrets_path, lp):
 class DomainBackupBase(BlackboxTestCase):
 
     def setUp(self):
-        super(DomainBackupBase, self).setUp()
+        super().setUp()
 
         server = os.environ["DC_SERVER"]
         self.user_auth = "-U%s%%%s" % (os.environ["DC_USERNAME"],
@@ -131,13 +133,30 @@ class DomainBackupBase(BlackboxTestCase):
         extract_dir = self.restore_dir()
         with tarfile.open(backup_file) as tf:
             tf.extractall(extract_dir)
+        return extract_dir
 
-    def _test_backup_untar(self, primary_domain_secrets=0):
+    def _test_backup_untar(
+        self,
+        primary_domain_secrets=0,
+        verify_checksums=False
+    ):
         """Creates a backup, untars the raw files, and sanity-checks the DB"""
         backup_file = self.create_backup()
-        self.untar_backup(backup_file)
+        extract_dir = self.untar_backup(backup_file)
 
-        private_dir = os.path.join(self.restore_dir(), "private")
+        if (verify_checksums):
+            p = subprocess.Popen(
+                ["sha256sum", "-c", "SHA256SUM"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                cwd=extract_dir,
+            )
+            (out, err) = p.communicate()
+            if p.returncode:
+                print("Error: " + err.decode('utf-8'))
+                raise CommandError('Failed to verify checksums')
+
+        private_dir = os.path.join(extract_dir, "private")
         samdb_path = os.path.join(private_dir, "sam.ldb")
         lp = env_loadparm()
         samdb = SamDB(url=samdb_path, session_info=system_session(), lp=lp)
@@ -339,7 +358,7 @@ class DomainBackupBase(BlackboxTestCase):
         """Check the user secrets in the restored DB match what's expected"""
 
         # check secrets for the built-in testenv users match what's expected
-        test_users = ["alice", "bob", "jane"]
+        test_users = ["alice", "bob", "jane", "joe"]
         for user in test_users:
             self.assert_user_secrets(samdb, user, expect_secrets)
 
@@ -432,7 +451,7 @@ class DomainBackupBase(BlackboxTestCase):
 class DomainBackupOnline(DomainBackupBase):
 
     def setUp(self):
-        super(DomainBackupOnline, self).setUp()
+        super().setUp()
         self.base_cmd = ["domain", "backup", "online",
                          "--server=" + self.server, self.user_auth]
 
@@ -461,7 +480,7 @@ class DomainBackupRename(DomainBackupBase):
 
     # run the above test cases using a rename backup
     def setUp(self):
-        super(DomainBackupRename, self).setUp()
+        super().setUp()
         self.new_server = "RENAMESERV"
         self.restore_domain = "NEWDOMAIN"
         self.restore_realm = "rename.test.net"
@@ -561,10 +580,10 @@ class DomainBackupRename(DomainBackupBase):
         self.assertTrue(new_server_dn in link_values)
 
     # extra checks we run on the restored DB in the rename case
-    def check_restored_database(self, lp, expect_secrets=True):
+    def check_restored_database(self, bkp_lp, expect_secrets=True):
         # run the common checks over the restored DB
-        common_test = super(DomainBackupRename, self)
-        samdb = common_test.check_restored_database(lp, expect_secrets)
+        common_test = super()
+        samdb = common_test.check_restored_database(bkp_lp, expect_secrets)
 
         # check we have actually renamed the DNs
         basedn = str(samdb.get_default_basedn())
@@ -608,11 +627,11 @@ class DomainBackupRename(DomainBackupBase):
 class DomainBackupOffline(DomainBackupBase):
 
     def setUp(self):
-        super(DomainBackupOffline, self).setUp()
+        super().setUp()
         self.base_cmd = ["domain", "backup", "offline"]
 
     def test_backup_untar(self):
-        self._test_backup_untar(primary_domain_secrets=1)
+        self._test_backup_untar(primary_domain_secrets=1, verify_checksums=True)
 
     def test_backup_restore_with_conf(self):
         self._test_backup_restore_with_conf()

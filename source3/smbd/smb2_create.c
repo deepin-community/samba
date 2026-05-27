@@ -27,10 +27,13 @@
 #include "../libcli/smb/smb_common.h"
 #include "../librpc/gen_ndr/ndr_security.h"
 #include "../librpc/gen_ndr/ndr_smb2_lease_struct.h"
+#include "../librpc/gen_ndr/ndr_smb3posix.h"
 #include "../lib/util/tevent_ntstatus.h"
 #include "messages.h"
 #include "lib/util_ea.h"
 #include "source3/passdb/lookup_sid.h"
+#include "source3/modules/util_reparse.h"
+#include "libcli/smb/reparse.h"
 
 #undef DBGC_CLASS
 #define DBGC_CLASS DBGC_SMB2
@@ -118,7 +121,7 @@ static struct tevent_req *smbd_smb2_create_send(TALLOC_CTX *mem_ctx,
 			uint32_t in_file_attributes,
 			uint32_t in_share_access,
 			uint32_t in_create_disposition,
-			uint32_t in_create_options,
+			uint32_t _in_create_options,
 			const char *in_name,
 			struct smb2_create_blobs in_context_blobs);
 static NTSTATUS smbd_smb2_create_recv(struct tevent_req *req,
@@ -134,7 +137,8 @@ static NTSTATUS smbd_smb2_create_recv(struct tevent_req *req,
 			uint32_t *out_file_attributes,
 			uint64_t *out_file_id_persistent,
 			uint64_t *out_file_id_volatile,
-			struct smb2_create_blobs *out_context_blobs);
+			struct smb2_create_blobs *out_context_blobs,
+			struct reparse_data_buffer **symlink_reparse);
 
 static void smbd_smb2_request_create_done(struct tevent_req *tsubreq);
 NTSTATUS smbd_smb2_request_process_create(struct smbd_smb2_request *smb2req)
@@ -315,6 +319,122 @@ static uint64_t get_mid_from_smb2req(struct smbd_smb2_request *smb2req)
 	return BVAL(reqhdr, SMB2_HDR_MESSAGE_ID);
 }
 
+/*
+ * [MS-SMB2] 2.2.2.1 SMB2 ERROR Context Response
+ */
+static bool smbd_smb2_create_symlink_error_context_response(
+	TALLOC_CTX *mem_ctx,
+	struct reparse_data_buffer *symlink_reparse,
+	uint8_t **_resp,
+	size_t *_resplen)
+{
+	ssize_t symlink_buffer_len;
+	size_t symlink_error_response_len, error_context_response_len;
+	uint8_t *resp = NULL;
+
+	SMB_ASSERT(symlink_reparse->tag == IO_REPARSE_TAG_SYMLINK);
+
+	symlink_buffer_len = reparse_data_buffer_marshall(symlink_reparse,
+							  NULL,
+							  0);
+	if (symlink_buffer_len < 0) {
+		DBG_DEBUG("reparse_data_buffer_marshall() failed\n");
+		goto fail;
+	}
+
+	/* 2.2.2.2.1 Symbolic Link Error Response */
+	symlink_error_response_len = symlink_buffer_len + 8;
+	if (symlink_error_response_len < (size_t)symlink_buffer_len) {
+		goto fail;
+	}
+
+	/* 2.2.2.1 SMB2 ERROR Context Response */
+	error_context_response_len = symlink_error_response_len + 8;
+	if (error_context_response_len < symlink_error_response_len) {
+		goto fail;
+	}
+
+	resp = talloc_array(mem_ctx, uint8_t, error_context_response_len);
+	if (resp == NULL) {
+		goto fail;
+	}
+	PUSH_LE_U32(resp, 0, symlink_error_response_len); /* ErrorDataLength */
+	PUSH_LE_U32(resp, 4, 0);			  /* ErrorId */
+	PUSH_LE_U32(resp,
+		    8,
+		    symlink_error_response_len - 4); /* SymLinkLength */
+	PUSH_LE_U32(resp, 12, 0x4C4D5953);
+
+	reparse_data_buffer_marshall(symlink_reparse,
+				     resp + 16,
+				     symlink_buffer_len);
+
+	*_resp = resp;
+	*_resplen = error_context_response_len;
+	return true;
+fail:
+	TALLOC_FREE(resp);
+	return false;
+}
+
+static NTSTATUS smbd_smb2_create_error(
+	struct smbd_smb2_request *smb2req,
+	NTSTATUS status,
+	struct reparse_data_buffer *symlink_reparse)
+{
+	struct smbXsrv_connection *xconn = smb2req->xconn;
+	NTSTATUS error;
+	DATA_BLOB resp = {
+		.data = NULL,
+	};
+	bool ok;
+
+	if (!NT_STATUS_EQUAL(status, NT_STATUS_STOPPED_ON_SYMLINK)) {
+		error = smbd_smb2_request_error(smb2req, status);
+		return error;
+	}
+
+	ok = smbd_smb2_create_symlink_error_context_response(smb2req,
+							     symlink_reparse,
+							     &resp.data,
+							     &resp.length);
+	if (!ok) {
+		error = smbd_smb2_request_error(smb2req, NT_STATUS_NO_MEMORY);
+		return error;
+	}
+
+	if (xconn->protocol < PROTOCOL_SMB3_11) {
+		/*
+		 * smbd_smb2_create_symlink_error_context_response()
+		 * has created a smb3.11 SMB2 ERROR Context from
+		 * [MS-SMB2] 2.2.2.1. This has an 8-byte header before
+		 * the symlink response.
+		 */
+		DATA_BLOB symlink_error = {
+			.data = resp.data + 8,
+			.length = resp.length - 8,
+		};
+
+		SMB_ASSERT(resp.length >= 8);
+
+		error = smbd_smb2_request_error_ex(
+			smb2req,
+			NT_STATUS_STOPPED_ON_SYMLINK,
+			0,
+			&symlink_error,
+			__location__);
+	} else {
+		error = smbd_smb2_request_error_ex(
+			smb2req,
+			NT_STATUS_STOPPED_ON_SYMLINK,
+			1,
+			&resp,
+			__location__);
+	}
+
+	return error;
+}
+
 static void smbd_smb2_request_create_done(struct tevent_req *tsubreq)
 {
 	struct smbd_smb2_request *smb2req = tevent_req_callback_data(tsubreq,
@@ -336,6 +456,7 @@ static void smbd_smb2_request_create_done(struct tevent_req *tsubreq)
 	struct smb2_create_blobs out_context_blobs;
 	DATA_BLOB out_context_buffer;
 	uint16_t out_context_buffer_offset = 0;
+	struct reparse_data_buffer *symlink_reparse = NULL;
 	NTSTATUS status;
 	NTSTATUS error; /* transport error */
 
@@ -352,12 +473,15 @@ static void smbd_smb2_request_create_done(struct tevent_req *tsubreq)
 				       &out_file_attributes,
 				       &out_file_id_persistent,
 				       &out_file_id_volatile,
-				       &out_context_blobs);
+				       &out_context_blobs,
+				       &symlink_reparse);
 	if (!NT_STATUS_IS_OK(status)) {
 		if (smbd_smb2_is_compound(smb2req)) {
 			smb2req->compound_create_err = status;
 		}
-		error = smbd_smb2_request_error(smb2req, status);
+		error = smbd_smb2_create_error(smb2req,
+					       status,
+					       symlink_reparse);
 		if (!NT_STATUS_IS_OK(error)) {
 			smbd_server_connection_terminate(smb2req->xconn,
 							 nt_errstr(error));
@@ -518,7 +642,7 @@ static NTSTATUS smbd_smb2_create_durable_lease_check(struct smb_request *smb1req
 		return status;
 	}
 
-	ucf_flags = filename_create_ucf_flags(smb1req, FILE_OPEN);
+	ucf_flags = filename_create_ucf_flags(smb1req, FILE_OPEN, 0);
 	status = filename_convert_dirfsp(talloc_tos(),
 					 fsp->conn,
 					 filename,
@@ -560,6 +684,7 @@ struct smbd_smb2_create_state {
 	bool replay_operation;
 	uint8_t in_oplock_level;
 	uint32_t in_create_disposition;
+	uint32_t in_create_options;
 	int requested_oplock_level;
 	int info;
 	char *fname;
@@ -609,6 +734,9 @@ struct smbd_smb2_create_state {
 	uint64_t out_file_id_persistent;
 	uint64_t out_file_id_volatile;
 	struct smb2_create_blobs *out_context_blobs;
+
+	/* symlink error data */
+	struct reparse_data_buffer *symlink_err;
 };
 
 static void smbd_smb2_create_purge_replay_cache(struct tevent_req *req,
@@ -734,7 +862,9 @@ static NTSTATUS smbd_smb2_create_fetch_create_ctx(
 		state->svhdx = smb2_create_blob_find(
 			in_context_blobs, SVHDX_OPEN_DEVICE_CONTEXT);
 	}
-	if (xconn->smb2.server.posix_extensions_negotiated) {
+	if (xconn->smb2.server.posix_extensions_negotiated &&
+	    lp_smb3_unix_extensions(SNUM(state->smb1req->conn)))
+	{
 		/*
 		 * Negprot only allowed this for proto>=3.11
 		 */
@@ -766,7 +896,7 @@ static struct tevent_req *smbd_smb2_create_send(TALLOC_CTX *mem_ctx,
 			uint32_t in_file_attributes,
 			uint32_t in_share_access,
 			uint32_t in_create_disposition,
-			uint32_t in_create_options,
+			uint32_t _in_create_options,
 			const char *in_name,
 			struct smb2_create_blobs in_context_blobs)
 {
@@ -790,6 +920,7 @@ static struct tevent_req *smbd_smb2_create_send(TALLOC_CTX *mem_ctx,
 		.smb2req = smb2req,
 		.in_oplock_level = in_oplock_level,
 		.in_create_disposition = in_create_disposition,
+		.in_create_options = _in_create_options,
 	};
 
 	smb1req = smbd_smb2_fake_smb_request(smb2req, NULL);
@@ -829,8 +960,8 @@ static struct tevent_req *smbd_smb2_create_send(TALLOC_CTX *mem_ctx,
 	}
 
 	/* these are ignored for SMB2 */
-	in_create_options &= ~(0x10);/* NTCREATEX_OPTIONS_SYNC_ALERT */
-	in_create_options &= ~(0x20);/* NTCREATEX_OPTIONS_ASYNC_ALERT */
+	state->in_create_options &= ~(0x10); /* NTCREATEX_OPTIONS_SYNC_ALERT */
+	state->in_create_options &= ~(0x20); /* NTCREATEX_OPTIONS_ASYNC_ALERT */
 
 	in_file_attributes &= ~FILE_FLAG_POSIX_SEMANTICS;
 
@@ -928,7 +1059,8 @@ static struct tevent_req *smbd_smb2_create_send(TALLOC_CTX *mem_ctx,
 	}
 
 	/* Check for trailing slash specific directory handling. */
-	status = windows_name_trailing_check(state->fname, in_create_options);
+	status = windows_name_trailing_check(state->fname,
+					     state->in_create_options);
 	if (tevent_req_nterror(req, status)) {
 		return tevent_req_post(req, state->ev);
 	}
@@ -1056,17 +1188,46 @@ static struct tevent_req *smbd_smb2_create_send(TALLOC_CTX *mem_ctx,
 		return tevent_req_post(req, state->ev);
 	}
 
-	ucf_flags = filename_create_ucf_flags(
-		smb1req, state->in_create_disposition);
+	ucf_flags = filename_create_ucf_flags(smb1req,
+					      state->in_create_disposition,
+					      state->in_create_options);
 
-	status = filename_convert_dirfsp(
-		req,
-		smb1req->conn,
-		state->fname,
-		ucf_flags,
-		state->twrp_time,
-		&dirfsp,
-		&smb_fname);
+	if (lp_follow_symlinks(SNUM(smb1req->conn)) &&
+	    (state->posx == NULL)) {
+		status = filename_convert_dirfsp(mem_ctx,
+						 smb1req->conn,
+						 state->fname,
+						 ucf_flags,
+						 state->twrp_time,
+						 &dirfsp,
+						 &smb_fname);
+	} else {
+		struct smb_filename *smb_fname_rel = NULL;
+
+		status = filename_convert_dirfsp_nosymlink(
+			mem_ctx,
+			smb1req->conn,
+			smb1req->conn->cwd_fsp,
+			state->fname,
+			ucf_flags,
+			state->twrp_time,
+			&dirfsp,
+			&smb_fname,
+			&smb_fname_rel,
+			&state->symlink_err);
+		TALLOC_FREE(smb_fname_rel);
+
+		if ((state->symlink_err != NULL) &&
+		    !(state->in_create_options & FILE_OPEN_REPARSE_POINT))
+		{
+			if (dirfsp != NULL) {
+				close_file_free(NULL, &dirfsp, ERROR_CLOSE);
+			}
+			TALLOC_FREE(smb_fname);
+			TALLOC_FREE(smb_fname_rel);
+			status = NT_STATUS_STOPPED_ON_SYMLINK;
+		}
+	}
 	if (tevent_req_nterror(req, status)) {
 		return tevent_req_post(req, state->ev);
 	}
@@ -1119,7 +1280,7 @@ static struct tevent_req *smbd_smb2_create_send(TALLOC_CTX *mem_ctx,
 				     in_desired_access,
 				     in_share_access,
 				     state->in_create_disposition,
-				     in_create_options,
+				     state->in_create_options,
 				     in_file_attributes,
 				     map_smb2_oplock_levels_to_samba(
 					     state->requested_oplock_level),
@@ -1132,6 +1293,21 @@ static struct tevent_req *smbd_smb2_create_send(TALLOC_CTX *mem_ctx,
 				     &state->info,
 				     &in_context_blobs,
 				     state->out_context_blobs);
+	if (NT_STATUS_IS_OK(status) &&
+	    !(state->in_create_options & FILE_OPEN_REPARSE_POINT))
+	{
+
+		mode_t mode = state->result->fsp_name->st.st_ex_mode;
+
+		if (!(S_ISREG(mode) || S_ISDIR(mode))) {
+			/*
+			 * Only open files and dirs without
+			 * FILE_OPEN_REPARSE_POINT
+			 */
+			close_file_free(smb1req, &state->result, ERROR_CLOSE);
+			status = NT_STATUS_IO_REPARSE_TAG_NOT_HANDLED;
+		}
+	}
 	if (!NT_STATUS_IS_OK(status)) {
 		if (open_was_deferred(smb1req->xconn, smb1req->mid)) {
 			SMBPROFILE_IOBYTES_ASYNC_SET_IDLE(smb2req->profile);
@@ -1493,6 +1669,56 @@ static void smbd_smb2_create_after_exec(struct tevent_req *req)
 
 	state->out_file_attributes = fdos_mode(state->result);
 
+	if ((state->out_file_attributes & FILE_ATTRIBUTE_REPARSE_POINT) &&
+	    (!(state->in_create_options & FILE_OPEN_REPARSE_POINT)))
+	{
+
+		uint32_t tag;
+		uint8_t *data = NULL;
+		uint32_t len = 0;
+
+		status = fsctl_get_reparse_point(
+			state->result, talloc_tos(), &tag, &data, 65536, &len);
+		if (!NT_STATUS_IS_OK(status)) {
+			goto fail;
+		}
+
+		if (tag != IO_REPARSE_TAG_SYMLINK) {
+			status = NT_STATUS_IO_REPARSE_TAG_NOT_HANDLED;
+			goto fail;
+		}
+
+		state->symlink_err = talloc_zero(state,
+						 struct reparse_data_buffer);
+		if (state->symlink_err == NULL) {
+			TALLOC_FREE(data);
+			status = NT_STATUS_NO_MEMORY;
+			goto fail;
+		}
+
+		status = reparse_data_buffer_parse(state->symlink_err,
+						   state->symlink_err,
+						   data,
+						   len);
+		TALLOC_FREE(data);
+		if (!NT_STATUS_IS_OK(status)) {
+			DBG_DEBUG("reparse_data_buffer_parse failed: %s\n",
+				  nt_errstr(status));
+			goto fail;
+		}
+
+		/*
+		 * Checked above, just to make sure
+		 */
+		SMB_ASSERT(state->symlink_err->tag == IO_REPARSE_TAG_SYMLINK);
+
+		DBG_DEBUG("Redirecting to %s\n",
+			  state->symlink_err->parsed.lnk.substitute_name);
+
+		status = NT_STATUS_STOPPED_ON_SYMLINK;
+		goto fail;
+	}
+
 	if (state->mxac != NULL) {
 		NTTIME last_write_time;
 
@@ -1658,46 +1884,42 @@ static void smbd_smb2_create_after_exec(struct tevent_req *req)
 	}
 
 	if (state->posx != NULL) {
-		struct dom_sid owner = { .sid_rev_num = 0, };
-		struct dom_sid group = { .sid_rev_num = 0, };
 		struct stat_ex *psbuf = &state->result->fsp_name->st;
-		ssize_t cc_len;
+		struct smb3_posix_cc_info cc = {
+			.nlinks = psbuf->st_ex_nlink,
+			.posix_mode = unix_mode_to_wire(psbuf->st_ex_mode),
+		};
+		uint8_t buf[sizeof(struct smb3_posix_cc_info)];
+		struct ndr_push ndr = {
+			.data = buf,
+			.alloc_size = sizeof(buf),
+			.fixed_buf_size = true,
+		};
+		enum ndr_err_code ndr_err;
 
-		uid_to_sid(&owner, psbuf->st_ex_uid);
-		gid_to_sid(&group, psbuf->st_ex_gid);
+		uid_to_sid(&cc.owner, psbuf->st_ex_uid);
+		gid_to_sid(&cc.group, psbuf->st_ex_gid);
 
-		cc_len = smb2_posix_cc_info(
-			conn, 0, psbuf, &owner, &group, NULL, 0);
+		(void)fsctl_get_reparse_tag(state->result, &cc.reparse_tag);
 
-		if (cc_len == -1) {
+		ndr_err =
+			ndr_push_smb3_posix_cc_info(&ndr,
+						    NDR_SCALARS | NDR_BUFFERS,
+						    &cc);
+		if (!NDR_ERR_CODE_IS_SUCCESS(ndr_err)) {
 			status = NT_STATUS_INSUFFICIENT_RESOURCES;
 			goto fail;
 		}
 
-		{
-			/*
-			 * cc_len is 68 + 2 SIDs, allocate on the stack
-			 */
-			uint8_t buf[cc_len];
-			DATA_BLOB blob = { .data = buf, .length = cc_len, };
-
-			smb2_posix_cc_info(
-				conn,
-				0,
-				psbuf,
-				&owner,
-				&group,
-				buf,
-				sizeof(buf));
-
-			status = smb2_create_blob_add(
-				state->out_context_blobs,
-				state->out_context_blobs,
-				SMB2_CREATE_TAG_POSIX,
-				blob);
-			if (!NT_STATUS_IS_OK(status)) {
-				goto fail;
-			}
+		status = smb2_create_blob_add(state->out_context_blobs,
+					      state->out_context_blobs,
+					      SMB2_CREATE_TAG_POSIX,
+					      (DATA_BLOB){
+						      .data = buf,
+						      .length = ndr.offset,
+					      });
+		if (!NT_STATUS_IS_OK(status)) {
+			goto fail;
 		}
 	}
 
@@ -1777,13 +1999,60 @@ static NTSTATUS smbd_smb2_create_recv(struct tevent_req *req,
 			uint32_t *out_file_attributes,
 			uint64_t *out_file_id_persistent,
 			uint64_t *out_file_id_volatile,
-			struct smb2_create_blobs *out_context_blobs)
+			struct smb2_create_blobs *out_context_blobs,
+			struct reparse_data_buffer **symlink_reparse)
 {
-	NTSTATUS status;
+	NTSTATUS status = NT_STATUS_OK;
 	struct smbd_smb2_create_state *state = tevent_req_data(req,
 					       struct smbd_smb2_create_state);
+	bool error;
 
-	if (tevent_req_is_nterror(req, &status)) {
+	error = tevent_req_is_nterror(req, &status);
+
+	if (NT_STATUS_EQUAL(status, NT_STATUS_STOPPED_ON_SYMLINK)) {
+		struct symlink_reparse_struct *lnk = &state->symlink_err
+							      ->parsed.lnk;
+		size_t fname_len = strlen(state->fname);
+
+		/*
+		 * filename_convert_dirfsp_nosymlink() calculates
+		 * unparsed_path_length. Just assert it did not mess up big
+		 * time.
+		 */
+		SMB_ASSERT(lnk->unparsed_path_length <= fname_len);
+
+		if (lnk->unparsed_path_length != 0) {
+			bool ok;
+			char *unparsed_unix = NULL;
+			char *utf_16 = NULL;
+			size_t utf_16_len;
+
+			unparsed_unix = state->fname + fname_len -
+					lnk->unparsed_path_length;
+
+			ok = convert_string_talloc(talloc_tos(),
+						   CH_UNIX,
+						   CH_UTF16,
+						   unparsed_unix,
+						   lnk->unparsed_path_length,
+						   &utf_16,
+						   &utf_16_len);
+			if (!ok) {
+				tevent_req_received(req);
+				return NT_STATUS_INTERNAL_ERROR;
+			}
+			TALLOC_FREE(utf_16);
+
+			if (utf_16_len > UINT16_MAX) {
+				tevent_req_received(req);
+				return NT_STATUS_BUFFER_OVERFLOW;
+			}
+			lnk->unparsed_path_length = utf_16_len;
+		}
+		*symlink_reparse = talloc_move(mem_ctx, &state->symlink_err);
+	}
+
+	if (error) {
 		tevent_req_received(req);
 		return status;
 	}
@@ -1800,6 +2069,7 @@ static NTSTATUS smbd_smb2_create_recv(struct tevent_req *req,
 	*out_file_id_persistent	= state->out_file_id_persistent;
 	*out_file_id_volatile	= state->out_file_id_volatile;
 	*out_context_blobs	= *(state->out_context_blobs);
+	*symlink_reparse	= NULL;
 
 	talloc_steal(mem_ctx, state->out_context_blobs->blobs);
 

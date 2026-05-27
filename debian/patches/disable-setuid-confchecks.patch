@@ -1,6 +1,7 @@
 From: Michael Tokarev <mjt@tls.msk.ru>
 Date: Fri, 08 Apr 2022 11:50:21 +0300
 Subject: disable setuid configure checks
+Forwarded: not-needed
 
 For some strange reason, when running reprotest test on salsa-ci,
 which apparently is running as root, - on the *second* build only
@@ -11,6 +12,9 @@ Since it is extremely uncommon to configure the build process as
 root, salsa-ci test environment details are quite deep down the line,
 and we know the syscall actually works, just disable the probe,
 pretending we are not root.
+
+For upstream, this probably should be done by removing a *lot* of
+configure-time checks which are useless these days.
 
 diff --git a/source3/lib/util_sec.c b/source3/lib/util_sec.c
 index 30a29f535b1..451ad396965 100644

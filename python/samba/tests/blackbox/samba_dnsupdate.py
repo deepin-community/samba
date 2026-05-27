@@ -32,21 +32,21 @@ class SambaDnsUpdateTests(samba.tests.BlackboxTestCase):
 
     def setUp(self):
         self.server_ip = samba.tests.env_get_var_value("DNS_SERVER_IP")
-        super(SambaDnsUpdateTests, self).setUp()
+        super().setUp()
         try:
             out = self.check_output("samba_dnsupdate --verbose")
             self.assertTrue(b"Looking for DNS entry" in out, out)
         except samba.tests.BlackboxProcessError:
             pass
 
-    def test_samba_dnsupate_no_change(self):
+    def test_samba_dnsupdate_no_change(self):
         try:
             out = self.check_output("samba_dnsupdate --verbose")
         except samba.tests.BlackboxProcessError as e:
             self.fail("Error calling samba_dnsupdate: %s" % e)
         self.assertTrue(b"No DNS updates needed" in out, out)
 
-    def test_samba_dnsupate_set_ip(self):
+    def test_samba_dnsupdate_set_ip(self):
         try:
             out = self.check_output("samba_dnsupdate --verbose --current-ip=10.0.0.1")
             self.assertTrue(b" DNS updates and" in out, out)

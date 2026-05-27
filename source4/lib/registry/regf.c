@@ -18,6 +18,7 @@
    along with this program.  If not, see <http://www.gnu.org/licenses/>.  */
 
 #include "includes.h"
+#include "lib/util/util_file.h"
 #include "system/filesys.h"
 #include "system/time.h"
 #include "lib/registry/tdr_regf.h"
@@ -714,7 +715,7 @@ static WERROR regf_get_subkey_by_index(TALLOC_CTX *ctx,
 			/* Get sublist data blob */
 			list_data = hbin_get(private_data->hive, ri.offset[i]);
 			if (!list_data.data) {
-				DEBUG(0, ("Error getting RI list."));
+				DEBUG(0, ("Error getting RI list.\n"));
 				talloc_free(pull);
 				return WERR_GEN_FAILURE;
 			}
@@ -998,7 +999,7 @@ static WERROR regf_get_subkey_by_name(TALLOC_CTX *ctx,
 			/* Get sublist data blob */
 			list_data = hbin_get(private_data->hive, ri.offset[i]);
 			if (list_data.data == NULL) {
-				DEBUG(0, ("Error getting RI list."));
+				DEBUG(0, ("Error getting RI list.\n"));
 				talloc_free(pull);
 				return WERR_GEN_FAILURE;
 			}
@@ -1523,7 +1524,7 @@ static WERROR regf_sl_del_entry(struct regf_data *regf, uint32_t list_offset,
 		}
 		li.key_count--;
 
-		/* If the there are no entries left, free the subkey list */
+		/* If there are no entries left, free the subkey list */
 		if (li.key_count == 0) {
 			hbin_free(regf, list_offset);
 			*ret = -1;
@@ -1568,7 +1569,7 @@ static WERROR regf_sl_del_entry(struct regf_data *regf, uint32_t list_offset,
 		}
 		lf.key_count--;
 
-		/* If the there are no entries left, free the subkey list */
+		/* If there are no entries left, free the subkey list */
 		if (lf.key_count == 0) {
 			hbin_free(regf, list_offset);
 			*ret = -1;
@@ -1614,7 +1615,7 @@ static WERROR regf_sl_del_entry(struct regf_data *regf, uint32_t list_offset,
 		}
 		lh.key_count--;
 
-		/* If the there are no entries left, free the subkey list */
+		/* If there are no entries left, free the subkey list */
 		if (lh.key_count == 0) {
 			hbin_free(regf, list_offset);
 			*ret = -1;
@@ -2218,7 +2219,8 @@ WERROR reg_open_regf_file(TALLOC_CTX *parent_ctx, const char *location,
 
 	pull = tdr_pull_init(regf);
 
-	pull->data.data = (uint8_t*)fd_load(regf->fd, &pull->data.length, 0, regf);
+	pull->data.data = (uint8_t*)
+		fd_load(regf->fd, &pull->data.length, 0, regf);
 
 	if (pull->data.data == NULL) {
 		DEBUG(0, ("Error reading data from file: %s\n", location));

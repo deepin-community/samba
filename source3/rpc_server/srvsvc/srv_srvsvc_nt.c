@@ -30,6 +30,7 @@
 #include "librpc/rpc/dcesrv_core.h"
 #include "librpc/gen_ndr/ndr_srvsvc.h"
 #include "librpc/gen_ndr/ndr_srvsvc_scompat.h"
+#include "librpc/gen_ndr/ndr_open_files.h"
 #include "../libcli/security/security.h"
 #include "../librpc/gen_ndr/ndr_security.h"
 #include "../librpc/gen_ndr/open_files.h"
@@ -184,24 +185,30 @@ static WERROR net_enum_files(TALLOC_CTX *ctx,
 	};
 	uint32_t i;
 
-	share_entry_forall(enum_file_fn, (void *)&f_enum_cnt );
+	share_entry_forall_read(enum_file_fn, (void *)&f_enum_cnt );
 
 	*ctr3 = f_enum_cnt.ctr3;
 
 	/* need to count the number of locks on a file */
 
 	for (i=0; i<(*ctr3)->count; i++) {
-		struct files_struct fsp = { .file_id = f_enum_cnt.fids[i], };
+		struct files_struct *fsp = NULL;
 		struct byte_range_lock *brl = NULL;
 
-		brl = brl_get_locks(ctx, &fsp);
+		fsp = talloc_zero(talloc_tos(), struct files_struct);
+		if (fsp == NULL) {
+			return WERR_NOT_ENOUGH_MEMORY;
+		}
+		fsp->file_id = f_enum_cnt.fids[i];
+
+		brl = brl_get_locks_readonly(fsp);
 		if (brl == NULL) {
 			continue;
 		}
 
 		(*ctr3)->array[i].num_locks = brl_num_locks(brl);
-
 		TALLOC_FREE(brl);
+		TALLOC_FREE(fsp);
 	}
 
 	return WERR_OK;
@@ -542,7 +549,6 @@ static bool is_hidden_share(int snum)
 static bool is_enumeration_allowed(struct pipes_struct *p,
                                    int snum)
 {
-	bool allowed;
 	struct dcesrv_call_state *dce_call = p->dce_call;
 	struct auth_session_info *session_info =
 		dcesrv_call_session_info(dce_call);
@@ -559,19 +565,9 @@ static bool is_enumeration_allowed(struct pipes_struct *p,
 		return false;
 	}
 
-
-	/*
-	 * share_access_check() must be opened as root
-	 * because it ultimately gets a R/W db handle on share_info.tdb
-	 * which has 0o600 permissions
-	 */
-	become_root();
-	allowed = share_access_check(session_info->security_token,
-				     lp_servicename(talloc_tos(), lp_sub, snum),
-				     FILE_READ_DATA, NULL);
-	unbecome_root();
-
-	return allowed;
+	return share_access_check(session_info->security_token,
+				  lp_servicename(talloc_tos(), lp_sub, snum),
+				  FILE_READ_DATA, NULL);
 }
 
 /****************************************************************************
@@ -1041,7 +1037,7 @@ static void net_count_files_for_all_sess(struct srvsvc_NetSessCtr1 *ctr1,
 	s_file_info.resume_handle = resume_handle;
 	s_file_info.num_entries = num_entries;
 
-	share_entry_forall(count_sess_files_fn, &s_file_info);
+	share_entry_forall_read(count_sess_files_fn, &s_file_info);
 }
 
 /*******************************************************************
@@ -1161,7 +1157,7 @@ static void count_share_opens(struct srvsvc_NetConnInfo1 *arr,
 	sfs.resp_entries = resp_entries;
 	sfs.total_entries = total_entries;
 
-	share_entry_forall(share_file_fn, &sfs);
+	share_entry_forall_read(share_file_fn, &sfs);
 }
 
 /****************************************************************************
@@ -2902,10 +2898,17 @@ static int enum_file_close_fn(struct file_id id,
 			      const struct share_mode_entry *e,
 			      void *private_data)
 {
-	char msg[MSG_SMB_SHARE_MODE_ENTRY_SIZE];
 	struct enum_file_close_state *state =
 		(struct enum_file_close_state *)private_data;
 	uint32_t fid = (((uint32_t)(procid_to_pid(&e->pid))<<16) | e->share_file_id);
+	struct oplock_break_message msg = {
+		.id = id,
+		.share_file_id = e->share_file_id,
+	};
+	enum ndr_err_code ndr_err;
+	uint8_t msgbuf[33];
+	DATA_BLOB blob = {.data = msgbuf, .length = sizeof(msgbuf)};
+	NTSTATUS status;
 
 	if (fid != state->r->in.fid) {
 		return 0; /* Not this file. */
@@ -2919,12 +2922,24 @@ static int enum_file_close_fn(struct file_id id,
 	DBG_DEBUG("request to close file %s, %s\n", d->servicepath,
 		  share_mode_str(talloc_tos(), 0, &id, e));
 
-	share_mode_entry_to_message(msg, &id, e);
+	ndr_err = ndr_push_struct_into_fixed_blob(
+		&blob,
+		&msg,
+		(ndr_push_flags_fn_t)ndr_push_oplock_break_message);
+	if (!NDR_ERR_CODE_IS_SUCCESS(ndr_err)) {
+		DBG_WARNING("ndr_push_oplock_break_message failed: %s\n",
+			    ndr_errstr(ndr_err));
+		status = ndr_map_error2ntstatus(ndr_err);
+	} else {
+		status = messaging_send(state->msg_ctx,
+					e->pid,
+					MSG_SMB_CLOSE_FILE,
+					&blob);
+	}
 
-	state->r->out.result = ntstatus_to_werror(
-		messaging_send_buf(state->msg_ctx,
-				e->pid, MSG_SMB_CLOSE_FILE,
-				(uint8_t *)msg, sizeof(msg)));
+	if (!NT_STATUS_IS_OK(status)) {
+		state->r->out.result = ntstatus_to_werror(status);
+	}
 
 	return 0;
 }
@@ -2957,7 +2972,7 @@ WERROR _srvsvc_NetFileClose(struct pipes_struct *p,
 	r->out.result = WERR_FILE_NOT_FOUND;
 	state.r = r;
 	state.msg_ctx = p->msg_ctx;
-	share_entry_forall(enum_file_close_fn, &state);
+	share_entry_forall_read(enum_file_close_fn, &state);
 	return r->out.result;
 }
 

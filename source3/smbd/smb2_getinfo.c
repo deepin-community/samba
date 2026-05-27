@@ -338,17 +338,17 @@ static struct tevent_req *smbd_smb2_getinfo_send(TALLOC_CTX *mem_ctx,
 			file_info_level = SMB2_FILE_ALL_INFORMATION;
 			break;
 
-		case SMB2_FILE_POSIX_INFORMATION:
-			if (!(fsp->posix_flags & FSP_POSIX_FLAGS_OPEN)) {
+		case FSCC_FILE_POSIX_INFORMATION:
+			if (!fsp->fsp_flags.posix_open) {
 				tevent_req_nterror(req, NT_STATUS_INVALID_LEVEL);
 				return tevent_req_post(req, ev);
 			}
-			file_info_level = SMB2_FILE_POSIX_INFORMATION_INTERNAL;
+			file_info_level = in_file_info_class;
 			break;
 
 		default:
 			/* the levels directly map to the passthru levels */
-			file_info_level = in_file_info_class + 1000;
+			file_info_level = in_file_info_class + NT_PASSTHROUGH_OFFSET;
 			break;
 		}
 
@@ -465,14 +465,22 @@ static struct tevent_req *smbd_smb2_getinfo_send(TALLOC_CTX *mem_ctx,
 		int data_size = 0;
 		size_t fixed_portion;
 
-		/* the levels directly map to the passthru levels */
-		file_info_level = in_file_info_class + 1000;
+		switch (in_file_info_class) {
+		case FSCC_FS_POSIX_INFORMATION:
+			file_info_level = in_file_info_class;
+			break;
+		default:
+			/* the levels directly map to the passthru levels */
+			file_info_level = in_file_info_class + NT_PASSTHROUGH_OFFSET;
+			break;
+		}
 
 		status = smbd_do_qfsinfo(smb2req->xconn, conn, state,
 					 file_info_level,
 					 STR_UNICODE,
 					 in_output_buffer_length,
 					 &fixed_portion,
+					 fsp,
 					 fsp->fsp_name,
 					 &data,
 					 &data_size);

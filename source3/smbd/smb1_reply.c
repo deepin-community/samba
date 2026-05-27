@@ -31,6 +31,7 @@
 #include "locking/share_mode_lock.h"
 #include "smbd/smbd.h"
 #include "smbd/globals.h"
+#include "source3/smbd/smbXsrv_session.h"
 #include "smbd/smbXsrv_open.h"
 #include "fake_file.h"
 #include "rpc_client/rpc_client.h"
@@ -51,6 +52,7 @@
 #include "lib/util/string_wrappers.h"
 #include "source3/printing/rap_jobid.h"
 #include "source3/lib/substitute.h"
+#include "source3/smbd/dir.h"
 
 /****************************************************************************
  Check if we have a correct fsp pointing to a file. Basic check for open fsp.
@@ -718,11 +720,9 @@ void reply_checkpath(struct smb_request *req)
 		goto path_err;
 	}
 
-	if (!VALID_STAT(smb_fname->st) &&
-	    (SMB_VFS_STAT(conn, smb_fname) != 0)) {
-		DEBUG(3,("reply_checkpath: stat of %s failed (%s)\n",
-			smb_fname_str_dbg(smb_fname), strerror(errno)));
-		status = map_nt_error_from_unix(errno);
+	if (!VALID_STAT(smb_fname->st)) {
+		DBG_NOTICE("%s not found\n", smb_fname_str_dbg(smb_fname));
+		status = NT_STATUS_OBJECT_NAME_NOT_FOUND;
 		goto path_err;
 	}
 
@@ -829,11 +829,9 @@ void reply_getatr(struct smb_request *req)
 			reply_nterror(req, status);
 			goto out;
 		}
-		if (!VALID_STAT(smb_fname->st) &&
-		    (SMB_VFS_STAT(conn, smb_fname) != 0)) {
-			DEBUG(3,("reply_getatr: stat of %s failed (%s)\n",
-				 smb_fname_str_dbg(smb_fname),
-				 strerror(errno)));
+		if (!VALID_STAT(smb_fname->st)) {
+			DBG_NOTICE("File %s not found\n",
+				   smb_fname_str_dbg(smb_fname));
 			reply_nterror(req,  map_nt_error_from_unix(errno));
 			goto out;
 		}
@@ -954,8 +952,11 @@ void reply_setatr(struct smb_request *req)
 	}
 
 	if (smb_fname->fsp == NULL) {
-		/* Can't set access rights on a symlink. */
-		reply_nterror(req, NT_STATUS_ACCESS_DENIED);
+		/*
+		 * filename_convert_dirfsp only returns a NULL fsp for
+		 * new files.
+		 */
+		reply_nterror(req, NT_STATUS_OBJECT_NAME_NOT_FOUND);
 		goto out;
 	}
 
@@ -1089,8 +1090,7 @@ void reply_dskattr(struct smb_request *req)
  Make a dir struct.
 ****************************************************************************/
 
-static void make_dir_struct(TALLOC_CTX *ctx,
-			    char *buf,
+static void make_dir_struct(char *buf,
 			    const char *mask,
 			    const char *fname,
 			    off_t size,
@@ -1123,6 +1123,25 @@ static void make_dir_struct(TALLOC_CTX *ctx,
 	   Strange, but verified on W2K3. Needed for OS/2. JRA. */
 	push_ascii(buf+30,fname,12, uc ? STR_UPPER : 0);
 	DEBUG(8,("put name [%s] from [%s] into dir struct\n",buf+30, fname));
+}
+
+/*******************************************************************
+ A wrapper that handles case sensitivity and the special handling
+ of the ".." name.
+*******************************************************************/
+
+static bool mask_match_search(const char *string,
+			      const char *pattern,
+			      bool is_case_sensitive)
+{
+	if (ISDOTDOT(string)) {
+		string = ".";
+	}
+	if (ISDOT(pattern)) {
+		return False;
+	}
+
+	return ms_fnmatch(pattern, string, True, is_case_sensitive) == 0;
 }
 
 static bool mangle_mask_match(connection_struct *conn,
@@ -1199,30 +1218,6 @@ static bool smbd_dirptr_8_3_match_fn(TALLOC_CTX *ctx,
 	return false;
 }
 
-static bool smbd_dirptr_8_3_mode_fn(TALLOC_CTX *ctx,
-				    void *private_data,
-				    struct files_struct *dirfsp,
-				    struct smb_filename *smb_fname,
-				    bool get_dosmode,
-				    uint32_t *_mode)
-{
-	if (*_mode & FILE_ATTRIBUTE_REPARSE_POINT) {
-		/*
-		 * Don't show symlinks/special files to old clients
-		 */
-		return false;
-	}
-
-	if (get_dosmode) {
-		SMB_ASSERT(smb_fname != NULL);
-		*_mode = fdos_mode(smb_fname->fsp);
-		if (smb_fname->fsp != NULL) {
-			smb_fname->st = smb_fname->fsp->fsp_name->st;
-		}
-	}
-	return true;
-}
-
 static bool get_dir_entry(TALLOC_CTX *ctx,
 			  connection_struct *conn,
 			  struct dptr_struct *dirptr,
@@ -1240,6 +1235,7 @@ static bool get_dir_entry(TALLOC_CTX *ctx,
 	uint32_t mode = 0;
 	bool ok;
 
+again:
 	ok = smbd_dirptr_get_entry(ctx,
 				   dirptr,
 				   mask,
@@ -1248,13 +1244,18 @@ static bool get_dir_entry(TALLOC_CTX *ctx,
 				   ask_sharemode,
 				   true,
 				   smbd_dirptr_8_3_match_fn,
-				   smbd_dirptr_8_3_mode_fn,
 				   conn,
 				   &fname,
 				   &smb_fname,
 				   &mode);
 	if (!ok) {
 		return false;
+	}
+	if (mode & FILE_ATTRIBUTE_REPARSE_POINT) {
+		/* hide reparse points from ancient clients */
+		TALLOC_FREE(fname);
+		TALLOC_FREE(smb_fname);
+		goto again;
 	}
 
 	*_fname = talloc_move(ctx, &fname);
@@ -1522,8 +1523,7 @@ void reply_search(struct smb_request *req)
 	if ((dirtype&0x1F) == FILE_ATTRIBUTE_VOLUME) {
 		char buf[DIR_STRUCT_SIZE];
 		memcpy(buf,status,21);
-		make_dir_struct(ctx,
-				buf,
+		make_dir_struct(buf,
 				"???????????",
 				volume_label(ctx, SNUM(conn)),
 				0,
@@ -1569,15 +1569,14 @@ void reply_search(struct smb_request *req)
 			if (!finished) {
 				char buf[DIR_STRUCT_SIZE];
 				memcpy(buf,status,21);
-				make_dir_struct(
-					ctx,
-					buf,
-					mask,
-					fname,
-					size,
-					mode,
-					convert_timespec_to_time_t(date),
-					!allow_long_path_components);
+				make_dir_struct(buf,
+						mask,
+						fname,
+						size,
+						mode,
+						convert_timespec_to_time_t(
+							date),
+						!allow_long_path_components);
 				SCVAL(buf, 12, dptr_num);
 				PUSH_LE_U32(buf,
 					    13,
@@ -1786,7 +1785,9 @@ void reply_open(struct smb_request *req)
 		goto out;
 	}
 
-	ucf_flags = filename_create_ucf_flags(req, create_disposition);
+	ucf_flags = filename_create_ucf_flags(req,
+					      create_disposition,
+					      create_options);
 
 	if (ucf_flags & UCF_GMT_PATHNAME) {
 		extract_snapshot_token(fname, &twrp);
@@ -1987,7 +1988,9 @@ void reply_open_and_X(struct smb_request *req)
 		goto out;
 	}
 
-	ucf_flags = filename_create_ucf_flags(req, create_disposition);
+	ucf_flags = filename_create_ucf_flags(req,
+					      create_disposition,
+					      create_options);
 
 	if (ucf_flags & UCF_GMT_PATHNAME) {
 		extract_snapshot_token(fname, &twrp);
@@ -2425,7 +2428,9 @@ void reply_mknew(struct smb_request *req)
 		goto out;
 	}
 
-	ucf_flags = filename_create_ucf_flags(req, create_disposition);
+	ucf_flags = filename_create_ucf_flags(req,
+					      create_disposition,
+					      create_options);
 	if (ucf_flags & UCF_GMT_PATHNAME) {
 		extract_snapshot_token(fname, &twrp);
 	}
@@ -2564,15 +2569,19 @@ void reply_ctemp(struct smb_request *req)
 	}
 
 	for (i = 0; i < 10; i++) {
+		char rand_str[6];
+
+		generate_random_str_list_buf(rand_str,
+					     sizeof(rand_str),
+					     "0123456789");
+
 		if (*wire_name) {
 			fname = talloc_asprintf(ctx,
-					"%s/TMP%s",
-					wire_name,
-					generate_random_str_list(ctx, 5, "0123456789"));
+						"%s/TMP%s",
+						wire_name,
+						rand_str);
 		} else {
-			fname = talloc_asprintf(ctx,
-					"TMP%s",
-					generate_random_str_list(ctx, 5, "0123456789"));
+			fname = talloc_asprintf(ctx, "TMP%s", rand_str);
 		}
 
 		if (!fname) {
@@ -2580,7 +2589,7 @@ void reply_ctemp(struct smb_request *req)
 			goto out;
 		}
 
-		ucf_flags = filename_create_ucf_flags(req, FILE_CREATE);
+		ucf_flags = filename_create_ucf_flags(req, FILE_CREATE, 0);
 		if (ucf_flags & UCF_GMT_PATHNAME) {
 			extract_snapshot_token(fname, &twrp);
 		}
@@ -2745,7 +2754,7 @@ void reply_unlink(struct smb_request *req)
 	status = filename_convert_dirfsp(ctx,
 					 conn,
 					 name,
-					 ucf_flags,
+					 ucf_flags | UCF_LCOMP_LNK_OK,
 					 twrp,
 					 &dirfsp,
 					 &smb_fname);
@@ -4092,7 +4101,7 @@ void reply_writebraw(struct smb_request *req)
 		goto out;
 	}
 
-	DEBUG(3,("reply_writebraw: secondart write %s start=%.0f num=%d "
+	DEBUG(3,("reply_writebraw: secondary write %s start=%.0f num=%d "
 		"wrote=%d\n",
 		fsp_fnum_dbg(fsp), (double)startpos, (int)numtowrite,
 		(int)total_written));
@@ -6027,7 +6036,10 @@ void reply_printqueue(struct smb_request *req)
 		for (i = first; i < num_to_get; i++) {
 			char blob[28];
 			char *p = blob;
-			time_t qtime = spoolss_Time_to_time_t(&info[i].info2.submitted);
+			struct timespec qtime = {
+				.tv_sec = spoolss_Time_to_time_t(
+					&info[i].info2.submitted),
+			};
 			int qstatus;
 			size_t len = 0;
 			uint16_t qrapjobid = pjobid_to_rap(sharename,
@@ -6039,7 +6051,7 @@ void reply_printqueue(struct smb_request *req)
 				qstatus = 3;
 			}
 
-			srv_put_dos_date2(p, 0, qtime);
+			srv_put_dos_date2_ts(p, 0, qtime);
 			SCVAL(p, 4, qstatus);
 			SSVAL(p, 5, qrapjobid);
 			SIVAL(p, 7, info[i].info2.size);
@@ -6173,7 +6185,7 @@ void reply_mkdir(struct smb_request *req)
 		goto out;
 	}
 
-	ucf_flags = filename_create_ucf_flags(req, FILE_CREATE);
+	ucf_flags = filename_create_ucf_flags(req, FILE_CREATE, 0);
 	if (ucf_flags & UCF_GMT_PATHNAME) {
 		extract_snapshot_token(directory, &twrp);
 	}
@@ -6291,7 +6303,8 @@ void reply_rmdir(struct smb_request *req)
 		(FILE_SHARE_READ | FILE_SHARE_WRITE |   /* share_access */
 			FILE_SHARE_DELETE),
 		FILE_OPEN,                              /* create_disposition*/
-		FILE_DIRECTORY_FILE,                    /* create_options */
+		FILE_DIRECTORY_FILE |
+			FILE_OPEN_REPARSE_POINT,	/* create_options */
 		FILE_ATTRIBUTE_DIRECTORY,               /* file_attributes */
 		0,                                      /* oplock_request */
 		NULL,					/* lease */
@@ -6481,15 +6494,15 @@ void reply_mv(struct smb_request *req)
 		}
 	}
 
-	DEBUG(3,("reply_mv : %s -> %s\n", smb_fname_str_dbg(smb_fname_src),
-		 smb_fname_str_dbg(smb_fname_dst)));
+	DBG_NOTICE("%s -> %s\n",
+		   smb_fname_str_dbg(smb_fname_src),
+		   smb_fname_str_dbg(smb_fname_dst));
 
 	status = rename_internals(ctx,
 				conn,
 				req,
 				src_dirfsp, /* src_dirfsp */
 				smb_fname_src,
-				dst_dirfsp, /* dst_dirfsp */
 				smb_fname_dst,
 				dst_original_lcomp,
 				attrs,
@@ -6953,11 +6966,6 @@ void reply_setattrE(struct smb_request *req)
 
 	reply_smb1_outbuf(req, 0, 0);
 
-	/*
-	 * Patch from Ray Frush <frush@engr.colostate.edu>
-	 * Sometimes times are sent as zero - ignore them.
-	 */
-
 	/* Ensure we have a valid stat struct for the source. */
 	status = vfs_stat_fsp(fsp);
 	if (!NT_STATUS_IS_OK(status)) {
@@ -7071,12 +7079,14 @@ void reply_getattrE(struct smb_request *req)
 	reply_smb1_outbuf(req, 11, 0);
 
 	create_ts = get_create_timespec(conn, fsp, fsp->fsp_name);
-	srv_put_dos_date2((char *)req->outbuf, smb_vwv0, create_ts.tv_sec);
-	srv_put_dos_date2((char *)req->outbuf, smb_vwv2,
-			  convert_timespec_to_time_t(fsp->fsp_name->st.st_ex_atime));
+	srv_put_dos_date2_ts((char *)req->outbuf, smb_vwv0, create_ts);
+	srv_put_dos_date2_ts((char *)req->outbuf,
+			     smb_vwv2,
+			     fsp->fsp_name->st.st_ex_atime);
 	/* Should we check pending modtime here ? JRA */
-	srv_put_dos_date2((char *)req->outbuf, smb_vwv4,
-			  convert_timespec_to_time_t(fsp->fsp_name->st.st_ex_mtime));
+	srv_put_dos_date2_ts((char *)req->outbuf,
+			     smb_vwv4,
+			     fsp->fsp_name->st.st_ex_mtime);
 
 	if (mode & FILE_ATTRIBUTE_DIRECTORY) {
 		SIVAL(req->outbuf, smb_vwv6, 0);

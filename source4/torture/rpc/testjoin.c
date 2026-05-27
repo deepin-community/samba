@@ -27,6 +27,7 @@
 #include "includes.h"
 #include "system/time.h"
 #include "libnet/libnet.h"
+#include "libnet/libnet_join_proto.h"
 #include "lib/cmdline/cmdline.h"
 #include "librpc/gen_ndr/ndr_lsa_c.h"
 #include "librpc/gen_ndr/ndr_samr_c.h"
@@ -331,7 +332,7 @@ again:
 
 	u.info24.password_expired = 0;
 
-	status = dcerpc_fetch_session_key(join->p, &session_key);
+	status = dcerpc_binding_handle_transport_session_key(b, tctx, &session_key);
 	if (!NT_STATUS_IS_OK(status)) {
 		torture_comment(tctx, "SetUserInfo level %u - no session key - %s\n",
 		       s.in.level, nt_errstr(status));
@@ -637,7 +638,7 @@ _PUBLIC_ struct test_join *torture_join_domain(struct torture_context *tctx,
 		cli_credentials_set_secure_channel_type(*machine_credentials,
 							SEC_CHAN_WKSTA);
 	} else {
-		DEBUG(0, ("Invalid account type specificed to torture_join_domain\n"));
+		DEBUG(0, ("Invalid account type specified to torture_join_domain\n"));
 		talloc_free(*machine_credentials);
 		return NULL;
 	}

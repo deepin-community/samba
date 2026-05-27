@@ -89,7 +89,7 @@ from samba.gp.gpclass import register_gp_extension, list_gp_extensions, \
 
 
 def gpo_flags_string(value):
-    '''return gpo flags string'''
+    """return gpo flags string"""
     flags = policy.get_gpo_flags(value)
     if not flags:
         ret = 'NONE'
@@ -99,7 +99,7 @@ def gpo_flags_string(value):
 
 
 def gplink_options_string(value):
-    '''return gplink options string'''
+    """return gplink options string"""
     options = policy.get_gplink_options(value)
     if not options:
         ret = 'NONE'
@@ -109,7 +109,7 @@ def gplink_options_string(value):
 
 
 def parse_gplink(gplink):
-    '''parse a gPLink into an array of dn and options'''
+    """parse a gPLink into an array of dn and options"""
     ret = []
 
     if gplink.strip() == '':
@@ -127,14 +127,14 @@ def parse_gplink(gplink):
 
 
 def encode_gplink(gplist):
-    '''Encode an array of dn and options into gPLink string'''
+    """Encode an array of dn and options into gPLink string"""
     ret = "".join("[LDAP://%s;%d]" % (g['dn'], g['options']) for g in gplist)
     return ret
 
 
 def dc_url(lp, creds, url=None, dc=None):
-    '''If URL is not specified, return URL for writable DC.
-    If dc is provided, use that to construct ldap URL'''
+    """If URL is not specified, return URL for writable DC.
+    If dc is provided, use that to construct ldap URL"""
 
     if url is None:
         if dc is None:
@@ -151,7 +151,7 @@ def get_gpo_info(samdb, gpo=None, displayname=None, dn=None,
                            security.SECINFO_GROUP |
                            security.SECINFO_DACL |
                            security.SECINFO_SACL)):
-    '''Get GPO information using gpo, displayname or dn'''
+    """Get GPO information using gpo, displayname or dn"""
 
     policies_dn = samdb.get_default_basedn()
     policies_dn.add_child(ldb.Dn(samdb, "CN=Policies,CN=System"))
@@ -193,7 +193,7 @@ def get_gpo_info(samdb, gpo=None, displayname=None, dn=None,
 
 
 def get_gpo_containers(samdb, gpo):
-    '''lists dn of containers for a GPO'''
+    """lists dn of containers for a GPO"""
 
     search_expr = "(&(objectClass=*)(gPLink=*%s*))" % gpo
     try:
@@ -205,7 +205,7 @@ def get_gpo_containers(samdb, gpo):
 
 
 def del_gpo_link(samdb, container_dn, gpo):
-    '''delete GPO link for the container'''
+    """delete GPO link for the container"""
     # Check if valid Container DN and get existing GPlinks
     try:
         msg = samdb.search(base=container_dn, scope=ldb.SCOPE_BASE,
@@ -243,7 +243,7 @@ def del_gpo_link(samdb, container_dn, gpo):
 
 
 def parse_unc(unc):
-    '''Parse UNC string into a hostname, a service, and a filepath'''
+    """Parse UNC string into a hostname, a service, and a filepath"""
     tmp = []
     if unc.startswith('\\\\'):
         tmp = unc[2:].split('\\', 2)
@@ -419,7 +419,7 @@ class GPOCommand(Command):
         return tmpdir, gpodir
 
     def samdb_connect(self):
-        '''make a ldap connection to the server'''
+        """make a ldap connection to the server"""
         try:
             self.samdb = SamDB(url=self.url,
                                session_info=system_session(),
@@ -1322,9 +1322,11 @@ class cmd_backup(GPOCommand):
             self.outf.write('\nAttempting to generalize XML entities:\n')
             entities = cmd_backup.generalize_xml_entities(self.outf, gpodir,
                                                           gpodir)
-            import operator
-            ents = "".join('<!ENTITY {} "{}\n">'.format(ent[1].strip('&;'), ent[0]) \
-                             for ent in sorted(entities.items(), key=operator.itemgetter(1)))
+
+            ent_list = [(v, k) for k, v in entities.items()]
+            ent_list.sort()
+            ents = "".join(f'<!ENTITY {ent.strip("&;")} "{val}">\n'
+                           for ent, val in ent_list)
 
             if ent_file:
                 with open(ent_file, 'w') as f:
@@ -1651,8 +1653,8 @@ class cmd_restore(cmd_create):
                 entities_content = entities_file.read()
 
                 # Do a basic regex test of the entities file format
-                if re.match(r'(\s*<!ENTITY\s*[a-zA-Z0-9_]+\s*.*?>)+\s*\Z',
-                            entities_content, flags=re.MULTILINE) is None:
+                if re.match(r'(\s*<!ENTITY\s+[a-zA-Z0-9_]+\s+.*?>)+\s*\Z',
+                            entities_content, flags=re.MULTILINE|re.DOTALL) is None:
                     raise CommandError("Entities file does not appear to "
                                        "conform to format\n"
                                        'e.g. <!ENTITY entity "value">')
@@ -1660,10 +1662,14 @@ class cmd_restore(cmd_create):
 
             dtd_header += '\n]>\n'
 
-        super(cmd_restore, self).run(displayname, H, tmpdir, sambaopts,
-                                     credopts, versionopts)
+        super().run(displayname, H, tmpdir, sambaopts, credopts, versionopts)
 
         try:
+            if tmpdir is None:
+                # Create GPT
+                self.tmpdir, gpodir = self.construct_tmpdir(tmpdir, self.gpo_name)
+                self.gpodir = gpodir
+
             # Iterate over backup files and restore with DTD
             self.restore_from_backup_to_local_dir(backup, self.gpodir,
                                                   dtd_header)
@@ -1691,6 +1697,10 @@ class cmd_restore(cmd_create):
                                                 ext)
 
                     self.samdb.modify(m)
+
+            if tmpdir is None:
+                # Without --tmpdir, we created one in /tmp/. It must go.
+                shutil.rmtree(self.tmpdir)
 
         except Exception as e:
             import traceback
@@ -1762,8 +1772,8 @@ class cmd_del(GPOCommand):
 
             # Remove LDAP entries
             gpo_dn = get_gpo_dn(self.samdb, gpo)
-            self.samdb.delete(ldb.Dn(self.samdb, "CN=User,%s" % str(gpo_dn)))
-            self.samdb.delete(ldb.Dn(self.samdb, "CN=Machine,%s" % str(gpo_dn)))
+            self.samdb.delete(ldb.Dn(self.samdb, "CN=User,%s" % str(gpo_dn)), ["tree_delete:1"])
+            self.samdb.delete(ldb.Dn(self.samdb, "CN=Machine,%s" % str(gpo_dn)), ["tree_delete:1"])
             self.samdb.delete(gpo_dn)
 
             # Remove GPO files
@@ -2358,9 +2368,9 @@ PasswordComplexity      Password must meet complexity requirements
             inf_data.optionxform=str
             raw = conn.loadfile(inf_file)
             try:
-                inf_data.readfp(StringIO(raw.decode()))
+                inf_data.read_file(StringIO(raw.decode()))
             except UnicodeDecodeError:
-                inf_data.readfp(StringIO(raw.decode('utf-16')))
+                inf_data.read_file(StringIO(raw.decode('utf-16')))
         except NTSTATUSError as e:
             if e.args[0] == NT_STATUS_ACCESS_DENIED:
                 raise CommandError("The authenticated user does "
@@ -2453,9 +2463,9 @@ samba-tool gpo manage security list {31B2F340-016D-11D2-945F-00C04FB984F9}
             inf_data.optionxform=str
             raw = conn.loadfile(inf_file)
             try:
-                inf_data.readfp(StringIO(raw.decode()))
+                inf_data.read_file(StringIO(raw.decode()))
             except UnicodeDecodeError:
-                inf_data.readfp(StringIO(raw.decode('utf-16')))
+                inf_data.read_file(StringIO(raw.decode('utf-16')))
         except NTSTATUSError as e:
             if e.args[0] in [NT_STATUS_OBJECT_NAME_INVALID,
                              NT_STATUS_OBJECT_NAME_NOT_FOUND,
@@ -3800,7 +3810,9 @@ samba-tool gpo manage motd set {31B2F340-016D-11D2-945F-00C04FB984F9} "Message f
             return
 
         try:
-            xml_data = ET.fromstring(conn.loadfile(vgp_xml))
+            xml_data = ET.ElementTree(ET.fromstring(conn.loadfile(vgp_xml)))
+            policysetting = xml_data.getroot().find('policysetting')
+            data = policysetting.find('data')
         except NTSTATUSError as e:
             if e.args[0] in [NT_STATUS_OBJECT_NAME_INVALID,
                              NT_STATUS_OBJECT_NAME_NOT_FOUND,
@@ -3826,7 +3838,9 @@ samba-tool gpo manage motd set {31B2F340-016D-11D2-945F-00C04FB984F9} "Message f
             else:
                 raise
 
-        text = ET.SubElement(data, 'text')
+        text = data.find('text')
+        if text is None:
+            text = ET.SubElement(data, 'text')
         text.text = value
 
         out = BytesIO()

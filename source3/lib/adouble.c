@@ -210,7 +210,7 @@ static const uint32_t set_eid[] = {
 	AD_DEV, AD_INO, AD_SYN, AD_ID
 };
 
-static char empty_resourcefork[] = {
+static const char empty_resourcefork[] = {
 	0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x00,
 	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x1E,
 	0x54, 0x68, 0x69, 0x73, 0x20, 0x72, 0x65, 0x73,
@@ -282,7 +282,7 @@ static bool ad_entry_check_size(uint32_t eid,
 				uint32_t off,
 				uint32_t got_len)
 {
-	struct {
+	static const struct {
 		off_t expected_len;
 		bool fixed_size;
 		bool minimum_size;
@@ -328,7 +328,7 @@ static bool ad_entry_check_size(uint32_t eid,
 	}
 	if (ad_checks[eid].fixed_size) {
 		if (ad_checks[eid].expected_len != got_len) {
-			/* Wrong size fo fixed size entry. */
+			/* Wrong size for fixed size entry. */
 			return false;
 		}
 	} else {
@@ -493,7 +493,7 @@ static bool ad_pack_move_reso(struct vfs_handle_struct *handle,
 		 * This buffer is already set when converting a resourcefork
 		 * stream from vfs_streams_depot backend via ad_unconvert(). It
 		 * is NULL with vfs_streams_xattr where the resourcefork stream
-		 * is stored in an AppleDouble sidecar file vy vfs_fruit.
+		 * is stored in an AppleDouble sidecar file by vfs_fruit.
 		 */
 		ad->ad_rsrc_data = talloc_size(ad, reso_len);
 		if (ad->ad_rsrc_data == NULL) {
@@ -949,7 +949,7 @@ static bool ad_unpack_xattrs(struct adouble *ad)
 }
 
 /**
- * Unpack an AppleDouble blob into a struct adoble
+ * Unpack an AppleDouble blob into a struct adouble
  **/
 static bool ad_unpack(struct adouble *ad, const size_t nentries,
 		      size_t filesize)
@@ -1185,16 +1185,15 @@ static bool ad_convert_xattr(vfs_handle_struct *handle,
 		files_struct *fsp = NULL;
 		ssize_t nwritten;
 
-		status = string_replace_allocate(handle->conn,
-						 e->adx_name,
-						 string_replace_cmaps,
-						 talloc_tos(),
-						 &mapped_name,
-						 vfs_translate_to_windows);
-		if (!NT_STATUS_IS_OK(status) &&
-		    !NT_STATUS_EQUAL(status, NT_STATUS_NONE_MAPPED))
-		{
-			DBG_ERR("string_replace_allocate failed\n");
+		rc = string_replace_allocate(handle->conn,
+					     e->adx_name,
+					     string_replace_cmaps,
+					     talloc_tos(),
+					     &mapped_name,
+					     vfs_translate_to_windows);
+		if (rc != 0) {
+			DBG_ERR("string_replace_allocate failed: %s\n",
+				strerror(rc));
 			ok = false;
 			goto fail;
 		}
@@ -1746,6 +1745,7 @@ static bool ad_collect_one_stream(struct vfs_handle_struct *handle,
 	ssize_t nread;
 	NTSTATUS status;
 	bool ok;
+	int rc;
 
 	sname = synthetic_smb_fname(ad,
 				    smb_fname->base_name,
@@ -1901,16 +1901,14 @@ static bool ad_collect_one_stream(struct vfs_handle_struct *handle,
 		*p = '\0';
 	}
 
-	status = string_replace_allocate(handle->conn,
-					 e->adx_name,
-					 cmaps,
-					 ad,
-					 &mapped_name,
-					 vfs_translate_to_unix);
-	if (!NT_STATUS_IS_OK(status) &&
-	    !NT_STATUS_EQUAL(status, NT_STATUS_NONE_MAPPED))
-	{
-		DBG_ERR("string_replace_allocate failed\n");
+	rc = string_replace_allocate(handle->conn,
+				     e->adx_name,
+				     cmaps,
+				     ad,
+				     &mapped_name,
+				     vfs_translate_to_unix);
+	if (rc != 0) {
+		DBG_ERR("string_replace_allocate failed: %s\n", strerror(rc));
 		ok = false;
 		goto out;
 	}
@@ -2451,7 +2449,7 @@ static int adouble_destructor(struct adouble *ad)
 }
 
 /**
- * Allocate a struct adouble without initialiing it
+ * Allocate a struct adouble without initializing it
  *
  * The struct is either hang of the fsp extension context or if fsp is
  * NULL from ctx.
@@ -2581,14 +2579,10 @@ static struct adouble *ad_get_internal(TALLOC_CTX *ctx,
 	int rc = 0;
 	ssize_t len;
 	struct adouble *ad = NULL;
-	int mode;
 
 	if (fsp != NULL) {
-		if (fsp_is_alternate_stream(fsp)) {
-			smb_fname = fsp->base_fsp->fsp_name;
-		} else {
-			smb_fname = fsp->fsp_name;
-		}
+		struct files_struct *meta_fsp = metadata_fsp(fsp);
+		smb_fname = meta_fsp->fsp_name;
 	}
 
 	DEBUG(10, ("ad_get(%s) called for %s\n",
@@ -2602,12 +2596,9 @@ static struct adouble *ad_get_internal(TALLOC_CTX *ctx,
 	}
 
 	/* Try rw first so we can use the fd in ad_convert() */
-	mode = O_RDWR;
-
-	rc = ad_open(handle, ad, fsp, smb_fname, mode, 0);
+	rc = ad_open(handle, ad, fsp, smb_fname, O_RDWR, 0);
 	if (rc == -1 && ((errno == EROFS) || (errno == EACCES))) {
-		mode = O_RDONLY;
-		rc = ad_open(handle, ad, fsp, smb_fname, mode, 0);
+		rc = ad_open(handle, ad, fsp, smb_fname, O_RDONLY, 0);
 	}
 	if (rc == -1) {
 		DBG_DEBUG("ad_open [%s] error [%s]\n",
@@ -2707,7 +2698,7 @@ int ad_fset(struct vfs_handle_struct *handle,
 					  ad_getentryoff(ad, ADEID_RFORK),
 					  0);
 		if (len != ad_getentryoff(ad, ADEID_RFORK)) {
-			DBG_ERR("short write on %s: %zd", fsp_str_dbg(fsp), len);
+			DBG_ERR("short write on %s: %zd\n", fsp_str_dbg(fsp), len);
 			return -1;
 		}
 		rc = 0;
@@ -2827,7 +2818,7 @@ ssize_t afpinfo_pack(const AfpInfo *ai, char *buf)
  * Buffer size must be at least AFP_INFO_SIZE
  * Returns allocated AfpInfo struct
  **/
-AfpInfo *afpinfo_unpack(TALLOC_CTX *ctx, const void *data)
+AfpInfo *afpinfo_unpack(TALLOC_CTX *ctx, const void *data, bool validate)
 {
 	AfpInfo *ai = talloc_zero(ctx, AfpInfo);
 	if (ai == NULL) {
@@ -2840,10 +2831,16 @@ AfpInfo *afpinfo_unpack(TALLOC_CTX *ctx, const void *data)
 	memcpy(ai->afpi_FinderInfo, (const char *)data + 16,
 	       sizeof(ai->afpi_FinderInfo));
 
-	if (ai->afpi_Signature != AFP_Signature
-	    || ai->afpi_Version != AFP_Version) {
-		DEBUG(1, ("Bad AfpInfo signature or version\n"));
-		TALLOC_FREE(ai);
+	if (validate) {
+		if (ai->afpi_Signature != AFP_Signature
+		    || ai->afpi_Version != AFP_Version)
+		{
+			DEBUG(1, ("Bad AfpInfo signature or version\n"));
+			TALLOC_FREE(ai);
+		}
+	} else {
+		ai->afpi_Signature = AFP_Signature;
+		ai->afpi_Version = AFP_Version;
 	}
 
 	return ai;

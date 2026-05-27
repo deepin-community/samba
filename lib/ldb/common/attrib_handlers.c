@@ -281,15 +281,36 @@ static int ldb_canonicalise_Boolean(struct ldb_context *ldb, void *mem_ctx,
 }
 
 /*
-  compare two Booleans
-*/
+ * compare two Booleans.
+ *
+ * According to RFC4517 4.2.2, "the booleanMatch rule is an equality matching
+ * rule", meaning it isn't used for ordering.
+ *
+ * However, it seems conceivable that Samba could be coerced into sorting on a
+ * field with Boolean syntax, so we might as well have consistent behaviour in
+ * that case.
+ *
+ * The most probable values are {"FALSE", 5} and {"TRUE", 4}. To save time we
+ * compare first by length, which makes FALSE > TRUE. This is somewhat
+ * contrary to convention, but is how Samba has worked forever.
+ *
+ * If somehow we are comparing incompletely normalised values where the length
+ * is the same (for example {"false", 5} and {"TRUE\0", 5}), the length is the
+ * same, and we fall back to a strncasecmp. In this case, since "FALSE" is
+ * alphabetically lower, we swap the order, so that "TRUE\0" again comes
+ * before "FALSE".
+ *
+ * ldb_canonicalise_Boolean (just above) gives us a clue as to what we might
+ * expect to cope with by way of invalid values.
+ */
 static int ldb_comparison_Boolean(struct ldb_context *ldb, void *mem_ctx,
 			   const struct ldb_val *v1, const struct ldb_val *v2)
 {
 	if (v1->length != v2->length) {
-		return v1->length - v2->length;
+		return NUMERIC_CMP(v2->length, v1->length);
 	}
-	return strncasecmp((char *)v1->data, (char *)v2->data, v1->length);
+	/* reversed, see long comment above */
+	return strncasecmp((char *)v2->data, (char *)v1->data, v1->length);
 }
 
 
@@ -300,116 +321,24 @@ int ldb_comparison_binary(struct ldb_context *ldb, void *mem_ctx,
 			  const struct ldb_val *v1, const struct ldb_val *v2)
 {
 	if (v1->length != v2->length) {
-		return v1->length - v2->length;
+		return NUMERIC_CMP(v1->length, v2->length);
 	}
 	return memcmp(v1->data, v2->data, v1->length);
 }
 
 /*
-  compare two case insensitive strings, ignoring multiple whitespaces
-  and leading and trailing whitespaces
-  see rfc2252 section 8.1
-
-  try to optimize for the ascii case,
-  but if we find out an utf8 codepoint revert to slower but correct function
-*/
+ * ldb_comparison_fold is a schema syntax comparison_fn for utf-8 strings that
+ * collapse multiple spaces into one (e.g. "Directory String" syntax).
+ *
+ * The default comparison function only performs ASCII case-folding, and only
+ * collapses multiple spaces, not tabs and other whitespace (contrary to
+ * RFC4518). To change the comparison function (as Samba does), use
+ * ldb_set_utf8_functions().
+ */
 int ldb_comparison_fold(struct ldb_context *ldb, void *mem_ctx,
-			       const struct ldb_val *v1, const struct ldb_val *v2)
+			const struct ldb_val *v1, const struct ldb_val *v2)
 {
-	const char *s1=(const char *)v1->data, *s2=(const char *)v2->data;
-	size_t n1 = v1->length, n2 = v2->length;
-	char *b1, *b2;
-	const char *u1, *u2;
-	int ret;
-
-	while (n1 && *s1 == ' ') { s1++; n1--; };
-	while (n2 && *s2 == ' ') { s2++; n2--; };
-
-	while (n1 && n2 && *s1 && *s2) {
-		/* the first 127 (0x7F) chars are ascii and utf8 guarantees they
-		 * never appear in multibyte sequences */
-		if (((unsigned char)s1[0]) & 0x80) goto utf8str;
-		if (((unsigned char)s2[0]) & 0x80) goto utf8str;
-		if (toupper((unsigned char)*s1) != toupper((unsigned char)*s2))
-			break;
-		if (*s1 == ' ') {
-			while (n1 > 1 && s1[0] == s1[1]) { s1++; n1--; }
-			while (n2 > 1 && s2[0] == s2[1]) { s2++; n2--; }
-		}
-		s1++; s2++;
-		n1--; n2--;
-	}
-
-	/* check for trailing spaces only if the other pointers has
-	 * reached the end of the strings otherwise we can
-	 * mistakenly match.  ex. "domain users" <->
-	 * "domainUpdates"
-	 */
-	if (n1 && *s1 == ' ' && (!n2 || !*s2)) {
-		while (n1 && *s1 == ' ') { s1++; n1--; }
-	}
-	if (n2 && *s2 == ' ' && (!n1 || !*s1)) {
-		while (n2 && *s2 == ' ') { s2++; n2--; }
-	}
-	if (n1 == 0 && n2 != 0) {
-		return -(int)ldb_ascii_toupper(*s2);
-	}
-	if (n2 == 0 && n1 != 0) {
-		return (int)ldb_ascii_toupper(*s1);
-	}
-	if (n1 == 0 && n2 == 0) {
-		return 0;
-	}
-	return (int)ldb_ascii_toupper(*s1) - (int)ldb_ascii_toupper(*s2);
-
-utf8str:
-	/*
-	 * No need to recheck from the start, just from the first utf8 charu
-	 * found. Note that the callback of ldb_casefold() needs to be ascii
-	 * compatible.
-	 */
-	b1 = ldb_casefold(ldb, mem_ctx, s1, n1);
-	b2 = ldb_casefold(ldb, mem_ctx, s2, n2);
-
-	if (!b1 || !b2) {
-		/* One of the strings was not UTF8, so we have no
-		 * options but to do a binary compare */
-		talloc_free(b1);
-		talloc_free(b2);
-		ret = memcmp(s1, s2, MIN(n1, n2));
-		if (ret == 0) {
-			if (n1 == n2) return 0;
-			if (n1 > n2) {
-				return (int)ldb_ascii_toupper(s1[n2]);
-			} else {
-				return -(int)ldb_ascii_toupper(s2[n1]);
-			}
-		}
-		return ret;
-	}
-
-	u1 = b1;
-	u2 = b2;
-
-	while (*u1 & *u2) {
-		if (*u1 != *u2)
-			break;
-		if (*u1 == ' ') {
-			while (u1[0] == u1[1]) u1++;
-			while (u2[0] == u2[1]) u2++;
-		}
-		u1++; u2++;
-	}
-	if (! (*u1 && *u2)) {
-		while (*u1 == ' ') u1++;
-		while (*u2 == ' ') u2++;
-	}
-	ret = (int)(*u1 - *u2);
-
-	talloc_free(b1);
-	talloc_free(b2);
-
-	return ret;
+	return ldb->utf8_fns.casecmp(ldb->utf8_fns.context, v1, v2);
 }
 
 

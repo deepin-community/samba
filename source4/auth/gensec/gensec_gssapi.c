@@ -153,8 +153,31 @@ static NTSTATUS gensec_gssapi_start(struct gensec_security *gensec_security)
 
 	gensec_gssapi_state->gssapi_context = GSS_C_NO_CONTEXT;
 
-	/* TODO: Fill in channel bindings */
-	gensec_gssapi_state->input_chan_bindings = GSS_C_NO_CHANNEL_BINDINGS;
+	if (gensec_security->channel_bindings != NULL) {
+		gensec_gssapi_state->_input_chan_bindings.initiator_addrtype =
+			gensec_security->channel_bindings->initiator_addrtype;
+		gensec_gssapi_state->_input_chan_bindings.initiator_address.value =
+			gensec_security->channel_bindings->initiator_address.data;
+		gensec_gssapi_state->_input_chan_bindings.initiator_address.length =
+			gensec_security->channel_bindings->initiator_address.length;
+
+		gensec_gssapi_state->_input_chan_bindings.acceptor_addrtype =
+			gensec_security->channel_bindings->acceptor_addrtype;
+		gensec_gssapi_state->_input_chan_bindings.acceptor_address.value =
+			gensec_security->channel_bindings->acceptor_address.data;
+		gensec_gssapi_state->_input_chan_bindings.acceptor_address.length =
+			gensec_security->channel_bindings->acceptor_address.length;
+
+		gensec_gssapi_state->_input_chan_bindings.application_data.value =
+			gensec_security->channel_bindings->application_data.data;
+		gensec_gssapi_state->_input_chan_bindings.application_data.length =
+			gensec_security->channel_bindings->application_data.length;
+
+		gensec_gssapi_state->input_chan_bindings =
+			&gensec_gssapi_state->_input_chan_bindings;
+	} else {
+		gensec_gssapi_state->input_chan_bindings = GSS_C_NO_CHANNEL_BINDINGS;
+	}
 
 	gensec_gssapi_state->server_name = GSS_C_NO_NAME;
 	gensec_gssapi_state->client_name = GSS_C_NO_NAME;
@@ -176,6 +199,10 @@ static NTSTATUS gensec_gssapi_start(struct gensec_security *gensec_security)
 	}
 	if (gensec_setting_bool(gensec_security->settings, "gensec_gssapi", "sequence", true)) {
 		gensec_gssapi_state->gss_want_flags |= GSS_C_SEQUENCE_FLAG;
+	}
+	if (!(gensec_security->want_features & GENSEC_FEATURE_NO_DELEGATION)) {
+		gensec_gssapi_state->gss_want_flags &= ~GSS_C_DELEG_FLAG;
+		gensec_gssapi_state->gss_want_flags &= ~GSS_C_DELEG_POLICY_FLAG;
 	}
 
 	if (gensec_security->want_features & GENSEC_FEATURE_SESSION_KEY) {
@@ -343,7 +370,7 @@ static NTSTATUS gensec_gssapi_client_creds(struct gensec_security *gensec_securi
 		DEBUG(2, ("Error obtaining ticket we require to contact %s: (possibly due to clock skew between us and the KDC) %s\n", gensec_gssapi_state->target_principal, error_string));
 		return NT_STATUS_TIME_DIFFERENCE_AT_DC;
 	default:
-		DEBUG(1, ("Aquiring initiator credentials failed: %s\n", error_string));
+		DEBUG(1, ("Acquiring initiator credentials failed: %s\n", error_string));
 		return NT_STATUS_UNSUCCESSFUL;
 	}
 
@@ -360,40 +387,24 @@ static NTSTATUS gensec_gssapi_client_start(struct gensec_security *gensec_securi
 	struct gensec_gssapi_state *gensec_gssapi_state;
 	struct cli_credentials *creds = gensec_get_credentials(gensec_security);
 	NTSTATUS nt_status;
-	const char *target_principal = NULL;
-	const char *hostname = gensec_get_target_hostname(gensec_security);
-	const char *service = gensec_get_target_service(gensec_security);
-	const char *realm = cli_credentials_get_realm(creds);
 
-	target_principal = gensec_get_target_principal(gensec_security);
-	if (target_principal != NULL) {
-		goto do_start;
-	}
+	nt_status = gensec_kerberos_possible(gensec_security);
+	if (!NT_STATUS_IS_OK(nt_status)) {
+		char *target_name = NULL;
+		char *cred_name = NULL;
 
-	if (!hostname) {
-		DEBUG(3, ("No hostname for target computer passed in, cannot use kerberos for this connection\n"));
-		return NT_STATUS_INVALID_PARAMETER;
-	}
-	if (is_ipaddress(hostname)) {
-		DEBUG(2, ("Cannot do GSSAPI to an IP address\n"));
-		return NT_STATUS_INVALID_PARAMETER;
-	}
-	if (strcmp(hostname, "localhost") == 0) {
-		DEBUG(2, ("GSSAPI to 'localhost' does not make sense\n"));
-		return NT_STATUS_INVALID_PARAMETER;
-	}
+		target_name = gensec_get_unparsed_target_principal(gensec_security,
+								   gensec_security);
+		cred_name = cli_credentials_get_unparsed_name(creds,
+							      gensec_security);
 
-	if (realm == NULL) {
-		char *cred_name = cli_credentials_get_unparsed_name(creds,
-								gensec_security);
-		DEBUG(3, ("cli_credentials(%s) without realm, "
-			  "cannot use kerberos for this connection %s/%s\n",
-			  cred_name, service, hostname));
+		DBG_NOTICE("Not using kerberos to %s as %s: %s\n",
+			   target_name, cred_name, nt_errstr(nt_status));
+
+		TALLOC_FREE(target_name);
 		TALLOC_FREE(cred_name);
-		return NT_STATUS_INVALID_PARAMETER;
+		return nt_status;
 	}
-
-do_start:
 
 	nt_status = gensec_gssapi_start(gensec_security);
 	if (!NT_STATUS_IS_OK(nt_status)) {
@@ -401,6 +412,20 @@ do_start:
 	}
 
 	gensec_gssapi_state = talloc_get_type(gensec_security->private_data, struct gensec_gssapi_state);
+
+#ifdef HAVE_CLIENT_GSS_C_CHANNEL_BOUND_FLAG
+	/*
+	 * We can only use GSS_C_CHANNEL_BOUND_FLAG if the kerberos library
+	 * supports that in order to add KERB_AP_OPTIONS_CBT.
+	 *
+	 * See:
+	 * https://github.com/heimdal/heimdal/pull/1234
+	 * https://github.com/krb5/krb5/pull/1329
+	 */
+	if (!(gensec_security->want_features & GENSEC_FEATURE_CB_OPTIONAL)) {
+		gensec_gssapi_state->gss_want_flags |= GSS_C_CHANNEL_BOUND_FLAG;
+	}
+#endif
 
 	if (cli_credentials_get_impersonate_principal(creds)) {
 		gensec_gssapi_state->gss_want_flags &= ~(GSS_C_DELEG_FLAG|GSS_C_DELEG_POLICY_FLAG);
@@ -653,6 +678,39 @@ init_sec_context_done:
 			if (gss_oid_p) {
 				gensec_gssapi_state->gss_oid = gss_oid_p;
 			}
+#ifdef GSS_C_CHANNEL_BOUND_FLAG
+			if (maj_stat == GSS_S_COMPLETE &&
+			    gensec_security->channel_bindings != NULL &&
+			    !(gensec_security->want_features & GENSEC_FEATURE_CB_OPTIONAL) &&
+			    !(gensec_gssapi_state->gss_got_flags & GSS_C_CHANNEL_BOUND_FLAG))
+			{
+				/*
+				 * If we require valid channel bindings
+				 * we need to check the client provided
+				 * them.
+				 *
+				 * We detect this if
+				 * GSS_C_CHANNEL_BOUND_FLAG is given.
+				 *
+				 * Recent heimdal and MIT releases support this
+				 * with older releases (e.g. MIT > 1.19).
+				 *
+				 * It means client with zero channel bindings
+				 * on a server with non-zero channel bindings
+				 * won't generate GSS_S_BAD_BINDINGS directly
+				 * unless KERB_AP_OPTIONS_CBT was also
+				 * provides by the client.
+				 *
+				 * So we need to convert a missing
+				 * GSS_C_CHANNEL_BOUND_FLAG into
+				 * GSS_S_BAD_BINDINGS by default
+				 * (unless GENSEC_FEATURE_CB_OPTIONAL is given).
+				 */
+				maj_stat = GSS_S_BAD_BINDINGS;
+				min_stat = 0;
+			}
+#endif /* GSS_C_CHANNEL_BOUND_FLAG */
+
 			break;
 		}
 		default:
@@ -699,6 +757,9 @@ init_sec_context_done:
 			gss_release_buffer(&min_stat2, &output_token);
 			
 			return NT_STATUS_MORE_PROCESSING_REQUIRED;
+		} else if (maj_stat == GSS_S_BAD_BINDINGS) {
+			DBG_WARNING("Got GSS_S_BAD_BINDINGS\n");
+			return NT_STATUS_BAD_BINDINGS;
 		} else if (maj_stat == GSS_S_CONTEXT_EXPIRED) {
 			gss_cred_id_t creds = NULL;
 			gss_name_t name;
@@ -757,7 +818,7 @@ init_sec_context_done:
 				gss_release_buffer(&min_stat, &buffer);
 				gss_release_name(&min_stat, &name);
 			} else if (maj_stat != GSS_S_COMPLETE) {
-				DEBUG(0, ("inquiry of credential lifefime via GSSAPI gss_inquire_cred failed: %s\n",
+				DEBUG(0, ("inquiry of credential lifetime via GSSAPI gss_inquire_cred failed: %s\n",
 					  gssapi_error_string(out_mem_ctx, maj_stat, min_stat, gensec_gssapi_state->gss_oid)));
 			}
 			return NT_STATUS_INVALID_PARAMETER;
@@ -902,7 +963,7 @@ init_sec_context_done:
 			} else if (gensec_have_feature(gensec_security, GENSEC_FEATURE_SIGN)) {
 				DEBUG(3, ("SASL/GSSAPI Connection to server will be cryptographically signed\n"));
 			} else {
-				DEBUG(3, ("SASL/GSSAPI Connection to server will have no cryptographically protection\n"));
+				DEBUG(3, ("SASL/GSSAPI Connection to server will have no cryptographic protection\n"));
 			}
 
 			return NT_STATUS_OK;
@@ -1449,7 +1510,7 @@ static NTTIME gensec_gssapi_expire_time(struct gensec_security *gensec_security)
 }
 
 /*
- * Extract the 'sesssion key' needed by SMB signing and ncacn_np 
+ * Extract the 'session key' needed by SMB signing and ncacn_np
  * (for encrypting some passwords).
  * 
  * This breaks all the abstractions, but what do you expect...
@@ -1511,7 +1572,7 @@ static NTSTATUS gensec_gssapi_session_info(struct gensec_security *gensec_securi
 					   &pac_blob);
 	
 	/* IF we have the PAC - otherwise we need to get this
-	 * data from elsewere - local ldb, or (TODO) lookup of some
+	 * data from elsewhere - local ldb, or (TODO) lookup of some
 	 * kind... 
 	 */
 	if (NT_STATUS_IS_OK(nt_status)) {

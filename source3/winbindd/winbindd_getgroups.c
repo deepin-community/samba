@@ -24,9 +24,9 @@
 
 struct winbindd_getgroups_state {
 	struct tevent_context *ev;
-	fstring namespace;
-	fstring domname;
-	fstring username;
+	char *namespace;
+	char *domname;
+	char *username;
 	struct dom_sid sid;
 	enum lsa_SidType type;
 	uint32_t num_sids;
@@ -76,10 +76,10 @@ struct tevent_req *winbindd_getgroups_send(TALLOC_CTX *mem_ctx,
 		domuser = mapped_user;
 	}
 
-	ok = parse_domain_user(domuser,
-			       state->namespace,
-			       state->domname,
-			       state->username);
+	ok = parse_domain_user(state, domuser,
+			       &state->namespace,
+			       &state->domname,
+			       &state->username);
 	if (!ok) {
 		D_WARNING("Could not parse domain user: %s\n", domuser);
 		tevent_req_nterror(req, NT_STATUS_INVALID_PARAMETER);
@@ -109,6 +109,9 @@ static void winbindd_getgroups_lookupname_done(struct tevent_req *subreq)
 
 	status = wb_lookupname_recv(subreq, &state->sid, &state->type);
 	TALLOC_FREE(subreq);
+	if (NT_STATUS_IS_OK(status) && state->type == SID_NAME_UNKNOWN) {
+		status = NT_STATUS_NONE_MAPPED;
+	}
 	if (tevent_req_nterror(req, status)) {
 		return;
 	}
@@ -256,7 +259,7 @@ NTSTATUS winbindd_getgroups_recv(struct tevent_req *req,
 
 	if (tevent_req_is_nterror(req, &status)) {
 		struct dom_sid_buf buf;
-		D_WARNING("Could not convert sid %s: %s\n",
+		D_DEBUG("Could not convert sid %s: %s\n",
 			  dom_sid_str_buf(&state->sid, &buf),
 			  nt_errstr(status));
 		return status;

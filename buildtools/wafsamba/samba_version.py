@@ -200,11 +200,9 @@ also accepted as dictionary entries here
             string+="#define SAMBA_VERSION_%s " % name
             value = self.vcs_fields[name]
             string_types = str
-            if sys.version_info[0] < 3:
-                string_types = basestring
             if isinstance(value, string_types):
                 string += "\"%s\"" % value
-            elif type(value) is int:
+            elif isinstance(value, int):
                 string += "%d" % value
             else:
                 raise Exception("Unknown type for %s: %r" % (name, value))
@@ -252,6 +250,11 @@ def samba_version_file(version_file, path, env=None, is_install=True):
             except:
                 print("Failed to parse line %s from %s" % (line, version_file))
                 raise
+
+    if "SAMBA_VERSION_VENDOR_SUFFIX" in env:
+        version_dict["SAMBA_VERSION_VENDOR_SUFFIX"] = env.SAMBA_VERSION_VENDOR_SUFFIX
+    if "SAMBA_VERSION_VENDOR_PATCH" in env:
+        version_dict["SAMBA_VERSION_VENDOR_PATCH"] = str(env.SAMBA_VERSION_VENDOR_PATCH)
 
     return SambaVersion(version_dict, path, env=env, is_install=is_install)
 

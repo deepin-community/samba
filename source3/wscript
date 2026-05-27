@@ -62,7 +62,6 @@ def options(opt):
 
     opt.samba_add_onoff_option('winbind')
     opt.samba_add_onoff_option('ads')
-    opt.samba_add_onoff_option('ldap')
     opt.samba_add_onoff_option('cups', with_name="enable", without_name="disable")
     opt.samba_add_onoff_option('iprint', with_name="enable", without_name="disable")
     opt.samba_add_onoff_option('pam')
@@ -87,12 +86,8 @@ def options(opt):
     opt.samba_add_onoff_option('fake-kaserver',
                           help=("Include AFS fake-kaserver support"), default=False)
 
-    opt.add_option('--with-libcephfs',
-                   help=("Directory under which libcephfs is installed"),
-                   action="store", dest='libcephfs_dir', default=None)
-
     opt.samba_add_onoff_option('glusterfs', with_name="enable", without_name="disable", default=True)
-    opt.samba_add_onoff_option('cephfs', with_name="enable", without_name="disable", default=True)
+    opt.samba_add_onoff_option('cephfs', with_name="enable", without_name="disable", default=None)
 
     opt.add_option('--enable-vxfs',
                   help=("enable support for VxFS (default=no)"),
@@ -100,6 +95,7 @@ def options(opt):
 
     # default = None means autodetection
     opt.samba_add_onoff_option('spotlight', with_name="enable", without_name="disable", default=None)
+    opt.samba_add_onoff_option('wsp', with_name="enable", without_name="disable", default=True)
 
 def configure(conf):
     default_static_modules = []
@@ -107,11 +103,6 @@ def configure(conf):
     required_static_modules = []
     forced_static_modules = []
     forced_shared_modules = []
-
-    if Options.options.developer:
-        conf.ADD_CFLAGS('-DDEVELOPER -DDEBUG_PASSWORD')
-        conf.env.developer = True
-        conf.DEFINE('HAVE_SMB3_UNIX_EXTENSIONS', '1')
 
     if sys.platform != 'openbsd5':
         conf.ADD_LDFLAGS("-Wl,--export-dynamic", testflags=True)
@@ -123,6 +114,7 @@ def configure(conf):
 
     conf.CHECK_HEADERS('netdb.h')
     conf.CHECK_HEADERS('linux/falloc.h linux/ioctl.h')
+    conf.CHECK_HEADERS('linux/magic.h')
 
     conf.CHECK_FUNCS('getcwd fchown chmod fchmod mknod mknodat')
     conf.CHECK_FUNCS('strtol strchr strupr chflags fchflags')
@@ -465,6 +457,9 @@ vsyslog
             conf.DEFINE('HAVE_FREEBSD_SUNACL_H', '1')
             conf.CHECK_FUNCS_IN(['acl'], 'sunacl')
         conf.DEFINE('STAT_ST_BLOCKSIZE', '512')
+    elif (host_os.rfind('openbsd') > -1):
+        conf.DEFINE('OPENBSD', 1)
+        conf.DEFINE('STAT_ST_BLOCKSIZE', '512')
     elif (host_os.rfind('irix') > -1):
         conf.DEFINE('IRIX', 1)
         conf.DEFINE('STAT_ST_BLOCKSIZE', '512')
@@ -536,6 +531,10 @@ return acl_get_perm_np(permset_d, perm);
     if conf.CHECK_FUNCS('dirfd'):
         conf.DEFINE('HAVE_DIRFD_DECL', 1)
 
+    conf.CHECK_CODE('struct statfs fsd; int r = fstatfs(AT_FDCWD, &fsd);',
+                    'HAVE_FSTATFS',
+                    msg='Checking for fstatfs',
+                    headers='sys/statfs.h fcntl.h')
     conf.CHECK_CODE('struct statfs fsd; fsid_t fsid = fsd.f_fsid; return statfs(".", &fsd);',
                     'HAVE_STATFS_F_FSID',
                     msg="vfs_fileid checking for statfs() and struct statfs.f_fsid",
@@ -648,53 +647,6 @@ msg.msg_accrightslen = sizeof(fd);
     if Options.options.with_automount:
         conf.DEFINE('WITH_AUTOMOUNT', '1')
 
-    # Check for LDAP
-    if Options.options.with_ldap:
-        conf.CHECK_HEADERS('ldap.h lber.h ldap_pvt.h')
-        conf.CHECK_TYPE('ber_tag_t', 'unsigned int', headers='ldap.h lber.h')
-        conf.CHECK_FUNCS_IN('ber_scanf ber_sockbuf_add_io', 'lber')
-        conf.CHECK_VARIABLE('LDAP_OPT_SOCKBUF', headers='ldap.h')
-
-        # if we LBER_OPT_LOG_PRINT_FN we can intercept ldap logging and print it out
-        # for the samba logs
-        conf.CHECK_VARIABLE('LBER_OPT_LOG_PRINT_FN',
-                            define='HAVE_LBER_LOG_PRINT_FN', headers='lber.h')
-
-        conf.CHECK_FUNCS_IN('ldap_init ldap_init_fd ldap_initialize ldap_set_rebind_proc', 'ldap')
-        conf.CHECK_FUNCS_IN('ldap_add_result_entry', 'ldap')
-
-        # Check if ldap_set_rebind_proc() takes three arguments
-        if conf.CHECK_CODE('ldap_set_rebind_proc(0, 0, 0)',
-                           'LDAP_SET_REBIND_PROC_ARGS',
-                           msg="Checking whether ldap_set_rebind_proc takes 3 arguments",
-                           headers='ldap.h lber.h', link=False):
-            conf.DEFINE('LDAP_SET_REBIND_PROC_ARGS', '3')
-        else:
-            conf.DEFINE('LDAP_SET_REBIND_PROC_ARGS', '2')
-
-        # last but not least, if ldap_init() exists, we want to use ldap
-        if conf.CONFIG_SET('HAVE_LDAP_INIT') and conf.CONFIG_SET('HAVE_LDAP_H'):
-            conf.DEFINE('HAVE_LDAP', '1')
-            conf.DEFINE('LDAP_DEPRECATED', '1')
-            conf.env['HAVE_LDAP'] = '1'
-            # if ber_sockbuf_add_io() and LDAP_OPT_SOCKBUF are available, we can add
-            # SASL wrapping hooks
-            if conf.CONFIG_SET('HAVE_BER_SOCKBUF_ADD_IO') and \
-                    conf.CONFIG_SET('HAVE_LDAP_OPT_SOCKBUF'):
-                conf.DEFINE('HAVE_LDAP_SASL_WRAPPING', '1')
-        else:
-            conf.fatal("LDAP support not found. "
-                       "Try installing libldap2-dev or openldap-devel. "
-                       "Otherwise, use --without-ldap to build without "
-                       "LDAP support. "
-                       "LDAP support is required for the LDAP passdb backend, "
-                       "LDAP idmap backends and ADS. "
-                       "ADS support improves communication with "
-                       "Active Directory domain controllers.")
-    else:
-        conf.SET_TARGET_TYPE('ldap', 'EMPTY')
-        conf.SET_TARGET_TYPE('lber', 'EMPTY')
-
     if Options.options.with_ads == False:
         use_ads = False
         use_ads_krb5 = False
@@ -775,13 +727,13 @@ msg.msg_accrightslen = sizeof(fd);
             conf.undefine('HAVE_GSSAPI_GSSAPI_H')
             use_ads = False
 
-        if not conf.CONFIG_SET('HAVE_LDAP'):
+        if not conf.CONFIG_SET('HAVE_LDAP_TRANSPORT_WRAPPING'):
+            Logs.warn("need ber_sockbuf_add_io() and LDAP_OPT_SOCKBUF for SASL and TLS support")
             use_ads = False
             use_ads_ldap = False
 
     if use_ads:
-        conf.DEFINE('WITH_ADS', '1')
-        conf.env['HAVE_ADS'] = '1'
+        conf.DEFINE('HAVE_ADS', '1')
         Logs.info("Building with Active Directory support.")
         # these have broken dependencies
         forced_shared_modules.extend(['idmap_ad', 'idmap_rfc2307'])
@@ -808,7 +760,7 @@ msg.msg_accrightslen = sizeof(fd);
     if Options.options.with_utmp:
         conf.env.with_utmp = True
         if not conf.CHECK_HEADERS('utmp.h'): conf.env.with_utmp = False
-        conf.CHECK_FUNCS('pututline pututxline updwtmp updwtmpx getutmpx getutxent')
+        conf.CHECK_FUNCS('pututline pututxline updwtmp updwtmpx getutmpx')
         conf.CHECK_STRUCTURE_MEMBER('struct utmp', 'ut_name', headers='utmp.h',
                                     define='HAVE_UT_UT_NAME')
         conf.CHECK_STRUCTURE_MEMBER('struct utmp', 'ut_user', headers='utmp.h',
@@ -1669,24 +1621,32 @@ int main(void) {
             conf.DEFINE('HAVE_LINUX_IOCTL', '1')
 
     conf.env['CFLAGS_CEPHFS'] = "-D_FILE_OFFSET_BITS=64"
-    if Options.options.libcephfs_dir:
-        Logs.error('''--with-libcephfs no longer supported, please use compiler
-                   flags instead, e.g. GCC LIBRARY_PATH and C_INCLUDE_PATH''')
-        sys.exit(1)
 
-    if (Options.options.with_cephfs and
+    if (Options.options.with_cephfs is not False and
         conf.CHECK_HEADERS('cephfs/libcephfs.h', False, False, 'cephfs') and
         conf.CHECK_LIB('cephfs', shlib=True)):
         if (Options.options.with_acl_support and
-            conf.CHECK_FUNCS_IN('ceph_statx', 'cephfs',
+            conf.CHECK_FUNCS_IN('ceph_statx ceph_openat', 'cephfs',
                                 headers='cephfs/libcephfs.h')):
             conf.DEFINE('HAVE_CEPH', '1')
-            conf.CHECK_FUNCS_IN('ceph_select_filesystem', 'cephfs',
-                                headers='cephfs/libcephfs.h')
+
+        if (conf.CHECK_FUNCS_IN('ceph_ll_nonblocking_readv_writev', 'cephfs',
+                                headers='cephfs/libcephfs.h')):
+            conf.DEFINE('HAVE_CEPH_ASYNCIO', '1')
+
+    if conf.CONFIG_SET('HAVE_CEPH'):
+        Logs.info("building ceph vfs modules")
+    else:
+        if Options.options.with_cephfs == False:
+            Logs.info("not building ceph vfs modules(--disable-cephfs)")
+        elif Options.options.with_cephfs == True:
+            Logs.error("acl support disabled or ceph_statx/ceph_openat not "
+                       "available, cannot build ceph vfs modules")
+            conf.fatal("acl support disabled or ceph_statx/ceph_openat not "
+                       "available, but --enable-cephfs was specified")
         else:
-            Logs.warn('''Ceph support disabled due to --without-acl-support
-                      or lack of ceph_statx support''')
-            conf.undefine('HAVE_CEPH')
+            Logs.warn("acl support disabled or ceph_statx/ceph_openat not "
+                       "available, not building ceph vfs modules")
 
     if Options.options.with_glusterfs:
         conf.CHECK_CFG(package='glusterfs-api', args='"glusterfs-api >= 4" --cflags --libs',
@@ -1727,7 +1687,7 @@ int main(void) {
                       msg='Checking for liburing package', uselib_store="URING"):
         if (conf.CHECK_HEADERS('liburing.h', lib='uring')
                                       and conf.CHECK_LIB('uring', shlib=True)):
-            conf.CHECK_FUNCS_IN('io_uring_ring_dontfork', 'uring',
+            conf.CHECK_FUNCS_IN('io_uring_ring_dontfork io_uring_prep_writev2', 'uring',
                                 headers='liburing.h')
             # There are a few distributions, which
             # don't seem to have linux/openat2.h available
@@ -1826,6 +1786,14 @@ int main(void) {
         and conf.env['FLEX']
         and conf.CONFIG_GET('HAVE_UTF8_NORMALISATION')
     )
+
+    conf.env.with_wsp = False
+    if conf.CONFIG_GET('ENABLE_SELFTEST'):
+        Options.options.with_wsp = True
+    if Options.options.with_wsp:
+        Logs.info("building with WSP support")
+        conf.DEFINE('WITH_WSP', '1')
+        conf.env.with_wsp = True
 
     conf.env.with_spotlight = False
     if Options.options.with_spotlight is not False:
@@ -1948,6 +1916,7 @@ int main(void) {
         # addition to vfs_ceph. Still, only enable vfs_ceph_snapshots builds
         # if we're building with libcephfs for now.
         default_shared_modules.extend(['vfs_ceph_snapshots'])
+        default_shared_modules.extend(['vfs_ceph_new'])
 
     if conf.CONFIG_SET('HAVE_GLUSTERFS'):
         default_shared_modules.extend(['vfs_glusterfs'])

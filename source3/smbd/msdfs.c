@@ -35,6 +35,7 @@
 #include "lib/tsocket/tsocket.h"
 #include "lib/global_contexts.h"
 #include "source3/lib/substitute.h"
+#include "source3/smbd/dir.h"
 
 /**********************************************************************
  Parse a DFS pathname of the form(s)
@@ -332,7 +333,7 @@ static int conn_struct_tos_destructor(struct conn_struct_tos *c)
  SMB_VFS_CONNECT requires root privileges.
  This temporary uses become_root() and unbecome_root().
 
- But further impersonation has to be cone by the caller.
+ But further impersonation has to be done by the caller.
 *********************************************************/
 NTSTATUS create_conn_struct_tos(struct messaging_context *msg,
 				int snum,
@@ -1683,7 +1684,7 @@ static int form_junctions(TALLOC_CTX *ctx,
 
 		if (cnt >= jn_remain) {
 			DEBUG(2, ("form_junctions: ran out of MSDFS "
-				"junction slots"));
+				"junction slots\n"));
 			TALLOC_FREE(talloced);
 			goto out;
 		}

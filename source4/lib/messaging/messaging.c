@@ -349,9 +349,6 @@ size_t imessaging_deregister(struct imessaging_context *msg, uint32_t msg_type, 
 */
 int imessaging_cleanup(struct imessaging_context *msg)
 {
-	if (!msg) {
-		return 0;
-	}
 	return 0;
 }
 
@@ -443,6 +440,15 @@ void imessaging_dgm_unref_ev(struct tevent_context *ev)
 static NTSTATUS imessaging_reinit(struct imessaging_context *msg)
 {
 	int ret = -1;
+	struct irpc_request *irpc = NULL;
+	struct irpc_request *next = NULL;
+
+	for (irpc = msg->requests; irpc != NULL; irpc = next) {
+		next = irpc->next;
+
+		DLIST_REMOVE(msg->requests, irpc);
+		irpc->callid = -1;
+	}
 
 	TALLOC_FREE(msg->msg_dgm_ref);
 
@@ -826,14 +832,14 @@ struct imessaging_context *imessaging_client_init(TALLOC_CTX *mem_ctx,
 						  struct loadparm_context *lp_ctx,
 						struct tevent_context *ev)
 {
-	struct server_id id;
-	ZERO_STRUCT(id);
-	id.pid = getpid();
-	id.task_id = generate_random();
-	id.vnn = NONCLUSTER_VNN;
+	struct server_id id = {
+		.pid = getpid(),
+		.task_id = generate_random(),
+		.vnn = NONCLUSTER_VNN,
 
-	/* This is because we are not in the s3 serverid database */
-	id.unique_id = SERVERID_UNIQUE_ID_NOT_TO_VERIFY;
+		/* This is because we are not in the s3 serverid database */
+		.unique_id = SERVERID_UNIQUE_ID_NOT_TO_VERIFY,
+	};
 
 	return imessaging_init_discard_incoming(mem_ctx, lp_ctx, id, ev);
 }
@@ -1162,11 +1168,20 @@ struct server_id imessaging_get_server_id(struct imessaging_context *msg_ctx)
 
 struct irpc_bh_state {
 	struct imessaging_context *msg_ctx;
+	const struct dcerpc_binding *binding;
 	struct server_id server_id;
 	const struct ndr_interface_table *table;
 	uint32_t timeout;
 	struct security_token *token;
 };
+
+static const struct dcerpc_binding *irpc_bh_get_binding(struct dcerpc_binding_handle *h)
+{
+	struct irpc_bh_state *hs = dcerpc_binding_handle_data(h,
+				   struct irpc_bh_state);
+
+	return hs->binding;
+}
 
 static bool irpc_bh_is_connected(struct dcerpc_binding_handle *h)
 {
@@ -1411,7 +1426,7 @@ static bool irpc_bh_ref_alloc(struct dcerpc_binding_handle *h)
 }
 
 static void irpc_bh_do_ndr_print(struct dcerpc_binding_handle *h,
-				 int ndr_flags,
+				 ndr_flags_type ndr_flags,
 				 const void *_struct_ptr,
 				 const struct ndr_interface_call *call)
 {
@@ -1419,7 +1434,7 @@ static void irpc_bh_do_ndr_print(struct dcerpc_binding_handle *h,
 	bool print_in = false;
 	bool print_out = false;
 
-	if (DEBUGLEVEL >= 11) {
+	if (CHECK_DEBUGLVLC(DBGC_RPC_PARSE, 11)) {
 		print_in = true;
 		print_out = true;
 	}
@@ -1444,6 +1459,7 @@ static void irpc_bh_do_ndr_print(struct dcerpc_binding_handle *h,
 
 static const struct dcerpc_binding_handle_ops irpc_bh_ops = {
 	.name			= "wbint",
+	.get_binding		= irpc_bh_get_binding,
 	.is_connected		= irpc_bh_is_connected,
 	.set_timeout		= irpc_bh_set_timeout,
 	.raw_call_send		= irpc_bh_raw_call_send,
@@ -1461,8 +1477,10 @@ struct dcerpc_binding_handle *irpc_binding_handle(TALLOC_CTX *mem_ctx,
 						  struct server_id server_id,
 						  const struct ndr_interface_table *table)
 {
-	struct dcerpc_binding_handle *h;
-	struct irpc_bh_state *hs;
+	struct dcerpc_binding_handle *h = NULL;
+	struct irpc_bh_state *hs = NULL;
+	struct dcerpc_binding *b = NULL;
+	NTSTATUS status;
 
 	h = dcerpc_binding_handle_create(mem_ctx,
 					 &irpc_bh_ops,
@@ -1478,6 +1496,34 @@ struct dcerpc_binding_handle *irpc_binding_handle(TALLOC_CTX *mem_ctx,
 	hs->server_id = server_id;
 	hs->table = table;
 	hs->timeout = IRPC_CALL_TIMEOUT;
+
+	status = dcerpc_parse_binding(hs, "", &b);
+	if (!NT_STATUS_IS_OK(status)) {
+		TALLOC_FREE(h);
+		return NULL;
+	}
+	status = dcerpc_binding_set_transport(b, NCACN_INTERNAL);
+	if (!NT_STATUS_IS_OK(status)) {
+		TALLOC_FREE(h);
+		return NULL;
+	}
+	status = dcerpc_binding_set_string_option(b, "host", "localhost");
+	if (!NT_STATUS_IS_OK(status)) {
+		TALLOC_FREE(h);
+		return NULL;
+	}
+	status = dcerpc_binding_set_string_option(b, "endpoint", "irpc");
+	if (!NT_STATUS_IS_OK(status)) {
+		TALLOC_FREE(h);
+		return NULL;
+	}
+	status = dcerpc_binding_set_abstract_syntax(b, &table->syntax_id);
+	if (!NT_STATUS_IS_OK(status)) {
+		TALLOC_FREE(h);
+		return NULL;
+	}
+
+	hs->binding = b;
 
 	return h;
 }

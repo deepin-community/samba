@@ -107,7 +107,7 @@ Example3 adds a new RFC2307 enabled group for NIS domain samdom and GID 12345 (b
                help="Group type (Security | Distribution)"),
         Option("--description", help="Group's description", type=str),
         Option("--mail-address", help="Group's email address", type=str),
-        Option("--notes", help="Groups's notes", type=str),
+        Option("--notes", help="Group's notes", type=str),
         Option("--gid-number", help="Group's Unix/RFC2307 GID number", type=int),
         Option("--nis-domain", help="SFU30 NIS Domain", type=str),
         Option("--special", help="Add a special predefined group", action="store_true", default=False),
@@ -584,7 +584,7 @@ Example2 shows how to remove a single user account, User2, from the supergroup A
                                            member_base_dn=member_base_dn)
         except Exception as e:
             # FIXME: Catch more specific exception
-            raise CommandError('Failed to remove members %r from group "%s"' % (listofmembers, groupname), e)
+            raise CommandError('Failed to remove members %r from group "%s" - %s' % (listofmembers, groupname, e))
         self.outf.write("Removed members from group %s\n" % groupname)
 
 

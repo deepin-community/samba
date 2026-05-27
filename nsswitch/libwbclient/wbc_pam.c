@@ -418,6 +418,7 @@ wbcErr wbcCtxAuthenticateUserEx(struct wbcContext *ctx,
 				 params->domain_name,
 				 sep_response.data.info.winbind_separator,
 				 params->account_name);
+			winbindd_free_response(&sep_response);
 		} else {
 			strncpy(request.data.auth.user,
 				params->account_name,
@@ -1345,7 +1346,7 @@ wbcErr wbcCtxCredentialCache(struct wbcContext *ctx,
 
 	for (i=0; i<params->num_blobs; i++) {
 		/*
-		 * Older callers may used to provide the NEGOTIATE request
+		 * Older callers used to provide the NEGOTIATE request
 		 * as "initial_blob", but it was completely ignored by winbindd.
 		 *
 		 * So we keep ignoring it.

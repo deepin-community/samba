@@ -32,8 +32,6 @@
 #include "libsmb/clirap.h"
 
 #define SMBC_MAX_NAME  1023
-#define SMBC_FILE_MODE (S_IFREG | 0444)
-#define SMBC_DIR_MODE  (S_IFDIR | 0555)
 
 /*
  * DOS Attribute values (used internally)
@@ -162,6 +160,14 @@ struct SMBC_internal_data {
         bool                                    full_time_names;
 
         /*
+         * Enable POSIX extensions before opening files/directories
+         * Will silently ignore if the server does not support the POSIX
+         * extensions
+         */
+
+        bool                                     posix_extensions;
+
+        /*
          * The share mode of a file being opened.  To match POSIX semantics
          * (and maintain backward compatibility), DENY_NONE is the default.
          */
@@ -254,7 +260,9 @@ struct SMBC_internal_data {
         }               smb;
 
 	uint16_t	port;
-};	
+
+	struct loadparm_context *lp_ctx;
+};
 
 /* Functions in libsmb_cache.c */
 int
@@ -429,11 +437,6 @@ SMBC_ftruncate_ctx(SMBCCTX *context,
 /* Functions in libsmb_misc.c */
 bool SMBC_dlist_contains(SMBCFILE * list, SMBCFILE *p);
 
-int
-SMBC_errno(SMBCCTX *context,
-           struct cli_state *c);
-
-
 /* Functions in libsmb_path.c */
 int
 SMBC_parse_path(TALLOC_CTX *ctx,
@@ -527,9 +530,6 @@ void setup_stat(struct stat *st,
 		struct timespec access_time_ts,
 		struct timespec change_time_ts,
 		struct timespec write_time_ts);
-void setup_stat_from_stat_ex(const struct stat_ex *stex,
-			     const char *fname,
-			     struct stat *st);
 
 int
 SMBC_stat_ctx(SMBCCTX *context,

@@ -20,6 +20,7 @@
 
 #include "includes.h"
 #include "librpc/rpc/dcerpc.h"
+#include "librpc/rpc/dcerpc_internal.h"
 #include "librpc/rpc/dcerpc_util.h"
 #include "librpc/gen_ndr/ndr_dcerpc.h"
 #include "librpc/crypto/gse.h"
@@ -451,7 +452,7 @@ NTSTATUS dcerpc_check_auth(struct pipe_auth_data *auth,
 		return NT_STATUS_OK;
 
 	default:
-		DEBUG(3, ("Unimplemented Auth Level %d",
+		DEBUG(3, ("Unimplemented Auth Level %d\n",
 			  auth->auth_level));
 		return NT_STATUS_INVALID_PARAMETER;
 	}

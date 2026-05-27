@@ -1,7 +1,7 @@
 The packaging is kept in https://salsa.debian.org/samba-team/samba.
 
 The version in unstable is on the `master` branch, with the corresponding
-upstream version in the `upstream_4.19` branch (with `pristine-tar` information
+upstream version in the `upstream_4.22` branch (with `pristine-tar` information
 in the `pristine-tar` branch).
 
 It should be possible to build the package by just running `gbp buildpackage`.
@@ -35,7 +35,7 @@ Merging minor upstream releases
 Importing a new upstream version can be done like this:
 
     # set target version
-    upstream_version=4.19.0
+    upstream_version=4.22.0
     # go to git repo
     cd $GIT_DIR
     # Import upstream
@@ -87,11 +87,6 @@ Then several steps are needed:
 
         QUILT_PATCHES=debian/patches quilt push -a
         # then update or drop patches as needed
-
-- Bump talloc, tdb, and tevent Build-Depends in debian/control, from lib/*/wscript
-
-        grep ^VERSION lib/{talloc,tdb,tevent}/wscript
-        editor debian/control
 
 - Check if other Build-Depends need to be bumped
 

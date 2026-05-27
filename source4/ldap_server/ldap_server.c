@@ -1,4 +1,4 @@
-/* 
+/*
    Unix SMB/CIFS implementation.
 
    LDAP server
@@ -53,6 +53,9 @@
 #include "lib/messaging/messaging_internal.h"
 
 #undef strcasecmp
+
+#undef DBGC_CLASS
+#define DBGC_CLASS DBGC_LDAPSRV
 
 static void ldapsrv_terminate_connection_done(struct tevent_req *subreq);
 
@@ -300,9 +303,10 @@ static void ldapsrv_accept_tls_done(struct tevent_req *subreq);
 */
 static void ldapsrv_accept(struct stream_connection *c,
 			   struct auth_session_info *session_info,
-			   bool is_privileged)
+			   bool is_privileged,
+			   bool is_ldapi)
 {
-	struct ldapsrv_service *ldapsrv_service = 
+	struct ldapsrv_service *ldapsrv_service =
 		talloc_get_type(c->private_data, struct ldapsrv_service);
 	struct ldapsrv_connection *conn;
 	struct cli_credentials *server_credentials;
@@ -319,8 +323,9 @@ static void ldapsrv_accept(struct stream_connection *c,
 		return;
 	}
 	conn->is_privileged = is_privileged;
+	conn->is_ldapi = is_ldapi;
 
-	conn->sockets.send_queue = tevent_queue_create(conn, "ldapsev send queue");
+	conn->sockets.send_queue = tevent_queue_create(conn, "ldapsrv send queue");
 	if (conn->sockets.send_queue == NULL) {
 		stream_terminate_connection(c,
 					    "ldapsrv_accept: tevent_queue_create failed");
@@ -338,6 +343,8 @@ static void ldapsrv_accept(struct stream_connection *c,
 		return;
 	}
 	socket_set_flags(c->socket, SOCKET_FLAG_NOCLOSE);
+	/* as server we want to fail early */
+	tstream_bsd_fail_readv_first_error(conn->sockets.raw, true);
 
 	conn->connection  = c;
 	conn->service     = ldapsrv_service;
@@ -374,6 +381,17 @@ static void ldapsrv_accept(struct stream_connection *c,
 		conn->require_strong_auth = lpcfg_ldap_server_require_strong_auth(conn->lp_ctx);
 	}
 
+	if (conn->require_strong_auth ==
+	    LDAP_SERVER_REQUIRE_STRONG_AUTH_ALLOW_SASL_OVER_TLS)
+	{
+		D_ERR("WARNING: You have not configured "
+		      "'ldap server require strong auth = "
+		      "allow_sasl_over_tls'.\n"
+		      "Please change to 'yes' (preferred and default) or "
+		      "'allow_sasl_without_tls_channel_bindings' "
+		      "(if really needed)\n\n");
+	}
+
 	ret = ldapsrv_backend_Init(conn, &errstring);
 	if (ret != LDB_SUCCESS) {
 		char *reason = talloc_asprintf(conn,
@@ -387,7 +405,7 @@ static void ldapsrv_accept(struct stream_connection *c,
 	/* load limits from the conf partition */
 	ldapsrv_load_limits(conn); /* should we fail on error ? */
 
-	/* register the server */	
+	/* register the server */
 	irpc_add_name(c->msg_ctx, "ldap_server");
 
 	DLIST_ADD_END(ldapsrv_service->connections, conn);
@@ -447,6 +465,7 @@ static void ldapsrv_accept_tls_done(struct tevent_req *subreq)
 
 static void ldapsrv_call_read_done(struct tevent_req *subreq);
 static NTSTATUS ldapsrv_packet_check(
+	struct tstream_context *stream,
 	void *private_data,
 	DATA_BLOB blob,
 	size_t *packet_size);
@@ -1126,12 +1145,36 @@ static void ldapsrv_accept_nonpriv(struct stream_connection *c)
 					    "session info");
 		return;
 	}
-	ldapsrv_accept(c, session_info, false);
+	ldapsrv_accept(c, session_info, false, false);
 }
 
 static const struct stream_server_ops ldap_stream_nonpriv_ops = {
 	.name			= "ldap",
 	.accept_connection	= ldapsrv_accept_nonpriv,
+	.recv_handler		= ldapsrv_recv,
+	.send_handler		= ldapsrv_send,
+};
+
+static void ldapsrv_accept_nonpriv_ldapi(struct stream_connection *c)
+{
+	struct ldapsrv_service *ldapsrv_service = talloc_get_type_abort(
+		c->private_data, struct ldapsrv_service);
+	struct auth_session_info *session_info;
+	NTSTATUS status;
+
+	status = auth_anonymous_session_info(
+		c, ldapsrv_service->lp_ctx, &session_info);
+	if (!NT_STATUS_IS_OK(status)) {
+		stream_terminate_connection(c, "failed to setup anonymous "
+					    "session info");
+		return;
+	}
+	ldapsrv_accept(c, session_info, false, true);
+}
+
+static const struct stream_server_ops ldapi_stream_nonpriv_ops = {
+	.name			= "ldap",
+	.accept_connection	= ldapsrv_accept_nonpriv_ldapi,
 	.recv_handler		= ldapsrv_recv,
 	.send_handler		= ldapsrv_send,
 };
@@ -1142,7 +1185,7 @@ static const struct stream_server_ops ldap_stream_nonpriv_ops = {
 #define WITH_LDAPI_PRIV_SOCKET
 
 #ifdef WITH_LDAPI_PRIV_SOCKET
-static void ldapsrv_accept_priv(struct stream_connection *c)
+static void ldapsrv_accept_priv_ldapi(struct stream_connection *c)
 {
 	struct ldapsrv_service *ldapsrv_service = talloc_get_type_abort(
 		c->private_data, struct ldapsrv_service);
@@ -1154,12 +1197,12 @@ static void ldapsrv_accept_priv(struct stream_connection *c)
 					    "session info");
 		return;
 	}
-	ldapsrv_accept(c, session_info, true);
+	ldapsrv_accept(c, session_info, true, true);
 }
 
-static const struct stream_server_ops ldap_stream_priv_ops = {
+static const struct stream_server_ops ldapi_stream_priv_ops = {
 	.name			= "ldap",
-	.accept_connection	= ldapsrv_accept_priv,
+	.accept_connection	= ldapsrv_accept_priv_ldapi,
 	.recv_handler		= ldapsrv_recv,
 	.send_handler		= ldapsrv_send,
 };
@@ -1361,7 +1404,7 @@ static void ldap_reload_certs(struct imessaging_context *msg_ctx,
   open the ldap server sockets
 */
 static NTSTATUS ldapsrv_task_init(struct task_server *task)
-{	
+{
 	char *ldapi_path;
 #ifdef WITH_LDAPI_PRIV_SOCKET
 	char *priv_dir;
@@ -1371,11 +1414,11 @@ static NTSTATUS ldapsrv_task_init(struct task_server *task)
 
 	switch (lpcfg_server_role(task->lp_ctx)) {
 	case ROLE_STANDALONE:
-		task_server_terminate(task, "ldap_server: no LDAP server required in standalone configuration", 
+		task_server_terminate(task, "ldap_server: no LDAP server required in standalone configuration",
 				      false);
 		return NT_STATUS_INVALID_DOMAIN_ROLE;
 	case ROLE_DOMAIN_MEMBER:
-		task_server_terminate(task, "ldap_server: no LDAP server required in member server configuration", 
+		task_server_terminate(task, "ldap_server: no LDAP server required in member server configuration",
 				      false);
 		return NT_STATUS_INVALID_DOMAIN_ROLE;
 	case ROLE_ACTIVE_DIRECTORY_DC:
@@ -1435,7 +1478,7 @@ static NTSTATUS ldapsrv_task_init(struct task_server *task)
 		load_interface_list(task, task->lp_ctx, &ifaces);
 		num_interfaces = iface_list_count(ifaces);
 
-		/* We have been given an interfaces line, and been 
+		/* We have been given an interfaces line, and been
 		   told to only bind to those interfaces. Create a
 		   socket per interface and bind to only these.
 		*/
@@ -1476,8 +1519,8 @@ static NTSTATUS ldapsrv_task_init(struct task_server *task)
 	}
 
 	status = stream_setup_socket(task, task->event_ctx, task->lp_ctx,
-				     task->model_ops, &ldap_stream_nonpriv_ops,
-				     "unix", ldapi_path, NULL, 
+				     task->model_ops, &ldapi_stream_nonpriv_ops,
+				     "unix", ldapi_path, NULL,
 				     lpcfg_socket_options(task->lp_ctx),
 				     ldap_service, task->process_context);
 	talloc_free(ldapi_path);
@@ -1509,7 +1552,7 @@ static NTSTATUS ldapsrv_task_init(struct task_server *task)
 	}
 
 	status = stream_setup_socket(task, task->event_ctx, task->lp_ctx,
-				     task->model_ops, &ldap_stream_priv_ops,
+				     task->model_ops, &ldapi_stream_priv_ops,
 				     "unix", ldapi_path, NULL,
 				     lpcfg_socket_options(task->lp_ctx),
 				     ldap_service,
@@ -1658,6 +1701,7 @@ static int ldapsrv_check_packet_size(
  *
  */
 static NTSTATUS ldapsrv_packet_check(
+	struct tstream_context *stream,
 	void *private_data,
 	DATA_BLOB blob,
 	size_t *packet_size)
@@ -1666,7 +1710,7 @@ static NTSTATUS ldapsrv_packet_check(
 	struct ldapsrv_connection *conn = private_data;
 	int result = LDB_SUCCESS;
 
-	ret = ldap_full_packet(private_data, blob, packet_size);
+	ret = ldap_full_packet(stream, private_data, blob, packet_size);
 	if (!NT_STATUS_IS_OK(ret)) {
 		return ret;
 	}

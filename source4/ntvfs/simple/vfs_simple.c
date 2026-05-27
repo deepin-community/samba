@@ -414,7 +414,10 @@ do_open:
 	}
 
 	status = ntvfs_handle_new(ntvfs, req, &handle);
-	NT_STATUS_NOT_OK_RETURN(status);
+	if (!NT_STATUS_IS_OK(status)) {
+		close(fd);
+		return status;
+	}
 
 	f = talloc(handle, struct svfs_file);
 	if (f == NULL) {
@@ -1053,7 +1056,7 @@ static NTSTATUS svfs_trans(struct ntvfs_module_context *ntvfs,
 
 
 /*
-  initialialise the POSIX disk backend, registering ourselves with the ntvfs subsystem
+  initialise the POSIX disk backend, registering ourselves with the ntvfs subsystem
  */
 NTSTATUS ntvfs_simple_init(TALLOC_CTX *ctx)
 {

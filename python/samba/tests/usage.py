@@ -73,6 +73,7 @@ EXCLUDE_USAGE = {
     'lib/ldb/tests/python/api.py',
     'source4/selftest/tests.py',
     'buildtools/bin/waf',
+    'testprogs/blackbox/wins_hook_test',
     'selftest/tap2subunit',
     'script/show_test_time',
     'source4/scripting/bin/subunitrun',
@@ -89,6 +90,7 @@ EXCLUDE_HELP = {
     'selftest/tap2subunit',
     'wintest/test-s3.py',
     'wintest/test-s4-howto.py',
+    'testprogs/blackbox/wins_hook_test',
 }
 
 
@@ -98,12 +100,18 @@ EXCLUDE_DIRS = {
     'source4/dsdb/tests/python',
     'bin/ab',
     'bin/python/samba/tests',
+    'bin/python/samba/tests/blackbox',
     'bin/python/samba/tests/dcerpc',
     'bin/python/samba/tests/krb5',
+    'bin/python/samba/tests/ndr',
     'python/samba/tests',
     'python/samba/tests/bin',
+    'python/samba/tests/blackbox',
     'python/samba/tests/dcerpc',
     'python/samba/tests/krb5',
+    'python/samba/tests/ndr',
+    'bin/default/rust/vendor/unicode-width/scripts',
+    'bin/default/rust/vendor/rustls-webpki/tests',
 }
 
 

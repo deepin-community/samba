@@ -55,7 +55,7 @@ struct pipes_struct {
 bool check_open_pipes(void);
 size_t num_pipe_handles(void);
 
-bool create_policy_hnd(struct pipes_struct *p,
+void *create_policy_hnd(struct pipes_struct *p,
 			struct policy_handle *hnd,
 			uint8_t handle_type,
 			void *data_ptr);
@@ -69,5 +69,11 @@ void *_find_policy_by_hnd(struct pipes_struct *p,
 
 bool close_policy_hnd(struct pipes_struct *p, struct policy_handle *hnd);
 bool pipe_access_check(struct pipes_struct *p);
+
+#define DCESRV_COMPAT_NOT_USED_ON_WIRE(__opname) \
+void _## __opname(struct pipes_struct *p, struct __opname *r) \
+{ \
+	p->fault_state = DCERPC_FAULT_OP_RNG_ERROR; \
+}
 
 #endif /* _RPC_PIPES_H_ */

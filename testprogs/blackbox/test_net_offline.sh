@@ -1,6 +1,6 @@
 if [ $# -lt 4 ]; then
 	cat <<EOF
-Usage: test_net.sh DC_SERVER DC_USERNAME DC_PASSWORD PREFIX_ABS
+Usage: test_net_offline.sh DC_SERVER DC_USERNAME DC_PASSWORD PREFIX_ABS
 EOF
 	exit 1
 fi
@@ -33,6 +33,20 @@ samba_texpect="$BINDIR/texpect"
 . $(dirname $0)/subunit.sh
 
 netbios=$(grep "netbios name" $BASEDIR/$WORKDIR/client.conf | cut -f2 -d= | awk '{$1=$1};1')
+
+# 0. Test with machine_name != lp_netbios_name()
+
+NONLOCALMACHINE=win11
+
+testit "provision with non local machine name" \
+	${VALGRIND} ${net_tool} offlinejoin provision domain="${REALM}" machine_name="${NONLOCALMACHINE}" savefile="${ODJFILE}" -U"${DC_USERNAME}%${DC_PASSWORD}" || \
+	failed=$((failed + 1))
+
+testit "net rpc user delete" \
+	${VALGRIND} ${net_tool} rpc user delete "${NONLOCALMACHINE}$" -U"${DC_USERNAME}%${DC_PASSWORD}" -S "${DC_SERVER}" || \
+	failed=$((failed + 1))
+
+rm -f "${ODJFILE}"
 
 # 1. Test w/o dcname
 

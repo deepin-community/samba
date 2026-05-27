@@ -88,7 +88,9 @@ static krb5_error_code
 init_ccapi(krb5_context context)
 {
     const char *lib = NULL;
+#ifdef HAVE_DLOPEN
     char *explib = NULL;
+#endif
 
     HEIMDAL_MUTEX_lock(&acc_mutex);
     if (init_func) {
@@ -1088,7 +1090,7 @@ acc_lastchange(krb5_context context, krb5_ccache id, krb5_timestamp *mtime)
 }
 
 /**
- * Variable containing the API based credential cache implemention.
+ * Variable containing the API based credential cache implementation.
  *
  * @ingroup krb5_ccache
  */

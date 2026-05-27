@@ -598,6 +598,7 @@ static void wb_sids2xids_done(struct tevent_req *subreq)
 	NTSTATUS status, result;
 	const struct wbint_TransIDArray *src = NULL;
 	struct wbint_TransIDArray *dst = NULL;
+	uint32_t dsgetdcname_flags = DS_RETURN_DNS_NAME;
 	uint32_t si;
 
 	status = dcerpc_wbint_Sids2UnixIDs_recv(subreq, state, &result);
@@ -608,17 +609,35 @@ static void wb_sids2xids_done(struct tevent_req *subreq)
 		return;
 	}
 
+	if (NT_STATUS_EQUAL(result, NT_STATUS_HOST_UNREACHABLE)) {
+		struct lsa_DomainInfo *d =
+			&state->idmap_doms.domains[state->dom_index];
+		winbind_idmap_add_failed_connection_entry(d->name.string);
+		/* Trigger DC lookup and reconnect below */
+		result = NT_STATUS_DOMAIN_CONTROLLER_NOT_FOUND;
+		dsgetdcname_flags |= DS_FORCE_REDISCOVERY;
+	}
+
 	if (NT_STATUS_EQUAL(result, NT_STATUS_DOMAIN_CONTROLLER_NOT_FOUND) &&
 	    !state->tried_dclookup) {
 
 		struct lsa_DomainInfo *d;
+		const char *domain_name = NULL;
 
-		D_DEBUG("Domain controller not found. Calling wb_dsgetdcname_send() to get it.\n");
 		d = &state->idmap_doms.domains[state->dom_index];
 
-		subreq = wb_dsgetdcname_send(
-			state, state->ev, d->name.string, NULL, NULL,
-			DS_RETURN_DNS_NAME);
+		domain_name = find_dns_domain_name(d->name.string);
+
+		D_DEBUG("Domain controller not found. Calling "
+			"wb_dsgetdcname_send(%s) to get it.\n",
+			domain_name);
+
+		subreq = wb_dsgetdcname_send(state,
+					     state->ev,
+					     domain_name,
+					     NULL,
+					     NULL,
+					     dsgetdcname_flags);
 		if (tevent_req_nomem(subreq, req)) {
 			return;
 		}

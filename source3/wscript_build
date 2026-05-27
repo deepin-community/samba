@@ -98,11 +98,14 @@ bld.SAMBA3_SUBSYSTEM('TLDAP',
                            lib/tldap.c
                            lib/tldap_util.c
                            lib/tldap_gensec_bind.c
+                           lib/tldap_tls_connect.c
                            ''',
                     deps='''
                          asn1util
                          LIBTSOCKET
-                         samba3util
+                         util_tsock
+                         LIBTLS
+                         gensec
                          ''')
 
 bld.SAMBA3_BINARY('test_tldap',
@@ -111,6 +114,7 @@ bld.SAMBA3_BINARY('test_tldap',
                        asn1util
                        LIBTSOCKET
                        samba3util
+                       LIBTLS
                        smbconf
                        cmocka
                        ''',
@@ -151,7 +155,7 @@ bld.SAMBA3_LIBRARY('samba-passdb',
                                   ''',
                    abi_match=private_pdb_match,
                    abi_directory='passdb/ABI',
-                   vnum='0.28.0')
+                   vnum='0.29.0')
 
 bld.SAMBA3_SUBSYSTEM('pdb',
                    source='''
@@ -188,7 +192,7 @@ bld.SAMBA3_LIBRARY('smbldaphelper',
                           passdb/pdb_ldap_schema.c
                           passdb/pdb_ldap_util.c
                           ''',
-                   deps='smbldap secrets3',
+                   deps='smbldap secrets3 samba-security samba3-util',
                    allow_undefined_symbols=True,
                    enabled=bld.CONFIG_SET('HAVE_LDAP'),
                    private_library=True)
@@ -280,6 +284,10 @@ bld.SAMBA3_SUBSYSTEM('KRBCLIENT',
                      source='libads/kerberos.c libads/ads_status.c',
                      public_deps='krb5samba asn1util k5crypto gssapi LIBTSOCKET CLDAP LIBNMB')
 
+bld.SAMBA3_SUBSYSTEM('util_tsock',
+                     source='lib/util_tsock.c',
+                     deps='tevent-util LIBTSOCKET')
+
 bld.SAMBA3_SUBSYSTEM('samba3util',
                    source='''
                           lib/system.c
@@ -294,7 +302,6 @@ bld.SAMBA3_SUBSYSTEM('samba3util',
                           lib/util_matching.c
                           lib/util_procid.c
                           lib/util_sock.c
-                          lib/util_tsock.c
                           lib/util_transfer_file.c
                           lib/util_macstreams.c
                           ''',
@@ -302,12 +309,21 @@ bld.SAMBA3_SUBSYSTEM('samba3util',
                         CHARSET3
                         ndr
                         LIBTSOCKET
+                        util_tsock
                         samba-security
                         NDR_SECURITY
                         samba-util
                         util_tdb
                         sys_rw
                         iov_buf
+                        ''')
+
+bld.SAMBA3_SUBSYSTEM('samba3-namearray',
+                   source='''
+                          lib/util_namearray.c
+                          ''',
+                   deps='''
+                        samba-passdb
                         ''')
 
 if bld.env.with_ctdb:
@@ -422,7 +438,6 @@ bld.SAMBA3_LIBRARY('libsmb',
                           libsmb/clientgen.c
                           libsmb/cliconnect.c
                           libsmb/clifile.c
-                          libsmb/clispnego.c
                           libsmb/clirap.c
                           libsmb/clierror.c
                           libsmb/climessage.c
@@ -454,9 +469,13 @@ bld.SAMBA3_LIBRARY('libsmb',
                         ''',
                    private_library=True)
 
+bld.SAMBA3_SUBSYSTEM('NETLOGON_PING',
+                     source='libads/netlogon_ping.c',
+                     deps='TLDAP cli_cldap')
+
 bld.SAMBA3_SUBSYSTEM('CLDAP',
                     source='libads/cldap.c',
-                    deps='cli-ldap-common cli_cldap LIBTSOCKET')
+                    deps='cli-ldap-common cli_cldap LIBTSOCKET NETLOGON_PING')
 
 # NOTE: The secrets3 library is a low level library used by several subsystems.
 # PLEASE DO NOT make it depend on high level libraries like PDB, if you are
@@ -481,7 +500,7 @@ bld.SAMBA3_LIBRARY('secrets3',
 
 bld.SAMBA3_LIBRARY('smbldap',
                     source='lib/smbldap.c',
-                    deps='ldap lber samba-util smbconf',
+                    deps='ldap lber samba-util smbconf samba-security genrand smbd_shim',
                     enabled=bld.CONFIG_SET("HAVE_LDAP"),
                     private_library=False,
                     abi_directory='lib/ABI',
@@ -495,8 +514,8 @@ bld.SAMBA3_LIBRARY('ads',
                           libads/ldap.c
                           libads/sasl.c
                           libads/sasl_wrapping.c
+                          libads/tls_wrapping.c
                           libads/krb5_setpw.c
-                          libads/kerberos_util.c
                           libads/ldap_user.c
                           libads/ads_struct.c
                           libads/kerberos_keytab.c
@@ -505,6 +524,7 @@ bld.SAMBA3_LIBRARY('ads',
                           libads/ldap_schema.c
                           libads/util.c
                           libads/net_ads_setspn.c
+                          libads/trusts_util.c
                           ''',
                    deps='''
                         cli-ldap-common
@@ -518,7 +538,9 @@ bld.SAMBA3_LIBRARY('ads',
                         libsmb
                         DCUTIL
                         smbldap
-                        trusts_util
+                        libcli_netlogon3
+                        msrpc3
+                        samba-passdb
                         NDR_ADS
                         ''',
                    private_library=True)
@@ -740,6 +762,7 @@ bld.SAMBA3_LIBRARY('smbd_base',
                         GNUTLS_HELPERS
                         fd_handle
                         cli_spoolss
+                        samba3-namearray
                    ''' +
                    bld.env['dmapi_lib'] +
                    bld.env['legacy_quota_libs'] +
@@ -902,6 +925,7 @@ bld.SAMBA3_SUBSYSTEM('LIBNMB',
                           LIBTSOCKET
                           LIBCLI_NETLOGON
                           samba3util
+                          smbconf
                           addns
                           lmhosts
                           resolv
@@ -933,7 +957,6 @@ bld.SAMBA3_SUBSYSTEM('PASSCHANGE',
                     source='libsmb/passchange.c',
                     deps='''
                          LIBCLI_SAMR
-                         INIT_LSA
                          msrpc3
                          krb5samba
                          ''')
@@ -968,15 +991,6 @@ bld.SAMBA3_SUBSYSTEM('DCUTIL',
                          libcli_lsa3
                          ''')
 
-bld.SAMBA3_LIBRARY('trusts_util',
-                   source='libsmb/trusts_util.c',
-                   deps='''
-                        libcli_netlogon3
-                        msrpc3
-                        samba-passdb
-                        ''',
-                   private_library=True)
-
 bld.SAMBA3_SUBSYSTEM('tdb-wrap3',
                     source='lib/util_tdb.c',
                     deps='talloc samba3-util')
@@ -987,7 +1001,6 @@ bld.SAMBA3_LIBRARY('samba3-util',
                           lib/util_str.c
                           lib/adt_tree.c
                           lib/util_malloc.c
-                          lib/namearray.c
                           lib/file_id.c
                           lib/cbuf.c
                           lib/per_thread_cwd.c
@@ -1028,11 +1041,11 @@ bld.SAMBA3_SUBSYSTEM('errors3',
 
 bld.SAMBA3_SUBSYSTEM('LIBCLI_SAMR',
                     source='rpc_client/cli_samr.c',
-                    deps='RPC_NDR_SAMR INIT_SAMR')
+                    deps='RPC_NDR_SAMR INIT_LSA INIT_SAMR')
 
 bld.SAMBA3_LIBRARY('libcli_lsa3',
                    source='rpc_client/cli_lsarpc.c',
-                   deps='RPC_NDR_LSA INIT_LSA',
+                   deps='RPC_NDR_LSA INIT_LSA msrpc3',
                    private_library=True)
 
 bld.SAMBA3_LIBRARY('libcli_netlogon3',
@@ -1080,9 +1093,15 @@ bld.SAMBA3_SUBSYSTEM('RPCCLI_MDSSVC',
                     ''',
                     deps='mdssvc RPC_NDR_MDSSVC')
 
+bld.SAMBA3_SUBSYSTEM('RPCCLI_WSP',
+                    source='''
+                    rpc_client/wsp_cli.c
+                    ''',
+                    deps='tevent-util tstream_binding_handle')
+
 bld.SAMBA3_SUBSYSTEM('INIT_LSA',
                     source='rpc_client/init_lsa.c',
-                    deps='samba-util')
+                    deps='samba-util GNUTLS_HELPERS')
 
 bld.SAMBA3_SUBSYSTEM('INIT_SAMR',
                     source='rpc_client/init_samr.c',

@@ -252,18 +252,27 @@ static int ldb_parse_tree_collect_acl_attrs(const struct ldb_module *module,
 			return 0;
 		}
 
-		FALL_THROUGH;
-	case LDB_OP_EQUALITY:
 		if (ldb_attr_always_visible(tree->u.present.attr)) {
 			/* No need to check this attribute. */
 			return 0;
 		}
 
-		FALL_THROUGH;
+		break;
+
+	case LDB_OP_EQUALITY:
+		if (ldb_attr_always_visible(tree->u.equality.attr)) {
+			/* No need to check this attribute. */
+			return 0;
+		}
+
+		break;
+
 	default:			/* single attribute in tree */
-		attr = ldb_parse_tree_get_attr(tree);
-		return attr_vec_add_unique(mem_ctx, attrs, attr);
+		break;
 	}
+
+	attr = ldb_parse_tree_get_attr(tree);
+	return attr_vec_add_unique(mem_ctx, attrs, attr);
 }
 
 /*
@@ -874,10 +883,9 @@ static int aclread_search(struct ldb_module *module, struct ldb_request *req)
 	ldb = ldb_module_get_ctx(module);
 	p = talloc_get_type(ldb_module_get_private(module), struct aclread_private);
 
-	am_system = ldb_request_get_control(req, LDB_CONTROL_AS_SYSTEM_OID) != NULL;
-	if (!am_system) {
-		am_system = dsdb_module_am_system(module);
-	}
+	am_system = dsdb_have_system_access(module,
+					    req,
+					    SYSTEM_CONTROL_KEEP_CRITICAL);
 
 	/* skip access checks if we are system or system control is supplied
 	 * or this is not LDAP server request */

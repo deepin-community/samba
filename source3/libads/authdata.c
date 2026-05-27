@@ -30,14 +30,56 @@
 #include "lib/param/param.h"
 #include "librpc/crypto/gse.h"
 #include "auth/gensec/gensec.h"
-#include "auth/gensec/gensec_internal.h" /* TODO: remove this */
 #include "../libcli/auth/spnego.h"
+#include "lib/util/asn1.h"
 
 #ifdef HAVE_KRB5
 
 #include "auth/kerberos/pac_utils.h"
 
 struct smb_krb5_context;
+
+/*
+  generate a krb5 GSS-API wrapper packet given a ticket
+*/
+static DATA_BLOB spnego_gen_krb5_wrap(
+	TALLOC_CTX *ctx, const DATA_BLOB ticket, const uint8_t tok_id[2])
+{
+	ASN1_DATA *data;
+	DATA_BLOB ret = data_blob_null;
+
+	data = asn1_init(talloc_tos(), ASN1_MAX_TREE_DEPTH);
+	if (data == NULL) {
+		return data_blob_null;
+	}
+
+	if (!asn1_push_tag(data, ASN1_APPLICATION(0))) goto err;
+	if (!asn1_write_OID(data, OID_KERBEROS5)) goto err;
+
+	if (!asn1_write(data, tok_id, 2)) goto err;
+	if (!asn1_write(data, ticket.data, ticket.length)) goto err;
+	if (!asn1_pop_tag(data)) goto err;
+
+	if (!asn1_extract_blob(data, ctx, &ret)) {
+		goto err;
+	}
+
+	asn1_free(data);
+	data = NULL;
+
+  err:
+
+	if (data != NULL) {
+		if (asn1_has_error(data)) {
+			DEBUG(1, ("Failed to build krb5 wrapper at offset %d\n",
+				  (int)asn1_current_ofs(data)));
+		}
+
+		asn1_free(data);
+	}
+
+	return ret;
+}
 
 /*
  * Given the username/password, do a kinit, store the ticket in
@@ -68,7 +110,7 @@ NTSTATUS kerberos_return_pac(TALLOC_CTX *mem_ctx,
 	DATA_BLOB ap_rep = data_blob_null;
 	DATA_BLOB sesskey1 = data_blob_null;
 	const char *auth_princ = NULL;
-	const char *cc = "MEMORY:kerberos_return_pac";
+	const char *cc = NULL;
 	struct auth_session_info *session_info;
 	struct gensec_security *gensec_server_context;
 	const struct gensec_security_ops **backends;
@@ -79,6 +121,8 @@ NTSTATUS kerberos_return_pac(TALLOC_CTX *mem_ctx,
 	struct PAC_DATA_CTR *pac_data_ctr = NULL;
 	char *canon_principal = NULL;
 	char *canon_realm = NULL;
+	krb5_context ctx = NULL;
+	krb5_ccache ccid = NULL;
 
 	TALLOC_CTX *tmp_ctx = talloc_new(mem_ctx);
 	NT_STATUS_HAVE_NO_MEMORY(tmp_ctx);
@@ -102,6 +146,24 @@ NTSTATUS kerberos_return_pac(TALLOC_CTX *mem_ctx,
 
 	if (cache_name) {
 		cc = cache_name;
+	} else {
+		char *ccname = NULL;
+
+		ret = smb_krb5_init_context_common(&ctx);
+		if (ret != 0) {
+			status = krb5_to_nt_status(ret);
+			goto out;
+		}
+
+		ret = smb_krb5_cc_new_unique_memory(ctx,
+						    tmp_ctx,
+						    &ccname,
+						    &ccid);
+		if (ret != 0) {
+			status = krb5_to_nt_status(ret);
+			goto out;
+		}
+		cc = ccname;
 	}
 
 	if (!strchr_m(name, '@')) {
@@ -210,7 +272,7 @@ NTSTATUS kerberos_return_pac(TALLOC_CTX *mem_ctx,
 
 	gensec_init();
 
-	backends[idx++] = &gensec_gse_krb5_security_ops;
+	backends[idx++] = gensec_gse_security_by_oid(GENSEC_OID_KERBEROS5);
 
 	status = gensec_server_start(tmp_ctx, gensec_settings,
 					auth_context, &gensec_server_context);
@@ -265,10 +327,15 @@ NTSTATUS kerberos_return_pac(TALLOC_CTX *mem_ctx,
 	}
 
 out:
-	talloc_free(tmp_ctx);
-	if (cc != cache_name) {
-		ads_kdestroy(cc);
+	if (ccid != NULL) {
+		krb5_cc_destroy(ctx, ccid);
+		ccid = NULL;
 	}
+	if (ctx != NULL) {
+		krb5_free_context(ctx);
+		ctx = NULL;
+	}
+	talloc_free(tmp_ctx);
 
 	data_blob_free(&tkt);
 	data_blob_free(&ap_rep);

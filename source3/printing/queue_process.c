@@ -186,10 +186,13 @@ static bool printing_subsystem_queue_tasks(struct bq_state *state)
 		return true;
 	}
 
-	state->housekeep = event_add_idle(state->ev, NULL,
-					  timeval_set(housekeeping_period, 0),
-					  "print_queue_housekeeping",
-					  print_queue_housekeeping, state);
+	state->housekeep = event_add_idle(
+		state->ev,
+		NULL,
+		tevent_timeval_set(housekeeping_period, 0),
+		"print_queue_housekeeping",
+		print_queue_housekeeping,
+		state);
 	if (state->housekeep == NULL) {
 		DEBUG(0,("Could not add print_queue_housekeeping event\n"));
 		return false;
@@ -218,7 +221,7 @@ static void bq_sig_hup_handler(struct tevent_context *ev,
 	state = talloc_get_type_abort(pvt, struct bq_state);
 	change_to_root_user();
 
-	DEBUG(1, ("Reloading pcap cache after SIGHUP\n"));
+	DBG_NOTICE("Reloading pcap cache after SIGHUP\n");
 	pcap_cache_reload(state->ev, state->msg,
 			  reload_pcap_change_notify);
 	printing_subsystem_queue_tasks(state);
@@ -262,6 +265,7 @@ static void bq_smb_conf_updated(struct messaging_context *msg_ctx,
 	DEBUG(10,("smb_conf_updated: Got message saying smb.conf was "
 		  "updated. Reloading.\n"));
 	change_to_root_user();
+	lp_load_with_shares(get_dyn_CONFIGFILE());
 	pcap_cache_reload(state->ev, msg_ctx, reload_pcap_change_notify);
 	printing_subsystem_queue_tasks(state);
 }
@@ -319,6 +323,8 @@ struct bq_state *register_printing_bq_handlers(
 		goto fail_free_handlers;
 	}
 
+	/* Load shares, needed for [printers] */
+	lp_load_with_shares(get_dyn_CONFIGFILE());
 	/* Initialize the printcap cache as soon as the daemon starts. */
 	pcap_cache_reload(state->ev, state->msg, reload_pcap_change_notify);
 

@@ -457,13 +457,19 @@ static NTSTATUS check_info3_in_group(struct netr_SamInfo3 *info3,
 		return NT_STATUS_OK;
 	}
 
-	token = talloc_zero(talloc_tos(), struct security_token);
+	/*
+	 * This is a limited-use security_token for the purpose of
+	 * checking the SID list below, so no claims need to be added
+	 * and se_access_check() will never run.
+	 */
+	token = security_token_initialise(talloc_tos(),
+					  CLAIMS_EVALUATION_INVALID_STATE);
 	if (token == NULL) {
 		DEBUG(0, ("talloc failed\n"));
 		return NT_STATUS_NO_MEMORY;
 	}
 
-	status = sid_array_from_info3(talloc_tos(), info3,
+	status = sid_array_from_info3(token, info3,
 				      &token->sids,
 				      &token->num_sids,
 				      true);
@@ -617,10 +623,10 @@ static NTSTATUS get_pwd_properties(struct winbindd_domain *domain,
 
 #ifdef HAVE_KRB5
 
-static const char *generate_krb5_ccache(TALLOC_CTX *mem_ctx,
-					const char *type,
-					uid_t uid,
-					const char **user_ccache_file)
+static bool generate_krb5_ccache(TALLOC_CTX *mem_ctx,
+				 const char *type,
+				 uid_t uid,
+				 const char **user_ccache_file)
 {
 	/* accept FILE and WRFILE as krb5_cc_type from the client and then
 	 * build the full ccname string based on the user's uid here -
@@ -632,19 +638,31 @@ static const char *generate_krb5_ccache(TALLOC_CTX *mem_ctx,
 		if (strequal(type, "FILE")) {
 			gen_cc = talloc_asprintf(
 				mem_ctx, "FILE:/tmp/krb5cc_%d", uid);
+			if (gen_cc == NULL) {
+				return false;
+			}
 		}
 		if (strequal(type, "WRFILE")) {
 			gen_cc = talloc_asprintf(
 				mem_ctx, "WRFILE:/tmp/krb5cc_%d", uid);
+			if (gen_cc == NULL) {
+				return false;
+			}
 		}
 		if (strequal(type, "KEYRING")) {
 			gen_cc = talloc_asprintf(
 				mem_ctx, "KEYRING:persistent:%d", uid);
+			if (gen_cc == NULL) {
+				return false;
+			}
 		}
 		if (strequal(type, "KCM")) {
 			gen_cc = talloc_asprintf(mem_ctx,
 						 "KCM:%d",
 						 uid);
+			if (gen_cc == NULL) {
+				return false;
+			}
 		}
 
 		if (strnequal(type, "FILE:/", 6) ||
@@ -675,6 +693,9 @@ static const char *generate_krb5_ccache(TALLOC_CTX *mem_ctx,
 							true,
 							/* allow_trailing_dollar */
 							false);
+					if (gen_cc == NULL) {
+						return false;
+					}
 				}
 			}
 		}
@@ -682,18 +703,9 @@ static const char *generate_krb5_ccache(TALLOC_CTX *mem_ctx,
 
 	*user_ccache_file = gen_cc;
 
-	if (gen_cc == NULL) {
-		gen_cc = talloc_strdup(mem_ctx, "MEMORY:winbindd_pam_ccache");
-	}
-  	if (gen_cc == NULL) {
-		DEBUG(0,("out of memory\n"));
-		return NULL;
-	}
+	DBG_DEBUG("using ccache: %s\n", gen_cc != NULL ? gen_cc : "(internal)");
 
-	DEBUG(10, ("using ccache: %s%s\n", gen_cc,
-		   (*user_ccache_file == NULL) ? " (internal)":""));
-
-	return gen_cc;
+	return true;
 }
 
 #endif
@@ -727,14 +739,14 @@ static NTSTATUS winbindd_raw_kerberos_login(TALLOC_CTX *mem_ctx,
 {
 #ifdef HAVE_KRB5
 	NTSTATUS result = NT_STATUS_UNSUCCESSFUL;
-	krb5_error_code krb5_ret;
 	const char *cc = NULL;
 	const char *principal_s = NULL;
 	char *realm = NULL;
-	fstring name_namespace, name_domain, name_user;
+	char *name_namespace = NULL;
+	char *name_domain = NULL;
+	char *name_user = NULL;
 	time_t ticket_lifetime = 0;
 	time_t renewal_until = 0;
-	time_t time_offset = 0;
 	const char *user_ccache_file;
 	struct PAC_LOGON_INFO *logon_info = NULL;
 	struct PAC_UPN_DNS_INFO *upn_dns_info = NULL;
@@ -764,27 +776,27 @@ static NTSTATUS winbindd_raw_kerberos_login(TALLOC_CTX *mem_ctx,
 		DEBUG(0,("no valid uid\n"));
 	}
 
-	cc = generate_krb5_ccache(mem_ctx,
+	ok = generate_krb5_ccache(mem_ctx,
 				  krb5_cc_type,
 				  uid,
 				  &user_ccache_file);
-	if (cc == NULL) {
+	if (!ok) {
 		return NT_STATUS_NO_MEMORY;
 	}
-
+	cc = user_ccache_file;
 
 	/* 2nd step:
 	 * get kerberos properties */
-
-	if (domain->backend_data.ads_conn != NULL) {
-		time_offset = domain->backend_data.ads_conn->auth.time_offset;
-	}
 
 
 	/* 3rd step:
 	 * do kerberos auth and setup ccache as the user */
 
-	ok = parse_domain_user(user, name_namespace, name_domain, name_user);
+	ok = parse_domain_user(mem_ctx,
+			user,
+			&name_namespace,
+			&name_domain,
+			&name_user);
 	if (!ok) {
 		return NT_STATUS_INVALID_PARAMETER;
 	}
@@ -833,10 +845,15 @@ static NTSTATUS winbindd_raw_kerberos_login(TALLOC_CTX *mem_ctx,
 		DEBUG(10,("winbindd_raw_kerberos_login: uid is %d\n", uid));
 	}
 
+	/*
+	 * Note cc can be NULL, it means
+	 * kerberos_return_pac() will use
+	 * a temporary krb5 ccache internally.
+	 */
 	result = kerberos_return_pac(mem_ctx,
 				     principal_s,
 				     pass,
-				     time_offset,
+				     0, /* time_offset */
 				     &ticket_lifetime,
 				     &renewal_until,
 				     cc,
@@ -881,13 +898,11 @@ static NTSTATUS winbindd_raw_kerberos_login(TALLOC_CTX *mem_ctx,
 	}
 
 	if (logon_info == NULL) {
-		DEBUG(10,("Missing logon_info in ticket of %s\n",
-			principal_s));
+		DBG_DEBUG("Missing logon_info in ticket of %s\n", principal_s);
 		return NT_STATUS_INVALID_PARAMETER;
 	}
 
-	DEBUG(10,("winbindd_raw_kerberos_login: winbindd validated ticket of %s\n",
-		principal_s));
+	DBG_DEBUG("winbindd validated ticket of %s\n", principal_s);
 
 	result = create_info6_from_pac(mem_ctx, logon_info,
 				       upn_dns_info, &info6_copy);
@@ -918,21 +933,11 @@ static NTSTATUS winbindd_raw_kerberos_login(TALLOC_CTX *mem_ctx,
 					    canon_realm);
 
 		if (!NT_STATUS_IS_OK(result)) {
-			DEBUG(10,("winbindd_raw_kerberos_login: failed to add ccache to list: %s\n",
-				nt_errstr(result)));
+			DBG_DEBUG("failed to add ccache to list: %s\n",
+				  nt_errstr(result));
 		}
-	} else {
-
-		/* need to delete the memory cred cache, it is not used anymore */
-
-		krb5_ret = ads_kdestroy(cc);
-		if (krb5_ret) {
-			DEBUG(3,("winbindd_raw_kerberos_login: "
-				 "could not destroy krb5 credential cache: "
-				 "%s\n", error_message(krb5_ret)));
-		}
-
 	}
+
 	*info6 = info6_copy;
 	return NT_STATUS_OK;
 
@@ -951,17 +956,8 @@ failed:
 	 * local host and therefore didn't get the PAC, we need to remove that
 	 * cache entirely now */
 
-	krb5_ret = ads_kdestroy(cc);
-	if (krb5_ret) {
-		DEBUG(3,("winbindd_raw_kerberos_login: "
-			 "could not destroy krb5 credential cache: "
-			 "%s\n", error_message(krb5_ret)));
-	}
-
 	if (!NT_STATUS_IS_OK(remove_ccache(user))) {
-		DEBUG(3,("winbindd_raw_kerberos_login: "
-			  "could not remove ccache for user %s\n",
-			user));
+		DBG_NOTICE("could not remove ccache for user %s\n", user);
 	}
 
 	return result;
@@ -986,8 +982,7 @@ bool check_request_flags(uint32_t flags)
 		return true;
 	}
 
-	DEBUG(1, ("check_request_flags: invalid request flags[0x%08X]\n",
-		  flags));
+	DBG_WARNING("invalid request flags[0x%08X]\n", flags);
 
 	return false;
 }
@@ -1104,7 +1099,9 @@ static NTSTATUS winbindd_dual_pam_auth_cached(struct winbindd_domain *domain,
 	TALLOC_CTX *tmp_ctx = NULL;
 	NTSTATUS result = NT_STATUS_LOGON_FAILURE;
 	uint16_t max_allowed_bad_attempts;
-	fstring name_namespace, name_domain, name_user;
+	char *name_namespace = NULL;
+	char *name_domain = NULL;
+	char *name_user = NULL;
 	struct dom_sid sid;
 	enum lsa_SidType type;
 	uchar new_nt_pass[NT_HASH_LEN];
@@ -1136,7 +1133,11 @@ static NTSTATUS winbindd_dual_pam_auth_cached(struct winbindd_domain *domain,
 
 	/* Parse domain and username */
 
-	ok = parse_domain_user(user, name_namespace, name_domain, name_user);
+	ok = parse_domain_user(tmp_ctx,
+			user,
+			&name_namespace,
+			&name_domain,
+			&name_user);
 	if (!ok) {
 		DBG_DEBUG("parse_domain_user failed\n");
 		result = NT_STATUS_NO_SUCH_USER;
@@ -1291,14 +1292,15 @@ static NTSTATUS winbindd_dual_pam_auth_cached(struct winbindd_domain *domain,
 				goto out;
 			}
 
-			cc = generate_krb5_ccache(tmp_ctx,
+			ok = generate_krb5_ccache(tmp_ctx,
 						  krb5_cc_type,
 						  uid,
 						  &user_ccache_file);
-			if (cc == NULL) {
+			if (!ok) {
 				result = NT_STATUS_NO_MEMORY;
 				goto out;
 			}
+			cc = user_ccache_file;
 
 			realm = talloc_strdup(tmp_ctx, domain->alt_name);
 			if (realm == NULL) {
@@ -1438,7 +1440,9 @@ static NTSTATUS winbindd_dual_pam_auth_kerberos(struct winbindd_domain *domain,
 {
 	struct netr_SamInfo6 *info6 = NULL;
 	struct winbindd_domain *contact_domain;
-	fstring name_namespace, name_domain, name_user;
+	char *name_namespace = NULL;
+	char *name_domain = NULL;
+	char *name_user = NULL;
 	NTSTATUS result;
 	bool ok;
 
@@ -1446,10 +1450,11 @@ static NTSTATUS winbindd_dual_pam_auth_kerberos(struct winbindd_domain *domain,
 
 	/* Parse domain and username */
 
-	ok = parse_domain_user(user,
-			       name_namespace,
-			       name_domain,
-			       name_user);
+	ok = parse_domain_user(mem_ctx,
+			       user,
+			       &name_namespace,
+			       &name_domain,
+			       &name_user);
 	if (!ok) {
 		result = NT_STATUS_INVALID_PARAMETER;
 		goto done;
@@ -1636,6 +1641,7 @@ static NTSTATUS winbind_samlogon_retry_loop(struct winbindd_domain *domain,
 {
 	int attempts = 0;
 	int netr_attempts = 0;
+	int invalid_servers = 0;
 	bool retry = false;
 	bool valid_result = false;
 	NTSTATUS result;
@@ -1704,10 +1710,9 @@ static NTSTATUS winbind_samlogon_retry_loop(struct winbindd_domain *domain,
 				DEBUG(3, ("This is the third problem for this "
 					  "particular call, adding DC to the "
 					  "negative cache list: %s %s\n", domain->name, domain->dcname));
-				add_failed_connection_entry(domain->name,
+				winbind_add_failed_connection_entry(domain,
 							    domain->dcname,
 							    result);
-				saf_delete(domain->name);
 			}
 
 			/* Only allow 3 retries */
@@ -1795,6 +1800,98 @@ static NTSTATUS winbind_samlogon_retry_loop(struct winbindd_domain *domain,
 				flags,
 				&validation_level,
 				&validation);
+		}
+
+		/*
+		 * MS-NRPC 3.5.4.5.1 NetrLogonSamLogonEx (Opnum 39) says:
+		 *   ...
+		 *
+		 *   Authoritative: ...
+		 *    This Boolean value indicates whether the validation
+		 *    information is final. This field is necessary because
+		 *    the request might be forwarded through multiple servers.
+		 *
+		 *    The value TRUE indicates that the validation information
+		 *    is an authoritative response and MUST remain unchanged.
+		 *
+		 *    The value FALSE indicates that the validation information
+		 *    is not an authoritative response and that the client can
+		 *    resend the request to another server.
+		 *
+		 *   ...
+		 *   If the server cannot service the request due to an
+		 *   implementation-specific condition, the server
+		 *   returns STATUS_ACCESS_DENIED.
+		 *   ...
+		 *
+		 * One reason for this is that SysvolReady is still 0 in
+		 * HKLM\\SYSTEM\\CurrentControlSet\\Services\\Netlogon\\Parameters
+		 * It means there are problems with sysvol replication.
+		 *
+		 * The response looks like this:
+		 *
+		 * netr_LogonSamLogonEx: struct netr_LogonSamLogonEx
+		 *    out: struct netr_LogonSamLogonEx
+		 *        validation               : *
+		 *            validation               : union netr_Validation(case 6)
+		 *            sam6                     : NULL
+		 *        authoritative            : *
+		 *            authoritative            : 0x00 (0)
+		 *        flags                    : *
+		 *            flags                    : 0x00000000 (0)
+		 *                   0: NETLOGON_SAMLOGON_FLAG_PASS_TO_FOREST_ROOT
+		 *                   0: NETLOGON_SAMLOGON_FLAG_PASS_CROSS_FOREST_HOP
+		 *                   0: NETLOGON_SAMLOGON_FLAG_RODC_TO_OTHER_DOMAIN
+		 *                   0: NETLOGON_SAMLOGON_FLAG_RODC_NTLM_REQUEST
+		 *        result                   : NT_STATUS_ACCESS_DENIED
+		 *
+		 * In that case we'll mark the dc as broken and retry.
+		 * In order to prevent a fallback to a local user due to
+		 * authoritative=0, we reset authoritative=1 and continue
+		 * with NT_STATUS_NETLOGON_NOT_STARTED.
+		 *
+		 * In the end we may result in NT_STATUS_NO_LOGON_SERVERS
+		 * if we never reach 'valid_result = true'.
+		 * This matches what windows does. In a chain of transitive
+		 * trusts the ACCESS_DENIED/authoritative=0 is not propagated
+		 * instead of NT_STATUS_NO_LOGON_SERVERS/authoritative=1 is
+		 * passed along the chain if there's no other DC is available.
+		 */
+		if (NT_STATUS_EQUAL(result, NT_STATUS_ACCESS_DENIED) &&
+		    *authoritative == 0)
+		{
+			reset_cm_connection_on_error(
+				domain,
+				netlogon_pipe->binding_handle,
+				result);
+
+			*authoritative = true;
+			result = NT_STATUS_NETLOGON_NOT_STARTED;
+			DBG_WARNING("sam_logon[%s\\%s] returned ACCESS_DENIED "
+				    "authoritative=0.\n"
+				    "The DC may have set SysvolReady=0 in "
+				    "HKLM\\SYSTEM\\CurrentControlSet\\Services"
+				    "\\Netlogon\\Parameters\n"
+				    "%s: Adding DC to the negative cache list: "
+				    "%s %s\n",
+				    domainname,
+				    username,
+				    nt_errstr(result),
+				    domain->name,
+				    domain->dcname);
+
+			winbind_add_failed_connection_entry(domain,
+							    domain->dcname,
+							    result);
+
+			/* Only allow 3 retries */
+			if (invalid_servers < 3) {
+				DBG_NOTICE("Retry another server\n");
+				invalid_servers++;
+				retry = true;
+				continue;
+			}
+			break;
 		}
 
 		/*
@@ -2022,7 +2119,9 @@ static NTSTATUS winbindd_dual_pam_auth_samlogon(
 	uint16_t *_validation_level,
 	union netr_Validation **_validation)
 {
-	fstring name_namespace, name_domain, name_user;
+	char *name_namespace = NULL;
+	char *name_domain = NULL;
+	char *name_user = NULL;
 	NTSTATUS result;
 	uint8_t authoritative = 1;
 	uint32_t flags = 0;
@@ -2034,7 +2133,11 @@ static NTSTATUS winbindd_dual_pam_auth_samlogon(
 
 	/* Parse domain and username */
 
-	ok = parse_domain_user(user, name_namespace, name_domain, name_user);
+	ok = parse_domain_user(mem_ctx,
+			user,
+			&name_namespace,
+			&name_domain,
+			&name_user);
 	if (!ok) {
 		return NT_STATUS_INVALID_PARAMETER;
 	}
@@ -2173,7 +2276,7 @@ static void log_authentication(
 		client_name,
 		client_pid);
 	if (ui->auth_description == NULL) {
-		DBG_ERR("OOM Unable to create auth_description");
+		DBG_ERR("OOM Unable to create auth_description\n");
 	}
 	ui->client.account_name = user_name;
 	ui->client.domain_name = domain_name;
@@ -2213,7 +2316,9 @@ NTSTATUS _wbint_PamAuth(struct pipes_struct *p,
 	struct winbindd_domain *domain = wb_child_domain();
 	NTSTATUS result = NT_STATUS_LOGON_FAILURE;
 	NTSTATUS krb5_result = NT_STATUS_OK;
-	fstring name_namespace, name_domain, name_user;
+	char *name_namespace = NULL;
+	char *name_domain = NULL;
+	char *name_user = NULL;
 	char *mapped_user = NULL;
 	const char *domain_user = NULL;
 	uint16_t validation_level = UINT16_MAX;
@@ -2271,10 +2376,11 @@ NTSTATUS _wbint_PamAuth(struct pipes_struct *p,
 		mapped_user = discard_const(r->in.info->username);
 	}
 
-	ok = parse_domain_user(mapped_user,
-			       name_namespace,
-			       name_domain,
-			       name_user);
+	ok = parse_domain_user(p->mem_ctx,
+			       mapped_user,
+			       &name_namespace,
+			       &name_domain,
+			       &name_user);
 	if (!ok) {
 		result = NT_STATUS_INVALID_PARAMETER;
 		goto done;
@@ -2929,7 +3035,9 @@ NTSTATUS _wbint_PamAuthChangePassword(struct pipes_struct *p,
 	struct userPwdChangeFailureInformation *reject = NULL;
 	NTSTATUS status = NT_STATUS_UNSUCCESSFUL;
 	NTSTATUS result = NT_STATUS_UNSUCCESSFUL;
-	fstring namespace, domain, user;
+	char *namespace = NULL;
+	char *domain = NULL;
+	char *user = NULL;
 	struct dcerpc_binding_handle *b = NULL;
 	bool ok;
 	pid_t client_pid;
@@ -2950,10 +3058,11 @@ NTSTATUS _wbint_PamAuthChangePassword(struct pipes_struct *p,
 	DBG_NOTICE("[%"PRIu32"]: dual pam chauthtok %s\n",
 		   client_pid, r->in.user);
 
-	ok = parse_domain_user(r->in.user,
-			       namespace,
-			       domain,
-			       user);
+	ok = parse_domain_user(p->mem_ctx,
+			       r->in.user,
+			       &namespace,
+			       &domain,
+			       &user);
 	if (!ok) {
 		goto done;
 	}
@@ -3065,8 +3174,8 @@ done:
 		result = winbindd_update_creds_by_name(contact_domain, user,
 						       r->in.new_password);
 		/* Again, this happens when we login from gdm or xdm
-		 * and the password expires, *BUT* cached crendentials
-		 * doesn't exist. winbindd_update_creds_by_name()
+		 * and the password expires, *BUT* cached credentials
+		 * don't exist. winbindd_update_creds_by_name()
 		 * returns NT_STATUS_NO_SUCH_USER.
 		 * This is not a failure.
 		 * --- BoYang
@@ -3215,11 +3324,14 @@ NTSTATUS _wbint_PamAuthCrapChangePassword(struct pipes_struct *p,
 				struct wbint_PamAuthCrapChangePassword *r)
 {
 	NTSTATUS result;
-	fstring  namespace, domain, user;
+	char *namespace = NULL;
+	char *domain = NULL;
+	char *user = NULL;
 	struct policy_handle dom_pol;
 	struct winbindd_domain *contact_domain = wb_child_domain();
 	struct rpc_pipe_client *cli = NULL;
 	struct dcerpc_binding_handle *b = NULL;
+	TALLOC_CTX *frame = talloc_stackframe();
 	pid_t client_pid;
 
 	ZERO_STRUCT(dom_pol);
@@ -3235,10 +3347,6 @@ NTSTATUS _wbint_PamAuthCrapChangePassword(struct pipes_struct *p,
 		return NT_STATUS_INVALID_PARAMETER;
 	}
 
-	domain[0] = '\0';
-	namespace[0] = '\0';
-	user[0] = '\0';
-
 	DBG_NOTICE("[%"PRIu32"]: pam change pswd auth crap domain: %s "
 		   "user: %s\n", client_pid, r->in.domain, r->in.user);
 
@@ -3250,14 +3358,22 @@ NTSTATUS _wbint_PamAuthCrapChangePassword(struct pipes_struct *p,
 	}
 
 	if (r->in.domain != NULL && strlen(r->in.domain) > 0) {
-		fstrcpy(domain, r->in.domain);
+		user = talloc_strdup(frame, "");
+		namespace = talloc_strdup(frame, "");
+		domain = talloc_strdup(frame, r->in.domain);
+		if (domain == NULL || user == NULL || namespace == NULL) {
+			result = NT_STATUS_NO_MEMORY;
+			goto done;
+		}
+
 	} else {
 		bool ok;
 
-		ok = parse_domain_user(r->in.user,
-				       namespace,
-				       domain,
-				       user);
+		ok = parse_domain_user(frame,
+				       r->in.user,
+				       &namespace,
+				       &domain,
+				       &user);
 		if (!ok) {
 			result = NT_STATUS_INVALID_PARAMETER;
 			goto done;
@@ -3272,7 +3388,12 @@ NTSTATUS _wbint_PamAuthCrapChangePassword(struct pipes_struct *p,
 	}
 
 	if (!*domain && lp_winbind_use_default_domain()) {
-		fstrcpy(domain,lp_workgroup());
+		TALLOC_FREE(domain);
+		domain = talloc_strdup(frame, lp_workgroup());
+		if (domain == NULL) {
+			result = NT_STATUS_NO_MEMORY;
+			goto done;
+		}
 	}
 
 	if (!is_allowed_domain(domain)) {
@@ -3285,7 +3406,12 @@ NTSTATUS _wbint_PamAuthCrapChangePassword(struct pipes_struct *p,
 	}
 
 	if(!*user) {
-		fstrcpy(user, r->in.user);
+		TALLOC_FREE(user);
+		user = talloc_strdup(frame, r->in.user);
+		if (user == NULL) {
+			result = NT_STATUS_NO_SUCH_USER;
+			goto done;
+		}
 	}
 
 	/* Get sam handle */
@@ -3331,7 +3457,7 @@ NTSTATUS _wbint_PamAuthCrapChangePassword(struct pipes_struct *p,
 	       domain, user,
 	       nt_errstr(result),
 	       nt_status_to_pam(result)));
-
+	TALLOC_FREE(frame);
 	return result;
 }
 
@@ -3383,11 +3509,16 @@ static NTSTATUS extract_pac_vrfy_sigs(TALLOC_CTX *mem_ctx, DATA_BLOB pac_blob,
 					     NULL, /* client_principal */
 					     0, /* tgs_authtime */
 					     p_pac_data);
+		(void)smb_krb5_kt_free_entry(krbctx, &entry);
 		if (NT_STATUS_IS_OK(status)) {
 			break;
 		}
-		k5ret = smb_krb5_kt_free_entry(krbctx, &entry);
 		k5ret = krb5_kt_next_entry(krbctx, keytab, &entry, &cursor);
+	}
+	if (k5ret != 0 && k5ret != KRB5_KT_END) {
+		DEBUG(1, ("Failed to get next entry: %s\n",
+			  error_message(k5ret)));
+		(void)smb_krb5_kt_free_entry(krbctx, &entry);
 	}
 
 	k5ret = krb5_kt_end_seq_get(krbctx, keytab, &cursor);

@@ -403,27 +403,12 @@ bool smbd_vfs_init(connection_struct *conn)
 	return True;
 }
 
-/*******************************************************************
- Check if a file exists in the vfs.
-********************************************************************/
-
-NTSTATUS vfs_file_exist(connection_struct *conn, struct smb_filename *smb_fname)
-{
-	/* Only return OK if stat was successful and S_ISREG */
-	if ((SMB_VFS_STAT(conn, smb_fname) != -1) &&
-	    S_ISREG(smb_fname->st.st_ex_mode)) {
-		return NT_STATUS_OK;
-	}
-
-	return NT_STATUS_OBJECT_NAME_NOT_FOUND;
-}
-
 bool vfs_valid_pread_range(off_t offset, size_t length)
 {
 	return sys_valid_io_range(offset, length);
 }
 
-bool vfs_valid_pwrite_range(off_t offset, size_t length)
+bool vfs_valid_allocation_range(off_t offset, size_t length)
 {
 	/*
 	 * See MAXFILESIZE in [MS-FSA] 2.1.5.3 Server Requests a Write
@@ -449,6 +434,22 @@ bool vfs_valid_pwrite_range(off_t offset, size_t length)
 	return true;
 }
 
+bool vfs_valid_pwrite_range(const struct files_struct *fsp,
+			    off_t offset,
+			    size_t length)
+{
+	if (fsp->fsp_flags.posix_append) {
+		if (offset != VFS_PWRITE_APPEND_OFFSET) {
+			return false;
+		}
+		return true;
+	} else if (offset == VFS_PWRITE_APPEND_OFFSET) {
+		return false;
+	}
+
+	return vfs_valid_allocation_range(offset, length);
+}
+
 ssize_t vfs_pwrite_data(struct smb_request *req,
 			files_struct *fsp,
 			const char *buffer,
@@ -459,7 +460,7 @@ ssize_t vfs_pwrite_data(struct smb_request *req,
 	ssize_t ret;
 	bool ok;
 
-	ok = vfs_valid_pwrite_range(offset, N);
+	ok = vfs_valid_pwrite_range(fsp, offset, N);
 	if (!ok) {
 		errno = EINVAL;
 		return -1;
@@ -515,9 +516,14 @@ ssize_t vfs_pwrite_data(struct smb_request *req,
 	}
 
 	while (total < N) {
-		ret = SMB_VFS_PWRITE(fsp, buffer + total, N - total,
-				     offset + total);
-
+		off_t pwrite_offset = offset;
+		if (offset != VFS_PWRITE_APPEND_OFFSET) {
+			pwrite_offset += total;
+		}
+		ret = SMB_VFS_PWRITE(fsp,
+				     buffer + total,
+				     N - total,
+				     pwrite_offset);
 		if (ret == -1)
 			return -1;
 		if (ret == 0)
@@ -549,7 +555,7 @@ int vfs_allocate_file_space(files_struct *fsp, uint64_t len)
 	DEBUG(10,("vfs_allocate_file_space: file %s, len %.0f\n",
 		  fsp_str_dbg(fsp), (double)len));
 
-	ok = vfs_valid_pwrite_range((off_t)len, 0);
+	ok = vfs_valid_allocation_range((off_t)len, 0);
 	if (!ok) {
 		DEBUG(0,("vfs_allocate_file_space: %s negative/invalid len "
 			 "requested.\n", fsp_str_dbg(fsp)));
@@ -638,7 +644,7 @@ int vfs_set_filelen(files_struct *fsp, off_t len)
 	int ret;
 	bool ok;
 
-	ok = vfs_valid_pwrite_range(len, 0);
+	ok = vfs_valid_allocation_range(len, 0);
 	if (!ok) {
 		errno = EINVAL;
 		return -1;
@@ -649,10 +655,13 @@ int vfs_set_filelen(files_struct *fsp, off_t len)
 	DEBUG(10,("vfs_set_filelen: ftruncate %s to len %.0f\n",
 		  fsp_str_dbg(fsp), (double)len));
 	if ((ret = SMB_VFS_FTRUNCATE(fsp, len)) != -1) {
-		notify_fname(fsp->conn, NOTIFY_ACTION_MODIFIED,
-			     FILE_NOTIFY_CHANGE_SIZE
-			     | FILE_NOTIFY_CHANGE_ATTRIBUTES,
-			     fsp->fsp_name->base_name);
+		notify_fname(fsp->conn,
+			     NOTIFY_ACTION_MODIFIED |
+			     NOTIFY_ACTION_DIRLEASE_BREAK,
+			     FILE_NOTIFY_CHANGE_SIZE |
+				     FILE_NOTIFY_CHANGE_ATTRIBUTES,
+			     fsp->fsp_name,
+			     fsp_get_smb2_lease(fsp));
 	}
 
 	contend_level2_oplocks_end(fsp, LEVEL2_CONTEND_SET_FILE_LEN);
@@ -676,7 +685,7 @@ int vfs_slow_fallocate(files_struct *fsp, off_t offset, off_t len)
 	size_t total = 0;
 	bool ok;
 
-	ok = vfs_valid_pwrite_range(offset, len);
+	ok = vfs_valid_allocation_range(offset, len);
 	if (!ok) {
 		errno = EINVAL;
 		return -1;
@@ -723,7 +732,11 @@ int vfs_fill_sparse(files_struct *fsp, off_t len)
 	size_t num_to_write;
 	bool ok;
 
-	ok = vfs_valid_pwrite_range(len, 0);
+	if (len == VFS_PWRITE_APPEND_OFFSET) {
+		return 0;
+	}
+
+	ok = vfs_valid_allocation_range(len, 0);
 	if (!ok) {
 		errno = EINVAL;
 		return -1;
@@ -846,7 +859,7 @@ off_t vfs_transfer_file(files_struct *in, files_struct *out, off_t n)
 
 const char *vfs_readdirname(connection_struct *conn,
 			    struct files_struct *dirfsp,
-			    void *p,
+			    DIR *d,
 			    char **talloced)
 {
 	struct dirent *ptr= NULL;
@@ -854,10 +867,11 @@ const char *vfs_readdirname(connection_struct *conn,
 	char *translated;
 	NTSTATUS status;
 
-	if (!p)
+	if (d == NULL) {
 		return(NULL);
+	}
 
-	ptr = SMB_VFS_READDIR(conn, dirfsp, (DIR *)p);
+	ptr = SMB_VFS_READDIR(conn, dirfsp, d);
 	if (!ptr)
 		return(NULL);
 
@@ -1018,6 +1032,9 @@ struct smb_filename *vfs_GetWd(TALLOC_CTX *ctx, connection_struct *conn)
 	if (!lp_getwd_cache()) {
 		goto nocache;
 	}
+	if (fsp_get_pathref_fd(conn->cwd_fsp) == -1) {
+		goto nocache;
+	}
 
 	smb_fname_dot = synthetic_smb_fname(ctx,
 					    ".",
@@ -1082,7 +1099,7 @@ struct smb_filename *vfs_GetWd(TALLOC_CTX *ctx, connection_struct *conn)
 		goto out;
 	}
 
-	if (lp_getwd_cache() && VALID_STAT(smb_fname_dot->st)) {
+	if ((smb_fname_dot != NULL) && VALID_STAT(smb_fname_dot->st)) {
 		key = vfs_file_id_from_sbuf(conn, &smb_fname_dot->st);
 
 		/*
@@ -1166,8 +1183,12 @@ NTSTATUS vfs_stat_fsp(files_struct *fsp)
 	int ret;
 	struct stat_ex saved_stat = fsp->fsp_name->st;
 
+	if (fsp->fake_file_handle != NULL) {
+		return NT_STATUS_OK;
+	}
+
 	if (fsp_get_pathref_fd(fsp) == -1) {
-		if (fsp->posix_flags & FSP_POSIX_FLAGS_OPEN) {
+		if (fsp->fsp_flags.posix_open) {
 			ret = SMB_VFS_LSTAT(fsp->conn, fsp->fsp_name);
 		} else {
 			ret = SMB_VFS_STAT(fsp->conn, fsp->fsp_name);
@@ -1185,11 +1206,13 @@ NTSTATUS vfs_stat_fsp(files_struct *fsp)
 
 void init_smb_file_time(struct smb_file_time *ft)
 {
+	struct timespec omit = make_omit_timespec();
+
 	*ft = (struct smb_file_time) {
-		.atime = make_omit_timespec(),
-		.ctime = make_omit_timespec(),
-		.mtime = make_omit_timespec(),
-		.create_time = make_omit_timespec()
+		.atime = omit,
+		.ctime = omit,
+		.mtime = omit,
+		.create_time = omit,
 	};
 }
 
@@ -1293,43 +1316,76 @@ NTSTATUS vfs_at_fspcwd(TALLOC_CTX *mem_ctx,
 	return NT_STATUS_OK;
 }
 
-NTSTATUS vfs_fget_dos_attributes(struct files_struct *fsp,
-				 uint32_t *dosmode)
+uint32_t vfs_get_fs_capabilities(struct connection_struct *conn,
+				 enum timestamp_set_resolution *ts_res)
 {
-	NTSTATUS status;
+	const struct loadparm_substitution *lp_sub =
+		loadparm_s3_global_substitution();
+	uint32_t caps = FILE_CASE_SENSITIVE_SEARCH | FILE_CASE_PRESERVED_NAMES;
+	struct smb_filename *smb_fname_cpath = NULL;
+	struct vfs_statvfs_struct statbuf;
+	int ret;
 
-	/*
-	 * First make sure to pass the base_fsp to the VFS
-	 */
-	status = SMB_VFS_FGET_DOS_ATTRIBUTES(
-		fsp->conn, metadata_fsp(fsp), dosmode);
-	if (!NT_STATUS_IS_OK(status)) {
-		return status;
+	smb_fname_cpath = synthetic_smb_fname(talloc_tos(),
+					      conn->connectpath,
+					      NULL,
+					      NULL,
+					      0,
+					      0);
+	if (smb_fname_cpath == NULL) {
+		return caps;
 	}
 
-	/*
-	 * If this isn't a stream fsp we're done, ...
-	 */
-	if (!fsp_is_alternate_stream(fsp)) {
-		return NT_STATUS_OK;
+	ZERO_STRUCT(statbuf);
+	ret = SMB_VFS_STATVFS(conn, smb_fname_cpath, &statbuf);
+	if (ret == 0) {
+		caps = statbuf.FsCapabilities;
 	}
 
-	/*
-	 * ...otherwise the VFS might have updated the btime, propagate the
-	 * btime from the base_fsp to the stream fsp.
-	 */
+	if (lp_nt_acl_support(SNUM(conn))) {
+		caps |= FILE_PERSISTENT_ACLS;
+	}
 
-	if (fsp->base_fsp->fsp_name->st.st_ex_iflags & ST_EX_IFLAG_CALCULATED_BTIME) {
-		/*
-		 * Not a value from backend storage, ignore it
+	caps |= lp_parm_int(SNUM(conn), "share", "fake_fscaps", 0);
+
+	*ts_res = TIMESTAMP_SET_SECONDS;
+
+	/* Work out what timestamp resolution we can
+	 * use when setting a timestamp. */
+
+	ret = SMB_VFS_STAT(conn, smb_fname_cpath);
+	if (ret == -1) {
+		TALLOC_FREE(smb_fname_cpath);
+		return caps;
+	}
+
+	if (smb_fname_cpath->st.st_ex_mtime.tv_nsec ||
+			smb_fname_cpath->st.st_ex_atime.tv_nsec ||
+			smb_fname_cpath->st.st_ex_ctime.tv_nsec) {
+		/* If any of the normal UNIX directory timestamps
+		 * have a non-zero tv_nsec component assume
+		 * we might be able to set sub-second timestamps.
+		 * See what filetime set primitives we have.
 		 */
-		return NT_STATUS_OK;
+#if defined(HAVE_UTIMENSAT)
+		*ts_res = TIMESTAMP_SET_NT_OR_BETTER;
+#elif defined(HAVE_UTIMES)
+		/* utimes allows msec timestamps to be set. */
+		*ts_res = TIMESTAMP_SET_MSEC;
+#elif defined(HAVE_UTIME)
+		/* utime only allows sec timestamps to be set. */
+		*ts_res = TIMESTAMP_SET_SECONDS;
+#endif
+
+		DBG_DEBUG("vfs_get_fs_capabilities: timestamp "
+			  "resolution of %s "
+			  "available on share %s, directory %s\n",
+			  *ts_res == TIMESTAMP_SET_MSEC ? "msec" : "sec",
+			  lp_servicename(talloc_tos(), lp_sub, conn->params->service),
+			  conn->connectpath );
 	}
-
-	update_stat_ex_create_time(&fsp->fsp_name->st,
-				   fsp->base_fsp->fsp_name->st.st_ex_btime);
-
-	return NT_STATUS_OK;
+	TALLOC_FREE(smb_fname_cpath);
+	return caps;
 }
 
 static struct smb_vfs_deny_state *smb_vfs_deny_global;
@@ -1753,14 +1809,16 @@ int smb_vfs_call_renameat(struct vfs_handle_struct *handle,
 			files_struct *srcfsp,
 			const struct smb_filename *smb_fname_src,
 			files_struct *dstfsp,
-			const struct smb_filename *smb_fname_dst)
+			const struct smb_filename *smb_fname_dst,
+			const struct vfs_rename_how *how)
 {
 	VFS_FIND(renameat);
 	return handle->fns->renameat_fn(handle,
 				srcfsp,
 				smb_fname_src,
 				dstfsp,
-				smb_fname_dst);
+				smb_fname_dst,
+				how);
 }
 
 struct smb_vfs_call_fsync_state {

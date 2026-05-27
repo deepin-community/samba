@@ -57,7 +57,7 @@ bool dbgsetclass(int level, int cls);
  *   #define DBGC_CLASS DBGC_<your class name here>
  *
  * at the start of the file (after #include "includes.h") will default to
- * using index zero, so it will behaive just like it always has.
+ * using index zero, so it will behave just like it always has.
  */
 #define DBGC_ALL		0 /* index equivalent to DEBUGLEVEL */
 
@@ -98,6 +98,7 @@ bool dbgsetclass(int level, int cls);
 #define DBGC_DSDB_TXN_AUDIT_JSON	35
 #define DBGC_DSDB_GROUP_AUDIT	36
 #define DBGC_DSDB_GROUP_AUDIT_JSON	37
+#define DBGC_LDAPSRV		38
 
 /* So you can define DBGC_CLASS before including debug.h */
 #ifndef DBGC_CLASS
@@ -141,7 +142,7 @@ bool dbgsetclass(int level, int cls);
  *
  * DEBUGADD(), DEBUGADDC()
  *    Same as DEBUG() and DEBUGC() except the text is appended to the previous
- *    DEBUG(), DEBUGC(), DEBUGADD(), DEBUGADDC() with out another interviening
+ *    DEBUG(), DEBUGC(), DEBUGADD(), DEBUGADDC() without another intervening
  *    header.
  *
  *    Example: DEBUGADD( 2, ("Some text and a value %d.\n", value) );
@@ -202,7 +203,7 @@ void debuglevel_set_class(size_t idx, int level);
 /**
  * @brief DEBUGLF is same as DEBUG with explicit location and function arguments
  *
- * To be used when passing location and function of a caller appearig earlier in
+ * To be used when passing location and function of a caller appearing earlier in
  * the call stack instead of some helper function.
  *
  * @code
@@ -275,9 +276,16 @@ void debuglevel_set_class(size_t idx, int level);
 #define DBGLVL_INFO	 5	/* informational message */
 #define DBGLVL_DEBUG	10	/* debug-level message */
 
+/*
+ * Logging to syslog will be disabled as messages on debug level 0 are always
+ * reported to syslog too. We don't want to clutter the syslog with startup
+ * messages from rpc on demand daemons.
+ */
 #define DBG_STARTUP_NOTICE(...) do { \
 	debug_set_forced_log_priority(DBGLVL_NOTICE); \
+	debug_disable_syslog(); \
 	D_ERR(__VA_ARGS__); \
+	debug_enable_syslog(); \
 	debug_set_forced_log_priority(-1); \
 } while(0)
 
@@ -361,6 +369,8 @@ void debug_set_settings(struct debug_settings *settings,
 			int syslog_level, bool syslog_only);
 void debug_set_hostname(const char *name);
 void debug_set_forced_log_priority(int forced_log_priority);
+void debug_disable_syslog(void);
+void debug_enable_syslog(void);
 bool reopen_logs_internal( void );
 void force_check_log_size( void );
 bool need_to_check_log_size( void );

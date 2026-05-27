@@ -160,18 +160,48 @@ ctdb_check_args()
 # determine on what type of system (init style) we are running
 detect_init_style()
 {
-	# only do detection if not already set:
-	if [ -n "$CTDB_INIT_STYLE" ]; then
-		return
+	_init_style_file="${CTDB_SCRIPT_VARDIR}/init-style"
+
+	if [ ! -f "$_init_style_file" ]; then
+		if [ -n "$CTDB_INIT_STYLE" ]; then
+			echo "$CTDB_INIT_STYLE" >"$_init_style_file"
+			return
+		fi
+
+		# Subshell to contain variables in os-release file
+		(
+			_os_release="${CTDB_SYS_ETCDIR}/os-release"
+			if [ -f "$_os_release" ]; then
+				. "$_os_release"
+				case "$ID" in
+				centos | fedora | rhel)
+					echo "redhat"
+					;;
+				debian | ubuntu)
+					echo "debian"
+					;;
+				sles | suse)
+					echo "suse"
+					;;
+				*)
+					case "$ID_LIKE" in
+					*centos* | *rhel*)
+						echo "redhat"
+						;;
+					*)
+						echo "$ID"
+						;;
+					esac
+					;;
+				esac
+			else
+				echo "WARNING: unknown distribution ${ID}" >&2
+				echo "unknown"
+			fi
+		) >"$_init_style_file"
 	fi
 
-	if [ -x /sbin/startproc ]; then
-		CTDB_INIT_STYLE="suse"
-	elif [ -x /sbin/start-stop-daemon ]; then
-		CTDB_INIT_STYLE="debian"
-	else
-		CTDB_INIT_STYLE="redhat"
-	fi
+	read -r CTDB_INIT_STYLE <"$_init_style_file"
 }
 
 ######################################################
@@ -237,6 +267,59 @@ ctdb_get_ip_address()
 	fi
 
 	cat "$_ip_addr_file"
+}
+
+# Cache of public IP addresses assigned to this node.  This function
+# exists mainly so statd_callout does not need to talk to ctdbd, so
+# can be run as non-root, but it may be used in other places.  This
+# must be updated/refreshed on failover.  This is done in
+# 10.interface, but doing it in "ipreallocated" isn't enough because
+# clients may connect as soon as "takeip" completes.  Also, the VNN in
+# the daemon is only updated after the "releaseip" event completes, so
+# "ctdb -X ip" can't be relied on there.  Hence, complex updates
+# involving locking for "takeip" & "releaseip".  A future
+# restructuring of the failover model will obsolete all of these
+# moving parts.
+CTDB_MY_PUBLIC_IPS_CACHE="${CTDB_SCRIPT_VARDIR}/my-public-ip-addresses"
+update_my_public_ip_addresses()
+{
+	_event="$1"
+
+	_f="$CTDB_MY_PUBLIC_IPS_CACHE"
+	_lock="${_f}.lock"
+
+	# In private CTDB state directory - no $$ security issue
+	_new="${_f}.new.$$"
+	{
+		flock --timeout 10 9 ||
+			die "ctdb_get_my_public_ip_addresses: timeout"
+
+		case "$_event" in
+		takeip)
+			_ip="$2"
+			# Redirect of stderr guards against initial
+			# missing file
+			cat "$_f" 2>/dev/null >"$_new"
+			echo "$_ip" >>"$_new"
+			;;
+		releaseip)
+			_ip="$2"
+			# Redirect of stderr guards against initial
+			# missing file, which shouldn't happen in
+			# releaseip...
+			grep -Fvx "$_ip" "$_f" 2>/dev/null >"$_new"
+			;;
+		ipreallocated)
+			_pnn=$(ctdb_get_pnn)
+			$CTDB -X ip |
+				awk -F'|' -v pnn="$_pnn" \
+				    '$3 == pnn {print $2}' >"$_new"
+			;;
+		esac
+
+		mv "$_new" "$_f"
+
+	} 9>"$_lock"
 }
 
 # Cached retrieval of database options for use by event scripts.
@@ -416,7 +499,7 @@ ctdb_check_unix_socket()
 		return 1
 	fi
 
-	_out=$(ss -l -x "src ${_sockpath}" | tail -n +2)
+	_out=$(ss -l -xH "src ${_sockpath}")
 	if [ -z "$_out" ]; then
 		echo "ERROR: ${service_name} not listening on ${_sockpath}"
 		return 1
@@ -426,6 +509,43 @@ ctdb_check_unix_socket()
 ################################################
 # kill off any TCP connections with the given IP
 ################################################
+
+kill_tcp_summarise()
+{
+	_mode="$1"
+	_count="$2"
+	_method="$3"
+
+	_connections=$(get_tcp_connections_for_ip "$_ip")
+	if [ -z "$_connections" ]; then
+		_remaining=0
+	else
+		_remaining=$(echo "$_connections" | wc -l)
+	fi
+
+	case "$_mode" in
+	total)
+		_total="$_count"
+		_killed=$((_total - _remaining))
+		;;
+	killed)
+		_killed="$_count"
+		_total=$((_killed + _remaining))
+		;;
+	esac
+
+	_t="${_killed}/${_total}"
+	_m=""
+	if [ -n "$_method" ]; then
+		_m=", using ${_method}"
+	fi
+	echo "Killed ${_t} TCP connections to released IP ${_ip}${_m}"
+	if [ -n "$_connections" ]; then
+		echo "Remaining connections:"
+		echo "$_connections" | sed -e 's|^|  |'
+	fi
+}
+
 kill_tcp_connections()
 {
 	_iface="$1"
@@ -435,6 +555,16 @@ kill_tcp_connections()
 	if [ "$3" = "oneway" ]; then
 		_oneway=true
 	fi
+
+	case "$CTDB_KILLTCP_USE_SS_KILL" in
+	yes | try)
+		_killcount=$(ss -K -tnH state established src "$_ip" | wc -l)
+		kill_tcp_summarise "killed" "$_killcount" "ss -K"
+		if [ "$CTDB_KILLTCP_USE_SS_KILL" = "yes" ]; then
+			return
+		fi
+		;;
+	esac
 
 	get_tcp_connections_for_ip "$_ip" | {
 		_killcount=0
@@ -473,22 +603,11 @@ kill_tcp_connections()
 			return
 		}
 
-		_connections=$(get_tcp_connections_for_ip "$_ip")
-		if [ -z "$_connections" ]; then
-			_remaining=0
-		else
-			_remaining=$(echo "$_connections" | wc -l)
+		_method=""
+		if [ "$CTDB_KILLTCP_USE_SS_KILL" = "try" ]; then
+			_method="ctdb_killtcp"
 		fi
-
-		_actually_killed=$((_killcount - _remaining))
-
-		_t="${_actually_killed}/${_killcount}"
-		echo "Killed ${_t} TCP connections to released IP $_ip"
-
-		if [ -n "$_connections" ]; then
-			echo "Remaining connections:"
-			echo "$_connections" | sed -e 's|^|  |'
-		fi
+		kill_tcp_summarise "total" "$_killcount" "$_method"
 	}
 }
 
@@ -511,6 +630,10 @@ tickle_tcp_connections()
 	_conns=$(get_tcp_connections_for_ip "$_ip" |
 		awk '{ print $1, $2 ; print $2, $1 }')
 
+	if [ -z "$_conns" ]; then
+		return
+	fi
+
 	echo "$_conns" | awk '{ print "Tickle TCP connection", $1, $2 }'
 	echo "$_conns" | ctdb tickle
 }
@@ -519,7 +642,7 @@ get_tcp_connections_for_ip()
 {
 	_ip="$1"
 
-	ss -tn state established "src [$_ip]" | awk 'NR > 1 {print $3, $4}'
+	ss -tnH state established "src [$_ip]" | awk '{print $3, $4}'
 }
 
 ########################################################
@@ -619,6 +742,30 @@ drop_ip()
 		echo "Removing public address $_addr/$_maskbits from device $_iface"
 		delete_ip_from_iface "$_iface" "$_addr" "$_maskbits" >/dev/null 2>&1
 	fi
+}
+
+have_public_addresses()
+{
+	[ -f "${CTDB_BASE}/public_addresses" ]
+}
+
+# This sets $public_ifaces as a side-effect.
+get_public_ifaces()
+{
+	# Get all the interfaces listed in the public_addresses file
+	public_ifaces=$(sed -e '/^#.*/d' \
+		-e 's/^[^\t ]*[\t ]*//' \
+		-e 's/,/ /g' \
+		-e 's/[\t ]*$//' "${CTDB_BASE}/public_addresses")
+
+	# Get the interfaces for which CTDB has public IPs configured.
+	# That is, for all but the 1st line, get the 1st field.
+	ctdb_ifaces=$($CTDB -X ifaces | sed -e '1d' -e 's@^|@@' -e 's@|.*@@')
+
+	# Add $ctdb_ifaces and make $public_ifaces unique
+	# Use word splitting to squash whitespace
+	# shellcheck disable=SC2086
+	public_ifaces=$(echo $public_ifaces $ctdb_ifaces | tr ' ' '\n' | sort -u)
 }
 
 drop_all_public_ips()
@@ -754,10 +901,123 @@ ctdb_counter_get()
 {
 	_ctdb_counter_common "$1"
 	# unary counting!
-	_val=$(wc -c <"$_counter_file" 2>/dev/null || echo 0)
+	_val=$(wc -c 2>/dev/null <"$_counter_file" || echo 0)
 	# Strip leading spaces from output of wc (on freebsd)
 	# shellcheck disable=SC2086
 	echo $_val
+}
+ctdb_counter_exists()
+{
+	_ctdb_counter_common "$1"
+	[ -e "$_counter_file" ]
+}
+
+#
+# Fail counter/threshold combination to control warnings and node unhealthy
+#
+
+_failcount_validate_threshold()
+{
+	case "$1" in
+	"") return 1 ;; # A failure that doesn't need a warning
+	*)
+		if echo "$1" | grep -qx '[0-9]*'; then
+			return 0
+		fi
+
+		echo "WARNING: ${1} is an invalid threshold in \"${2}\" check"
+		return 1
+		;;
+	esac
+}
+
+_failcount_common()
+{
+	_thing="$1"
+
+	_counter=$(echo "$_thing" | sed -e 's@/@_SLASH_@g' -e 's@ @_@g')
+}
+
+failcount_init()
+{
+	_thing="$1"
+
+	_failcount_common "$_thing"
+
+	ctdb_counter_init "$_counter"
+}
+
+failcount_reset()
+{
+	_thing="$1"
+
+	_failcount_common "$_thing"
+
+	_failcount=$(ctdb_counter_get "$_counter")
+	if [ "$_failcount" -eq 0 ]; then
+		return
+	fi
+
+	printf 'NOTICE: %s: no longer failing\n' "$_thing"
+	ctdb_counter_init "$_counter"
+}
+
+failcount_incr()
+{
+	_thing="$1"
+	_thresholds="$2"
+	_output="$3"
+
+	_failcount_common "$_thing"
+
+	ctdb_counter_incr "$_counter"
+	_failcount=$(ctdb_counter_get "$_counter")
+
+	case "$_thresholds" in
+	*:*)
+		_warn_threshold="${_thresholds%:*}"
+		_unhealthy_threshold="${_thresholds#*:}"
+		;;
+	"")
+		_warn_threshold=1
+		_unhealthy_threshold=""
+		;;
+	*)
+		_warn_threshold="$_thresholds"
+		_unhealthy_threshold=""
+		;;
+	esac
+
+	if _failcount_validate_threshold "$_unhealthy_threshold" "$_thing"; then
+		if [ "$_failcount" -ge "$_unhealthy_threshold" ]; then
+			printf 'ERROR: %s: fail count %d >= threshold %d\n' \
+			       "$_thing" \
+			       "$_failcount" \
+			       "$_unhealthy_threshold"
+			# Only print output when exceeding the
+			# unhealthy threshold
+			if [ "$_failcount" -eq "$_unhealthy_threshold" ] && \
+				   [ -n "$_output" ]; then
+				echo "$_output"
+			fi
+			exit 1
+		fi
+	fi
+
+	if _failcount_validate_threshold "$_warn_threshold" "$_thing"; then
+		if [ "$_failcount" -lt "$_warn_threshold" ]; then
+			return 0
+		fi
+	fi
+
+	printf 'WARNING: %s: fail count %d >= threshold %d\n' \
+	       "$_thing" \
+	       "$_failcount" \
+	       "$_warn_threshold"
+	if [ "$_failcount" -eq "$_warn_threshold" ] && [ -n "$_output" ]; then
+		# Only print output when exceeding the warning threshold
+		echo "$_output"
+	fi
 }
 
 ########################################################
@@ -904,11 +1164,11 @@ nfs_callout_init()
 	export CTDB_NFS_CALLOUT_STATE_DIR="${_state_dir}/callout-state"
 
 	# Export, if set, for use by clustered NFS callouts
-	if [ -n "$CTDB_NFS_STATE_FS_TYPE" ]; then
-		export CTDB_NFS_STATE_FS_TYPE
+	if [ -n "$CTDB_NFS_SHARED_STATE_DIR" ]; then
+		export CTDB_NFS_SHARED_STATE_DIR
 	fi
-	if [ -n "$CTDB_NFS_STATE_MNT" ]; then
-		export CTDB_NFS_STATE_MNT
+	if [ -n "$CTDB_NFS_EXPORTS_FILE" ]; then
+		export CTDB_NFS_EXPORTS_FILE
 	fi
 
 	nfs_callout_cache="${_state_dir}/nfs_callout_cache"
@@ -958,48 +1218,38 @@ nfs_callout()
 
 update_tickles()
 {
-	_port="$1"
-
 	tickledir="${CTDB_SCRIPT_VARDIR}/tickles"
 	mkdir -p "$tickledir"
 
-	# What public IPs do I hold?
-	_pnn=$(ctdb_get_pnn)
-	_ips=$($CTDB -X ip | awk -F'|' -v pnn="$_pnn" '$3 == pnn {print $2}')
+	# If not hosting any public IPs then can't have any connections...
+	if [ ! -s "$CTDB_MY_PUBLIC_IPS_CACHE" ]; then
+		return
+	fi
 
-	# IPs and port as ss filters
+	# IPs ss filter
 	_ip_filter=""
-	for _ip in $_ips; do
+	while read -r _ip; do
 		_ip_filter="${_ip_filter}${_ip_filter:+ || }src [${_ip}]"
-	done
-	_port_filter="sport == :${_port}"
+	done <"$CTDB_MY_PUBLIC_IPS_CACHE"
+
+	# Record our current tickles in a temporary file
+	_my_tickles="${tickledir}/all.tickles.$$"
+	while read -r _i; do
+		$CTDB -X gettickles "$_i" |
+			awk -F'|' 'NR > 1 { printf "%s:%s %s:%s\n", $2, $3, $4, $5 }'
+	done <"$CTDB_MY_PUBLIC_IPS_CACHE" |
+		sort >"$_my_tickles"
 
 	# Record connections to our public IPs in a temporary file.
 	# This temporary file is in CTDB's private state directory and
 	# $$ is used to avoid a very rare race involving CTDB's script
 	# debugging.  No security issue, nothing to see here...
-	_my_connections="${tickledir}/${_port}.connections.$$"
-	# Parentheses are needed around the filters for precedence but
+	_my_connections="${tickledir}/all.connections.$$"
+	# Parentheses are needed around the IP filter for precedence but
 	# the parentheses can't be empty!
-	#
-	# Recent versions of ss print square brackets around IPv6
-	# addresses.  While it is desirable to update CTDB's address
-	# parsing and printing code, something needs to be done here
-	# for backward compatibility, so just delete the brackets.
-	ss -tn state established \
-		"${_ip_filter:+( ${_ip_filter} )}" \
-		"${_port_filter:+( ${_port_filter} )}" |
-		awk 'NR > 1 {print $4, $3}' |
-		tr -d '][' |
+	ss -tnH state established "${_ip_filter:+( ${_ip_filter} )}" |
+		awk '{print $4, $3}' |
 		sort >"$_my_connections"
-
-	# Record our current tickles in a temporary file
-	_my_tickles="${tickledir}/${_port}.tickles.$$"
-	for _i in $_ips; do
-		$CTDB -X gettickles "$_i" "$_port" |
-			awk -F'|' 'NR > 1 { printf "%s:%s %s:%s\n", $2, $3, $4, $5 }'
-	done |
-		sort >"$_my_tickles"
 
 	# Add tickles for connections that we haven't already got tickles for
 	comm -23 "$_my_connections" "$_my_tickles" |

@@ -225,7 +225,7 @@ mcc_initialize(krb5_context context,
      */
     mcc_destroy_internal(context, m);
     m->dead = 0;
-    m->kdc_offset = 0;
+    m->kdc_offset = context->kdc_sec_offset;
     m->mtime = time(NULL);
     ret = krb5_copy_principal (context,
 			       primary_principal,
@@ -586,7 +586,7 @@ mcc_get_kdc_offset(krb5_context context, krb5_ccache id, krb5_deltat *kdc_offset
 
 
 /**
- * Variable containing the MEMORY based credential cache implemention.
+ * Variable containing the MEMORY based credential cache implementation.
  *
  * @ingroup krb5_ccache
  */

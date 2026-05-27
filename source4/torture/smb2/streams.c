@@ -30,57 +30,21 @@
 #include "system/filesys.h"
 #include "system/locale.h"
 #include "lib/util/tsort.h"
+#include "libcli/security/security_descriptor.h"
 
 #define DNAME "teststreams"
 
-#define CHECK_STATUS(status, correct) do { \
-	if (!NT_STATUS_EQUAL(status, correct)) { \
-		torture_result(tctx, TORTURE_FAIL, \
-		    "(%s) Incorrect status %s - should be %s\n", \
-		    __location__, nt_errstr(status), nt_errstr(correct)); \
-		ret = false; \
-		goto done; \
-	}} while (0)
+#define CHECK_STATUS(status, correct) \
+	torture_assert_ntstatus_equal_goto(tctx, status, correct, ret, done, "CHECK_STATUS")
 
-#define CHECK_VALUE(v, correct) do { \
-	if ((v) != (correct)) { \
-		torture_result(tctx, TORTURE_FAIL, \
-		    "(%s) Incorrect value %s=%d - should be %d\n", \
-		    __location__, #v, (int)v, (int)correct); \
-		ret = false; \
-	}} while (0)
+#define CHECK_VALUE(v, correct) \
+	torture_assert_u64_equal_goto(tctx, v, correct, ret, done, "CHECK_VALUE")
 
-#define CHECK_NTTIME(v, correct) do { \
-	if ((v) != (correct)) { \
-		torture_result(tctx, TORTURE_FAIL, \
-		    "(%s) Incorrect value %s=%llu - should be %llu\n", \
-		    __location__, #v, (unsigned long long)v, \
-		    (unsigned long long)correct); \
-		ret = false; \
-	}} while (0)
+#define CHECK_NTTIME(v, correct) \
+	torture_assert_nttime_equal_goto(tctx, v, correct, ret, done, "CHECK_NTTIME")
 
-#define CHECK_STR(v, correct) do { \
-	bool ok; \
-	if ((v) && !(correct)) { \
-		ok = false; \
-	} else if (!(v) && (correct)) { \
-		ok = false; \
-	} else if (!(v) && !(correct)) { \
-		ok = true; \
-	} else if (strcmp((v), (correct)) == 0) { \
-		ok = true; \
-	} else { \
-		ok = false; \
-	} \
-	if (!ok) { \
-		torture_result(tctx, TORTURE_FAIL, \
-			       "(%s) Incorrect value %s='%s' - "	\
-			       "should be '%s'\n",			\
-			       __location__, #v, (v)?(v):"NULL",	\
-			       (correct)?(correct):"NULL");		\
-		ret = false;						\
-	}} while (0)
-
+#define CHECK_STR(v, correct) \
+	torture_assert_str_equal_goto(tctx, v, correct, ret, done, "CHECK_STR")
 
 static int qsort_string(char * const *s1, char * const *s2)
 {
@@ -1349,22 +1313,12 @@ done:
 	sfinfo.generic.level = RAW_SFILEINFO_ ## call; \
 	sfinfo.generic.in.file.handle = h1; \
 	status = smb2_setinfo_file(tree, &sfinfo); \
-	if (!NT_STATUS_EQUAL(status, rightstatus)) { \
-		torture_result(tctx, TORTURE_FAIL,			\
-			       "(%s) %s - %s (should be %s)\n",		\
-			       __location__, #call,			\
-			       nt_errstr(status), nt_errstr(rightstatus)); \
-		ret = false;						\
-	} \
+	torture_assert_ntstatus_equal_goto(tctx, status, rightstatus, ret, done, #call); \
 	finfo1.generic.level = RAW_FILEINFO_ALL_INFORMATION; \
 	finfo1.generic.in.file.handle = h1; \
 	status2 = smb2_getinfo_file(tree, tctx, &finfo1); \
-	if (!NT_STATUS_IS_OK(status2)) { \
-		torture_result(tctx, TORTURE_FAIL,	     \
-			       "(%s) %s pathinfo - %s\n",    \
-			       __location__, #call, nt_errstr(status)); \
-		ret = false; \
-	}} while (0)
+	torture_assert_ntstatus_ok_goto(tctx, status2, ret, done, "ALL_INFO"); \
+} while (0)
 
 /*
   test stream renames
@@ -1568,17 +1522,15 @@ static bool test_stream_rename2(struct torture_context *tctx,
 	status = smb2_setinfo_file(tree, &sinfo);
 	CHECK_STATUS(status, NT_STATUS_SHARING_VIOLATION);
 
-	if (!torture_setting_bool(tctx, "samba4", false)) {
-		/*
-		 * Check SMB2 rename to the default stream using :<stream>.
-		 */
-		torture_comment(tctx, "(%s) Checking SMB2 rename to default stream "
-				"using :<stream>\n", __location__);
-		sinfo.rename_information.in.file.handle = h1;
-		sinfo.rename_information.in.new_name = stream_name_default;
-		status = smb2_setinfo_file(tree, &sinfo);
-		CHECK_STATUS(status, NT_STATUS_OK);
-	}
+	/*
+	 * Check SMB2 rename to the default stream using :<stream>.
+	 */
+	torture_comment(tctx, "(%s) Checking SMB2 rename to default stream "
+			"using :<stream>\n", __location__);
+	sinfo.rename_information.in.file.handle = h1;
+	sinfo.rename_information.in.new_name = stream_name_default;
+	status = smb2_setinfo_file(tree, &sinfo);
+	CHECK_STATUS(status, NT_STATUS_OK);
 
 	smb2_util_close(tree, h1);
 
@@ -2392,6 +2344,78 @@ done:
 	smb2_util_unlink(tree, fname);
 	smb2_util_unlink(tree, fname_renamed);
 
+	return ret;
+}
+
+/*
+ * Simple test creating a stream on a share with "inherit permissions"
+ * enabled. This tests specifically bug 15695.
+ */
+bool test_stream_inherit_perms(struct torture_context *tctx,
+			       struct smb2_tree *tree)
+{
+	NTSTATUS status;
+	struct smb2_handle h = {};
+	union smb_fileinfo q = {};
+	union smb_setfileinfo setinfo = {};
+	struct security_descriptor *sd = NULL;
+	struct security_ace ace = {};
+	const char *fname = DNAME "\\test_stream_inherit_perms:stream";
+	bool ret = true;
+
+	smb2_deltree(tree, DNAME);
+
+	status = torture_smb2_testdir(tree, DNAME, &h);
+	torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
+					"torture_smb2_testdir failed\n");
+
+	torture_comment(tctx, "getting original sd\n");
+
+	q.query_secdesc.level = RAW_FILEINFO_SEC_DESC;
+	q.query_secdesc.in.file.handle = h;
+	q.query_secdesc.in.secinfo_flags = SECINFO_DACL | SECINFO_OWNER;
+
+	status = smb2_getinfo_file(tree, tctx, &q);
+	torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
+					"smb2_getinfo_file failed\n");
+
+	sd = q.query_secdesc.out.sd;
+
+	/*
+	 * Add one explicit non-inheriting ACE which will be stored
+	 * as a non-inheriting POSIX ACE. These are the ACEs that
+	 * "inherit permissions" will want to inherit.
+	 */
+	ace.type = SEC_ACE_TYPE_ACCESS_ALLOWED;
+	ace.access_mask = SEC_STD_ALL;
+	ace.trustee = *(sd->owner_sid);
+
+	status = security_descriptor_dacl_add(sd, &ace);
+	torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
+					"security_descriptor_dacl_add failed\n");
+
+	setinfo.set_secdesc.level = RAW_SFILEINFO_SEC_DESC;
+	setinfo.set_secdesc.in.file.handle = h;
+	setinfo.set_secdesc.in.secinfo_flags = SECINFO_DACL;
+	setinfo.set_secdesc.in.sd = sd;
+
+	status = smb2_setinfo_file(tree, &setinfo);
+	torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
+					"smb2_setinfo_file failed");
+
+	smb2_util_close(tree, h);
+	ZERO_STRUCT(h);
+
+	/* This triggers the crash */
+	status = torture_smb2_testfile(tree, fname, &h);
+	torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
+					"torture_smb2_testfile failed");
+
+done:
+	if (!smb2_util_handle_empty(h)) {
+		smb2_util_close(tree, h);
+	}
+	smb2_deltree(tree, DNAME);
 	return ret;
 }
 

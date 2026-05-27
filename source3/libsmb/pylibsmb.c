@@ -51,7 +51,7 @@ c = libsmb.Conn("127.0.0.1",
 #include "python/modules.h"
 #include "libcli/smb/smbXcli_base.h"
 #include "libcli/smb/smb2_negotiate_context.h"
-#include "libcli/smb/reparse_symlink.h"
+#include "libcli/smb/reparse.h"
 #include "libsmb/libsmb.h"
 #include "libcli/security/security.h"
 #include "system/select.h"
@@ -60,6 +60,7 @@ c = libsmb.Conn("127.0.0.1",
 #include "trans2.h"
 #include "libsmb/clirap.h"
 #include "librpc/rpc/pyrpc_util.h"
+#include "librpc/gen_ndr/ndr_security.h"
 
 #define LIST_ATTRIBUTE_MASK \
 	(FILE_ATTRIBUTE_DIRECTORY|FILE_ATTRIBUTE_SYSTEM|FILE_ATTRIBUTE_HIDDEN)
@@ -208,12 +209,14 @@ static int py_cli_thread_destructor(struct py_cli_thread *t)
 	ssize_t written;
 	int ret;
 
-	do {
-		/*
-		 * This will wake the poll thread from the poll(2)
-		 */
-		written = write(t->shutdown_pipe[1], &c, 1);
-	} while ((written == -1) && (errno == EINTR));
+	if (t->shutdown_pipe[1] != -1) {
+		do {
+			/*
+			* This will wake the poll thread from the poll(2)
+			*/
+			written = write(t->shutdown_pipe[1], &c, 1);
+		} while ((written == -1) && (errno == EINTR));
+	}
 
 	/*
 	 * Allow the poll thread to do its own cleanup under the GIL
@@ -646,7 +649,7 @@ static int py_cli_state_init(struct py_cli_state *self, PyObject *args,
 	if (!py_tevent_req_wait_exc(self, req)) {
 		return -1;
 	}
-	status = cli_full_connection_creds_recv(req, &self->cli);
+	status = cli_full_connection_creds_recv(req, NULL, &self->cli);
 	TALLOC_FREE(req);
 
 	if (!NT_STATUS_IS_OK(status)) {
@@ -1068,6 +1071,48 @@ fail:
 	return v;
 }
 
+static PyObject *py_cli_get_posix_fs_info(
+	struct py_cli_state *self, PyObject *args, PyObject *kwds)
+{
+	NTSTATUS status;
+	struct tevent_req *req = NULL;
+	uint32_t optimal_transfer_size = 0;
+	uint32_t block_size = 0;
+	uint64_t total_blocks = 0;
+	uint64_t blocks_available = 0;
+	uint64_t user_blocks_available = 0;
+	uint64_t total_file_nodes = 0;
+	uint64_t free_file_nodes = 0;
+	uint64_t fs_identifier = 0;
+
+	req = cli_get_posix_fs_info_send(NULL, self->ev, self->cli);
+	if (!py_tevent_req_wait_exc(self, req)) {
+		return NULL;
+	}
+
+	status = cli_get_posix_fs_info_recv(req,
+					    &optimal_transfer_size,
+					    &block_size,
+					    &total_blocks,
+					    &blocks_available,
+					    &user_blocks_available,
+					    &total_file_nodes,
+					    &free_file_nodes,
+					    &fs_identifier);
+	TALLOC_FREE(req);
+	PyErr_NTSTATUS_NOT_OK_RAISE(status);
+
+	return Py_BuildValue("{s:I,s:I,s:I,s:I,s:I,s:I,s:I,s:I}",
+			     "optimal_transfer_size", optimal_transfer_size,
+			     "block_size", block_size,
+			     "total_blocks", total_blocks,
+			     "blocks_available", blocks_available,
+			     "user_blocks_available", user_blocks_available,
+			     "total_file_nodes", total_file_nodes,
+			     "free_file_nodes", free_file_nodes,
+			     "fs_identifier", fs_identifier);
+}
+
 static PyObject *py_cli_create_ex(
 	struct py_cli_state *self, PyObject *args, PyObject *kwds)
 {
@@ -1209,26 +1254,10 @@ static PyObject *py_cli_create_ex(
 		goto nomem;
 	}
 
-	v = PyTuple_New(3);
-	if (v == NULL) {
-		goto nomem;
-	}
-	ret = PyTuple_SetItem(v, 0, Py_BuildValue("I", (unsigned)fnum));
-	if (ret == -1) {
-		status = NT_STATUS_INTERNAL_ERROR;
-		goto fail;
-	}
-	ret = PyTuple_SetItem(v, 1, py_cr);
-	if (ret == -1) {
-		status = NT_STATUS_INTERNAL_ERROR;
-		goto fail;
-	}
-	ret = PyTuple_SetItem(v, 2, py_create_contexts_out);
-	if (ret == -1) {
-		status = NT_STATUS_INTERNAL_ERROR;
-		goto fail;
-	}
-
+	v = Py_BuildValue("(IOO)",
+			  (unsigned)fnum,
+			  py_cr,
+			  py_create_contexts_out);
 	return v;
 nomem:
 	status = NT_STATUS_NO_MEMORY;
@@ -1258,13 +1287,14 @@ static PyObject *py_cli_close(struct py_cli_state *self, PyObject *args)
 {
 	struct tevent_req *req;
 	int fnum;
+	int flags = 0;
 	NTSTATUS status;
 
-	if (!PyArg_ParseTuple(args, "i", &fnum)) {
+	if (!PyArg_ParseTuple(args, "i|i", &fnum, &flags)) {
 		return NULL;
 	}
 
-	req = cli_close_send(NULL, self->ev, self->cli, fnum);
+	req = cli_close_send(NULL, self->ev, self->cli, fnum, flags);
 	if (!py_tevent_req_wait_exc(self, req)) {
 		return NULL;
 	}
@@ -1276,6 +1306,220 @@ static PyObject *py_cli_close(struct py_cli_state *self, PyObject *args)
 		return NULL;
 	}
 	Py_RETURN_NONE;
+}
+
+static PyObject *py_wire_mode_to_unix(struct py_cli_state *self,
+				      PyObject *args)
+{
+	unsigned long long wire = 0;
+	mode_t mode;
+	bool ok;
+	PyObject *v = NULL;
+
+	ok = PyArg_ParseTuple(args, "K", &wire);
+	if (!ok) {
+		return NULL;
+	}
+	mode = wire_mode_to_unix(wire);
+
+	v = Py_BuildValue("I", (unsigned)mode);
+	return v;
+}
+
+static PyObject *py_unix_mode_to_wire(struct py_cli_state *self,
+				      PyObject *args)
+{
+	unsigned long long mode = 0;
+	uint32_t wire;
+	bool ok;
+	PyObject *v = NULL;
+
+	ok = PyArg_ParseTuple(args, "K", &mode);
+	if (!ok) {
+		return NULL;
+	}
+	wire = unix_mode_to_wire(mode);
+
+	v = Py_BuildValue("I", (unsigned)wire);
+	return v;
+}
+
+static PyObject *py_cli_qfileinfo(struct py_cli_state *self, PyObject *args)
+{
+	struct tevent_req *req = NULL;
+	int fnum, level;
+	uint16_t recv_flags2;
+	uint8_t *rdata = NULL;
+	uint32_t num_rdata;
+	PyObject *result = NULL;
+	NTSTATUS status;
+
+	if (!PyArg_ParseTuple(args, "ii", &fnum, &level)) {
+		return NULL;
+	}
+
+	req = cli_qfileinfo_send(
+		NULL, self->ev, self->cli, fnum, level, 0, UINT32_MAX);
+	if (!py_tevent_req_wait_exc(self, req)) {
+		return NULL;
+	}
+	status = cli_qfileinfo_recv(
+		req, NULL, &recv_flags2, &rdata, &num_rdata);
+	TALLOC_FREE(req);
+
+	if (!NT_STATUS_IS_OK(status)) {
+		PyErr_SetNTSTATUS(status);
+		return NULL;
+	}
+
+	switch (level) {
+	case FSCC_FILE_ATTRIBUTE_TAG_INFORMATION: {
+		uint32_t mode = PULL_LE_U32(rdata, 0);
+		uint32_t tag = PULL_LE_U32(rdata, 4);
+
+		if (num_rdata != 8) {
+			PyErr_SetNTSTATUS(NT_STATUS_INVALID_NETWORK_RESPONSE);
+			return NULL;
+		}
+
+		result = Py_BuildValue("{s:K,s:K}",
+				       "mode",
+				       (unsigned long long)mode,
+				       "tag",
+				       (unsigned long long)tag);
+		break;
+	}
+	case FSCC_FILE_POSIX_INFORMATION: {
+		size_t data_off = 0;
+		time_t btime;
+		time_t atime;
+		time_t mtime;
+		time_t ctime;
+		uint64_t size;
+		uint64_t alloc_size;
+		uint32_t attr;
+		uint64_t ino;
+		uint32_t dev;
+		uint32_t nlinks;
+		uint32_t reparse_tag;
+		uint32_t mode;
+		size_t sid_size;
+		enum ndr_err_code ndr_err;
+		struct dom_sid owner, group;
+		struct dom_sid_buf owner_buf, group_buf;
+
+		if (num_rdata < 80) {
+			PyErr_SetNTSTATUS(NT_STATUS_INVALID_NETWORK_RESPONSE);
+			return NULL;
+		}
+
+		btime = nt_time_to_unix(PULL_LE_U64(rdata, data_off));
+		data_off += 8;
+		atime = nt_time_to_unix(PULL_LE_U64(rdata, data_off));
+		data_off += 8;
+		mtime = nt_time_to_unix(PULL_LE_U64(rdata, data_off));
+		data_off += 8;
+		ctime = nt_time_to_unix(PULL_LE_U64(rdata, data_off));
+		data_off += 8;
+		size = PULL_LE_U64(rdata, data_off);
+		data_off += 8;
+		alloc_size = PULL_LE_U64(rdata, data_off);
+		data_off += 8;
+		attr = PULL_LE_U32(rdata, data_off);
+		data_off += 4;
+		ino = PULL_LE_U64(rdata, data_off);
+		data_off += 8;
+		dev = PULL_LE_U32(rdata, data_off);
+		data_off += 4;
+		/* 4 bytes reserved */
+		data_off += 4;
+		nlinks = PULL_LE_U32(rdata, data_off);
+		data_off += 4;
+		reparse_tag = PULL_LE_U32(rdata, data_off);
+		data_off += 4;
+		mode = PULL_LE_U32(rdata, data_off);
+		data_off += 4;
+
+		ndr_err = ndr_pull_struct_blob_noalloc(
+			rdata + data_off,
+			num_rdata - data_off,
+			&owner,
+			(ndr_pull_flags_fn_t)ndr_pull_dom_sid,
+			&sid_size);
+		if (!NDR_ERR_CODE_IS_SUCCESS(ndr_err)) {
+			PyErr_SetNTSTATUS(NT_STATUS_INVALID_NETWORK_RESPONSE);
+			return NULL;
+		}
+		if (data_off + sid_size < data_off ||
+		    data_off + sid_size > num_rdata)
+		{
+			PyErr_SetNTSTATUS(NT_STATUS_INVALID_NETWORK_RESPONSE);
+			return NULL;
+		}
+		data_off += sid_size;
+
+		ndr_err = ndr_pull_struct_blob_noalloc(
+			rdata + data_off,
+			num_rdata - data_off,
+			&group,
+			(ndr_pull_flags_fn_t)ndr_pull_dom_sid,
+			&sid_size);
+		if (!NDR_ERR_CODE_IS_SUCCESS(ndr_err)) {
+			PyErr_SetNTSTATUS(NT_STATUS_INVALID_NETWORK_RESPONSE);
+			return NULL;
+		}
+
+		result = Py_BuildValue(
+			"{s:i,"			/* attr */
+			"s:K,s:K,s:K,s:K,"	/* dates */
+			"s:K,s:K,"		/* sizes */
+			"s:K,s:K,s:K,"		/* ino, dev, nlinks */
+			"s:K,s:K,"		/* tag, mode */
+			"s:s,s:s}",		/* owner, group */
+
+			"attrib",
+			attr,
+
+			"btime",
+			(unsigned long long)btime,
+			"atime",
+			(unsigned long long)atime,
+			"mtime",
+			(unsigned long long)mtime,
+			"ctime",
+			(unsigned long long)ctime,
+
+			"allocation_size",
+			(unsigned long long)alloc_size,
+			"size",
+			(unsigned long long)size,
+
+			"ino",
+			(unsigned long long)ino,
+			"dev",
+			(unsigned long long)dev,
+			"nlink",
+			(unsigned long long)nlinks,
+
+			"reparse_tag",
+			(unsigned long long)reparse_tag,
+			"perms",
+			(unsigned long long)mode,
+
+			"owner_sid",
+			dom_sid_str_buf(&owner, &owner_buf),
+			"group_sid",
+			dom_sid_str_buf(&group, &group_buf));
+		break;
+	}
+	default:
+		result = PyBytes_FromStringAndSize((char *)rdata, num_rdata);
+		break;
+	}
+
+	TALLOC_FREE(rdata);
+
+	return result;
 }
 
 static PyObject *py_cli_rename(
@@ -1386,7 +1630,7 @@ static PyObject *py_smb_savefile(struct py_cli_state *self, PyObject *args)
 	PyErr_NTSTATUS_NOT_OK_RAISE(status);
 
 	/* close the file handle */
-	req = cli_close_send(NULL, self->ev, self->cli, fnum);
+	req = cli_close_send(NULL, self->ev, self->cli, fnum, 0);
 	if (!py_tevent_req_wait_exc(self, req)) {
 		return NULL;
 	}
@@ -1508,7 +1752,7 @@ static PyObject *py_smb_loadfile(struct py_cli_state *self, PyObject *args)
 	}
 
 	/* close the file handle */
-	req = cli_close_send(NULL, self->ev, self->cli, fnum);
+	req = cli_close_send(NULL, self->ev, self->cli, fnum, 0);
 	if (!py_tevent_req_wait_exc(self, req)) {
 		Py_XDECREF(result);
 		return NULL;
@@ -1875,7 +2119,7 @@ static PyMethodDef py_cli_notify_state_methods[] = {
 			   "\t\tList contents of a directory. The keys are, \n"
 			   "\t\t\tname: name of changed object\n"
 			   "\t\t\taction: type of the change\n"
-			   "None is returned if there's no response jet and "
+			   "None is returned if there's no response yet and "
 			   "wait=False is passed"
 	},
 	{
@@ -1901,31 +2145,49 @@ static NTSTATUS list_posix_helper(struct file_info *finfo,
 {
 	PyObject *result = (PyObject *)state;
 	PyObject *file = NULL;
-	PyObject *size = NULL;
+	struct dom_sid_buf owner_buf, group_buf;
 	int ret;
 
-	size = PyLong_FromUnsignedLongLong(finfo->size);
 	/*
 	 * Build a dictionary representing the file info.
-	 * Note: Windows does not always return short_name (so it may be None)
 	 */
-	file = Py_BuildValue("{s:s,s:i,s:s,s:O,s:l,s:i,s:i,s:i,s:s,s:s}",
-			     "name", finfo->name,
-			     "attrib", (int)finfo->attr,
-			     "short_name", finfo->short_name,
-			     "size", size,
+	file = Py_BuildValue("{s:s,s:I,"
+			     "s:K,s:K,"
+			     "s:l,s:l,s:l,s:l,"
+			     "s:i,s:K,s:i,s:i,s:I,"
+			     "s:s,s:s,s:k}",
+			     "name",
+			     finfo->name,
+			     "attrib",
+			     finfo->attr,
+			     "size",
+			     finfo->size,
+			     "allocation_size",
+			     finfo->allocated_size,
+			     "btime",
+			     convert_timespec_to_time_t(finfo->btime_ts),
+			     "atime",
+			     convert_timespec_to_time_t(finfo->atime_ts),
 			     "mtime",
 			     convert_timespec_to_time_t(finfo->mtime_ts),
-			     "perms", finfo->st_ex_mode,
-			     "ino", finfo->ino,
-			     "dev", finfo->st_ex_dev,
+			     "ctime",
+			     convert_timespec_to_time_t(finfo->ctime_ts),
+			     "perms",
+			     finfo->st_ex_mode,
+			     "ino",
+			     finfo->ino,
+			     "dev",
+			     finfo->st_ex_dev,
+			     "nlink",
+			     finfo->st_ex_nlink,
+			     "reparse_tag",
+			     finfo->reparse_tag,
 			     "owner_sid",
-			     dom_sid_string(finfo, &finfo->owner_sid),
+			     dom_sid_str_buf(&finfo->owner_sid, &owner_buf),
 			     "group_sid",
-			     dom_sid_string(finfo, &finfo->group_sid));
-
-	Py_CLEAR(size);
-
+			     dom_sid_str_buf(&finfo->group_sid, &group_buf),
+			     "reparse_tag",
+			     (unsigned long)finfo->reparse_tag);
 	if (file == NULL) {
 		return NT_STATUS_NO_MEMORY;
 	}
@@ -1959,13 +2221,19 @@ static NTSTATUS list_helper(struct file_info *finfo,
 	 * Build a dictionary representing the file info.
 	 * Note: Windows does not always return short_name (so it may be None)
 	 */
-	file = Py_BuildValue("{s:s,s:i,s:s,s:O,s:l}",
-			     "name", finfo->name,
-			     "attrib", (int)finfo->attr,
-			     "short_name", finfo->short_name,
-			     "size", size,
+	file = Py_BuildValue("{s:s,s:i,s:s,s:O,s:l,s:k}",
+			     "name",
+			     finfo->name,
+			     "attrib",
+			     (int)finfo->attr,
+			     "short_name",
+			     finfo->short_name,
+			     "size",
+			     size,
 			     "mtime",
-			     convert_timespec_to_time_t(finfo->mtime_ts));
+			     convert_timespec_to_time_t(finfo->mtime_ts),
+			     "reparse_tag",
+			     (unsigned long)finfo->reparse_tag);
 
 	Py_CLEAR(size);
 
@@ -2021,7 +2289,6 @@ static NTSTATUS do_listing(struct py_cli_state *self,
 			   const char *base_dir, const char *user_mask,
 			   uint16_t attribute,
 			   unsigned int info_level,
-			   bool posix,
 			   NTSTATUS (*callback_fn)(struct file_info *,
 						   const char *, void *),
 			   void *priv)
@@ -2047,7 +2314,7 @@ static NTSTATUS do_listing(struct py_cli_state *self,
 	dos_format(mask);
 
 	req = cli_list_send(NULL, self->ev, self->cli, mask, attribute,
-			    info_level, posix);
+			    info_level);
 	if (req == NULL) {
 		status = NT_STATUS_NO_MEMORY;
 		goto done;
@@ -2077,18 +2344,17 @@ static PyObject *py_cli_list(struct py_cli_state *self,
 	char *user_mask = NULL;
 	unsigned int attribute = LIST_ATTRIBUTE_MASK;
 	unsigned int info_level = 0;
-	bool posix = false;
 	NTSTATUS status;
 	enum protocol_types proto = smbXcli_conn_protocol(self->cli->conn);
 	PyObject *result = NULL;
-	const char *kwlist[] = { "directory", "mask", "attribs", "posix",
+	const char *kwlist[] = { "directory", "mask", "attribs",
 				 "info_level", NULL };
 	NTSTATUS (*callback_fn)(struct file_info *, const char *, void *) =
-		&list_helper;
+		list_helper;
 
-	if (!ParseTupleAndKeywords(args, kwds, "z|sIpI:list", kwlist,
+	if (!ParseTupleAndKeywords(args, kwds, "z|sII:list", kwlist,
 				   &base_dir, &user_mask, &attribute,
-				   &posix, &info_level)) {
+				   &info_level)) {
 		return NULL;
 	}
 
@@ -2105,11 +2371,11 @@ static PyObject *py_cli_list(struct py_cli_state *self,
 		}
 	}
 
-	if (posix) {
-		callback_fn = &list_posix_helper;
+	if (info_level == SMB2_FIND_POSIX_INFORMATION) {
+		callback_fn = list_posix_helper;
 	}
 	status = do_listing(self, base_dir, user_mask, attribute,
-			    info_level, posix, callback_fn, result);
+			    info_level, callback_fn, result);
 
 	if (!NT_STATUS_IS_OK(status)) {
 		Py_XDECREF(result);
@@ -2669,6 +2935,82 @@ static PyObject *py_cli_fsctl(
 	return result;
 }
 
+static int copy_chunk_cb(off_t n, void *priv)
+{
+	return 1;
+}
+
+static PyObject *py_cli_copy_chunk(struct py_cli_state *self,
+				   PyObject *args,
+				   PyObject *kwds)
+{
+	TALLOC_CTX *frame = talloc_stackframe();
+	struct tevent_req *req = NULL;
+	PyObject *result = NULL;
+	int fnum_src;
+	int fnum_dst;
+	unsigned long long size;
+	unsigned long long src_offset;
+	unsigned long long dst_offset;
+	off_t written;
+	static const char *kwlist[] = {
+		"fnum_src",
+		"fnum_dst",
+		"size",
+		"src_offset",
+		"dst_offset",
+		NULL,
+	};
+	NTSTATUS status;
+	bool ok;
+
+	if (smbXcli_conn_protocol(self->cli->conn) < PROTOCOL_SMB2_02) {
+		errno = EINVAL;
+		PyErr_SetFromErrno(PyExc_RuntimeError);
+		goto err;
+	}
+
+	ok = ParseTupleAndKeywords(
+		    args,
+		    kwds,
+		    "iiKKK",
+		    kwlist,
+		    &fnum_src,
+		    &fnum_dst,
+		    &size,
+		    &src_offset,
+		    &dst_offset);
+	if (!ok) {
+		goto err;
+	}
+
+	req = cli_smb2_splice_send(frame,
+				   self->ev,
+				   self->cli,
+				   fnum_src,
+				   fnum_dst,
+				   size,
+				   src_offset,
+				   dst_offset,
+				   copy_chunk_cb,
+				   NULL);
+	if (!py_tevent_req_wait_exc(self, req)) {
+		goto err;
+	}
+
+	status = cli_smb2_splice_recv(req, &written);
+	if (!NT_STATUS_IS_OK(status)) {
+		PyErr_SetNTSTATUS(status);
+		goto err;
+	}
+
+	result = Py_BuildValue("K", written);
+
+err:
+	TALLOC_FREE(frame);
+	return result;
+}
+
 static PyMethodDef py_cli_state_methods[] = {
 	{ "settimeout", (PyCFunction)py_cli_settimeout, METH_VARARGS,
 	  "settimeout(new_timeout_msecs) => return old_timeout_msecs" },
@@ -2677,6 +3019,10 @@ static PyMethodDef py_cli_state_methods[] = {
 	{ "create", PY_DISCARD_FUNC_SIG(PyCFunction, py_cli_create),
 		METH_VARARGS|METH_KEYWORDS,
 	  "Open a file" },
+	{ "get_posix_fs_info",
+	  PY_DISCARD_FUNC_SIG(PyCFunction, py_cli_get_posix_fs_info),
+	  METH_NOARGS,
+	  "Get posix filesystem attribute information" },
 	{ "create_ex",
 	  PY_DISCARD_FUNC_SIG(PyCFunction, py_cli_create_ex),
 	  METH_VARARGS|METH_KEYWORDS,
@@ -2780,10 +3126,21 @@ static PyMethodDef py_cli_state_methods[] = {
 	  METH_VARARGS|METH_KEYWORDS,
 	  "fsctl(fnum, ctl_code, in_bytes, max_out) -> out_bytes",
 	},
+	{
+		"qfileinfo",
+		(PyCFunction)py_cli_qfileinfo,
+		METH_VARARGS | METH_KEYWORDS,
+		"qfileinfo(fnum, level) -> blob",
+	},
 	{ "mknod",
 	  PY_DISCARD_FUNC_SIG(PyCFunction, py_cli_mknod),
 	  METH_VARARGS|METH_KEYWORDS,
 	  "mknod(path, mode | major, minor)",
+	},
+	{ "copy_chunk",
+	  PY_DISCARD_FUNC_SIG(PyCFunction, py_cli_copy_chunk),
+	  METH_VARARGS|METH_KEYWORDS,
+	  "copy_chunk(fnum_src, fnum_dst, size, src_offset, dst_offset) -> written",
 	},
 	{ NULL, NULL, 0, NULL }
 };
@@ -2801,6 +3158,18 @@ static PyTypeObject py_cli_state_type = {
 };
 
 static PyMethodDef py_libsmb_methods[] = {
+	{
+		"unix_mode_to_wire",
+		(PyCFunction)py_unix_mode_to_wire,
+		METH_VARARGS,
+		"Convert mode_t to posix extensions wire format",
+	},
+	{
+		"wire_mode_to_unix",
+		(PyCFunction)py_wire_mode_to_unix,
+		METH_VARARGS,
+		"Convert posix wire format mode to mode_t",
+	},
 	{0},
 };
 
@@ -2904,6 +3273,8 @@ MODULE_INIT_FUNC(libsmb_samba_cwrapper)
 	ADD_FLAGS(FILE_SHARE_WRITE);
 	ADD_FLAGS(FILE_SHARE_DELETE);
 
+	ADD_FLAGS(VFS_PWRITE_APPEND_OFFSET);
+
 	/* change notify completion filter flags */
 	ADD_FLAGS(FILE_NOTIFY_CHANGE_FILE_NAME);
 	ADD_FLAGS(FILE_NOTIFY_CHANGE_DIR_NAME);
@@ -2997,12 +3368,68 @@ MODULE_INIT_FUNC(libsmb_samba_cwrapper)
 	ADD_FLAGS(SYMLINK_TRUST_UNKNOWN);
 	ADD_FLAGS(SYMLINK_TRUST_MASK);
 
+	ADD_FLAGS(IO_REPARSE_TAG_RESERVED_ZERO);
 	ADD_FLAGS(IO_REPARSE_TAG_SYMLINK);
 	ADD_FLAGS(IO_REPARSE_TAG_MOUNT_POINT);
 	ADD_FLAGS(IO_REPARSE_TAG_HSM);
 	ADD_FLAGS(IO_REPARSE_TAG_SIS);
 	ADD_FLAGS(IO_REPARSE_TAG_DFS);
 	ADD_FLAGS(IO_REPARSE_TAG_NFS);
+
+	ADD_FLAGS(NFS_SPECFILE_LNK);
+	ADD_FLAGS(NFS_SPECFILE_CHR);
+	ADD_FLAGS(NFS_SPECFILE_BLK);
+	ADD_FLAGS(NFS_SPECFILE_FIFO);
+	ADD_FLAGS(NFS_SPECFILE_SOCK);
+
+	ADD_FLAGS(FSCC_FILE_DIRECTORY_INFORMATION);
+	ADD_FLAGS(FSCC_FILE_FULL_DIRECTORY_INFORMATION);
+	ADD_FLAGS(FSCC_FILE_BOTH_DIRECTORY_INFORMATION);
+	ADD_FLAGS(FSCC_FILE_BASIC_INFORMATION);
+	ADD_FLAGS(FSCC_FILE_STANDARD_INFORMATION);
+	ADD_FLAGS(FSCC_FILE_INTERNAL_INFORMATION);
+	ADD_FLAGS(FSCC_FILE_EA_INFORMATION);
+	ADD_FLAGS(FSCC_FILE_ACCESS_INFORMATION);
+	ADD_FLAGS(FSCC_FILE_NAME_INFORMATION);
+	ADD_FLAGS(FSCC_FILE_RENAME_INFORMATION);
+	ADD_FLAGS(FSCC_FILE_LINK_INFORMATION);
+	ADD_FLAGS(FSCC_FILE_NAMES_INFORMATION);
+	ADD_FLAGS(FSCC_FILE_DISPOSITION_INFORMATION);
+	ADD_FLAGS(FSCC_FILE_POSITION_INFORMATION);
+	ADD_FLAGS(FSCC_FILE_FULL_EA_INFORMATION);
+	ADD_FLAGS(FSCC_FILE_MODE_INFORMATION);
+	ADD_FLAGS(FSCC_FILE_ALIGNMENT_INFORMATION);
+	ADD_FLAGS(FSCC_FILE_ALL_INFORMATION);
+	ADD_FLAGS(FSCC_FILE_ALLOCATION_INFORMATION);
+	ADD_FLAGS(FSCC_FILE_END_OF_FILE_INFORMATION);
+	ADD_FLAGS(FSCC_FILE_ALTERNATE_NAME_INFORMATION);
+	ADD_FLAGS(FSCC_FILE_STREAM_INFORMATION);
+	ADD_FLAGS(FSCC_FILE_PIPE_INFORMATION);
+	ADD_FLAGS(FSCC_FILE_PIPE_LOCAL_INFORMATION);
+	ADD_FLAGS(FSCC_FILE_PIPE_REMOTE_INFORMATION);
+	ADD_FLAGS(FSCC_FILE_MAILSLOT_QUERY_INFORMATION);
+	ADD_FLAGS(FSCC_FILE_MAILSLOT_SET_INFORMATION);
+	ADD_FLAGS(FSCC_FILE_COMPRESSION_INFORMATION);
+	ADD_FLAGS(FSCC_FILE_OBJECTID_INFORMATION);
+	ADD_FLAGS(FSCC_FILE_COMPLETION_INFORMATION);
+	ADD_FLAGS(FSCC_FILE_MOVE_CLUSTER_INFORMATION);
+	ADD_FLAGS(FSCC_FILE_QUOTA_INFORMATION);
+	ADD_FLAGS(FSCC_FILE_REPARSEPOINT_INFORMATION);
+	ADD_FLAGS(FSCC_FILE_NETWORK_OPEN_INFORMATION);
+	ADD_FLAGS(FSCC_FILE_ATTRIBUTE_TAG_INFORMATION);
+	ADD_FLAGS(FSCC_FILE_TRACKING_INFORMATION);
+	ADD_FLAGS(FSCC_FILE_ID_BOTH_DIRECTORY_INFORMATION);
+	ADD_FLAGS(FSCC_FILE_ID_FULL_DIRECTORY_INFORMATION);
+	ADD_FLAGS(FSCC_FILE_VALID_DATA_LENGTH_INFORMATION);
+	ADD_FLAGS(FSCC_FILE_SHORT_NAME_INFORMATION);
+	ADD_FLAGS(FSCC_FILE_SFIO_RESERVE_INFORMATION);
+	ADD_FLAGS(FSCC_FILE_SFIO_VOLUME_INFORMATION);
+	ADD_FLAGS(FSCC_FILE_HARD_LINK_INFORMATION);
+	ADD_FLAGS(FSCC_FILE_NORMALIZED_NAME_INFORMATION);
+	ADD_FLAGS(FSCC_FILE_ID_GLOBAL_TX_DIRECTORY_INFORMATION);
+	ADD_FLAGS(FSCC_FILE_STANDARD_LINK_INFORMATION);
+	ADD_FLAGS(FSCC_FILE_MAXIMUM_INFORMATION);
+	ADD_FLAGS(FSCC_FILE_POSIX_INFORMATION);
 
 #define ADD_STRING(val) PyModule_AddObject(m, #val, PyBytes_FromString(val))
 
@@ -3021,6 +3448,7 @@ MODULE_INIT_FUNC(libsmb_samba_cwrapper)
 	ADD_STRING(SMB2_CREATE_TAG_APP_INSTANCE_ID);
 	ADD_STRING(SVHDX_OPEN_DEVICE_CONTEXT);
 	ADD_STRING(SMB2_CREATE_TAG_POSIX);
+	ADD_FLAGS(SMB2_FIND_ID_BOTH_DIRECTORY_INFO);
 	ADD_FLAGS(SMB2_FIND_POSIX_INFORMATION);
 	ADD_FLAGS(FILE_SUPERSEDE);
 	ADD_FLAGS(FILE_OPEN);
@@ -3029,6 +3457,8 @@ MODULE_INIT_FUNC(libsmb_samba_cwrapper)
 	ADD_FLAGS(FILE_OVERWRITE);
 	ADD_FLAGS(FILE_OVERWRITE_IF);
 	ADD_FLAGS(FILE_DIRECTORY_FILE);
+
+	ADD_FLAGS(SMB2_CLOSE_FLAGS_FULL_INFORMATION);
 
 	return m;
 }

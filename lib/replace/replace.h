@@ -41,7 +41,7 @@
  * As it's also needed when Python.h is the first header we
  * require a global -D__STDC_WANT_LIB_EXT1__=1
  */
-#ifndef __STDC_WANT_LIB_EXT1__
+#if __STDC_WANT_LIB_EXT1__ != 1
 #error -D__STDC_WANT_LIB_EXT1__=1 required
 #endif
 
@@ -205,7 +205,7 @@
 #endif
 
 #ifndef HAVE_STRERROR
-extern char *sys_errlist[];
+extern const char *const sys_errlist[];
 #define strerror(i) sys_errlist[i]
 #endif
 
@@ -412,10 +412,6 @@ int rep_ftruncate(int,off_t);
 #ifndef HAVE_INITGROUPS
 #define initgroups rep_initgroups
 int rep_initgroups(char *name, gid_t id);
-#endif
-
-#if !defined(HAVE_BZERO) && defined(HAVE_MEMSET)
-#define bzero(a,b) memset((a),'\0',(b))
 #endif
 
 #ifndef HAVE_DLERROR
@@ -1014,6 +1010,15 @@ ssize_t rep_copy_file_range(int fd_in,
 			    unsigned int flags);
 #endif /* HAVE_COPY_FILE_RANGE */
 
+
+#define copy_reflink rep_copy_reflink
+
+ssize_t rep_copy_reflink(int src_fd,
+			 off_t src_off,
+			 int dst_fd,
+			 off_t dst_off,
+			 off_t to_copy);
+
 #ifndef FALL_THROUGH
 # ifdef HAVE_FALLTHROUGH_ATTRIBUTE
 #  define FALL_THROUGH __attribute__ ((fallthrough))
@@ -1079,7 +1084,7 @@ static inline bool uid_wrapper_enabled(void)
 static inline bool _hexcharval(char c, uint8_t *val)
 {
 	if ((c >= '0') && (c <= '9')) { *val = c - '0';      return true; }
-	if ((c >= 'a') && (c <= 'f')) {	*val = c - 'a' + 10; return true; }
+        c &= 0xDF; /* map lower to upper case -- thanks libnfs :-) */
 	if ((c >= 'A') && (c <= 'F')) { *val = c - 'A' + 10; return true; }
 	return false;
 }
@@ -1091,6 +1096,9 @@ static inline bool hex_byte(const char *in, uint8_t *out)
 	*out = (hi<<4)+lo;
 	return ok;
 }
+
+extern const char hexchars_lower[];
+extern const char hexchars_upper[];
 
 /* Needed for Solaris atomic_add_XX functions. */
 #if defined(HAVE_SYS_ATOMIC_H)

@@ -23,6 +23,7 @@
 #include "system/filesys.h"
 #include "smbd/smbd.h"
 #include "smbd/globals.h"
+#include "source3/smbd/smbXsrv_session.h"
 #include "smbd/smbXsrv_open.h"
 #include "librpc/gen_ndr/netlogon.h"
 #include "../lib/async_req/async_sock.h"
@@ -47,6 +48,7 @@
 #include "libcli/smb/smbXcli_base.h"
 #include "lib/util/time_basic.h"
 #include "source3/lib/substitute.h"
+#include "source3/smbd/dir.h"
 
 /* Internal message queue for deferred opens. */
 struct pending_message_list {
@@ -220,7 +222,7 @@ void remove_deferred_open_message_smb(struct smbXsrv_connection *xconn,
 	struct smbd_server_connection *sconn = xconn->client->sconn;
 	struct pending_message_list *pml;
 
-	if (sconn->using_smb2) {
+	if (conn_using_smb2(sconn)) {
 		remove_deferred_open_message_smb2(xconn, mid);
 		return;
 	}
@@ -293,7 +295,7 @@ bool schedule_deferred_open_message_smb(struct smbXsrv_connection *xconn,
 	struct pending_message_list *pml;
 	int i = 0;
 
-	if (sconn->using_smb2) {
+	if (conn_using_smb2(sconn)) {
 		return schedule_deferred_open_message_smb2(xconn, mid);
 	}
 
@@ -363,7 +365,7 @@ bool open_was_deferred(struct smbXsrv_connection *xconn, uint64_t mid)
 	struct smbd_server_connection *sconn = xconn->client->sconn;
 	struct pending_message_list *pml;
 
-	if (sconn->using_smb2) {
+	if (conn_using_smb2(sconn)) {
 		return open_was_deferred_smb2(xconn, mid);
 	}
 
@@ -402,7 +404,7 @@ bool get_deferred_open_message_state(struct smb_request *smbreq,
 {
 	struct pending_message_list *pml;
 
-	if (smbreq->sconn->using_smb2) {
+	if (conn_using_smb2(smbreq->sconn)) {
 		return get_deferred_open_message_state_smb2(smbreq->smb2req,
 					p_request_time,
 					open_rec);
@@ -585,7 +587,7 @@ void process_smb(struct smbXsrv_connection *xconn,
 	}
 
 #if defined(WITH_SMB1SERVER)
-	if (sconn->using_smb2) {
+	if (lp_server_max_protocol() >= PROTOCOL_SMB2_02) {
 		/* At this point we're not really using smb2,
 		 * we make the decision here.. */
 		if (smbd_is_smb2_header(inbuf, nread)) {
@@ -603,7 +605,7 @@ void process_smb(struct smbXsrv_connection *xconn,
 				&& CVAL(inbuf, smb_com) != 0x72) {
 			/* This is a non-negprot SMB1 packet.
 			   Disable SMB2 from now on. */
-			sconn->using_smb2 = false;
+			lp_do_parameter(-1, "server max protocol", "NT1");
 		}
 	}
 	process_smb1(xconn, inbuf, nread, unread_bytes, seqnum, encrypted);
@@ -687,20 +689,33 @@ NTSTATUS smbXsrv_connection_init_tables(struct smbXsrv_connection *conn,
  */
 const char *smbXsrv_connection_dbg(const struct smbXsrv_connection *xconn)
 {
-	const char *ret;
-	char *addr;
+	const char *ret = NULL;
+	char *raddr = NULL;
+	char *laddr = NULL;
+	struct GUID_txt_buf guid_buf = {};
+
 	/*
-	 * TODO: this can be improved later
-	 * maybe including the client guid or more
+	 * TODO: this can be improved further later...
 	 */
-	addr = tsocket_address_string(xconn->remote_address, talloc_tos());
-	if (addr == NULL) {
+
+	raddr = tsocket_address_string(xconn->remote_address, talloc_tos());
+	if (raddr == NULL) {
+		return "<tsocket_address_string() failed>";
+	}
+	laddr = tsocket_address_string(xconn->local_address, talloc_tos());
+	if (laddr == NULL) {
 		return "<tsocket_address_string() failed>";
 	}
 
-	ret = talloc_asprintf(talloc_tos(), "ptr=%p,id=%llu,addr=%s",
-			      xconn, (unsigned long long)xconn->channel_id, addr);
-	TALLOC_FREE(addr);
+	ret = talloc_asprintf(talloc_tos(),
+			"PID=%d,CLIENT=%s,channel=%"PRIu64",remote=%s,local=%s",
+			getpid(),
+			GUID_buf_string(&xconn->smb2.client.guid, &guid_buf),
+			xconn->channel_id,
+			raddr,
+			laddr);
+	TALLOC_FREE(raddr);
+	TALLOC_FREE(laddr);
 	if (ret == NULL) {
 		return "<talloc_asprintf() failed>";
 	}
@@ -1550,6 +1565,38 @@ static void msg_kill_client_ip(struct messaging_context *msg_ctx,
 	TALLOC_FREE(client_ip);
 }
 
+static void msg_kill_client_with_server_ip(struct messaging_context *msg_ctx,
+				      void *private_data,
+				      uint32_t msg_type,
+				      struct server_id server_id,
+				      DATA_BLOB *data)
+{
+	struct smbd_server_connection *sconn = talloc_get_type_abort(
+		private_data, struct smbd_server_connection);
+	const char *ip = (char *) data->data;
+	char *server_ip = NULL;
+	TALLOC_CTX *ctx = NULL;
+
+	DBG_NOTICE("Got kill request for source IP %s\n", ip);
+	ctx = talloc_stackframe();
+
+	server_ip = tsocket_address_inet_addr_string(sconn->local_address, ctx);
+	if (server_ip == NULL) {
+		goto out_free;
+	}
+
+	if (strequal(ip, server_ip)) {
+		DBG_NOTICE(
+			"Got ip dropped message for %s - exiting immediately\n",
+			ip);
+		TALLOC_FREE(ctx);
+		exit_server_cleanly("Forced disconnect for client");
+	}
+
+out_free:
+	TALLOC_FREE(ctx);
+}
+
 /*
  * Do the recurring check if we're idle
  */
@@ -1630,7 +1677,7 @@ static void smbd_sig_hup_handler(struct tevent_context *ev,
 		struct smbd_server_connection);
 
 	change_to_root_user();
-	DEBUG(1,("Reloading services after SIGHUP\n"));
+	DBG_NOTICE("Reloading services after SIGHUP\n");
 	reload_services(sconn, conn_snum_used, false);
 }
 
@@ -1692,7 +1739,35 @@ struct smbd_tevent_trace_state {
 	struct tevent_context *ev;
 	TALLOC_CTX *frame;
 	SMBPROFILE_BASIC_ASYNC_STATE(profile_idle);
+	struct timeval before_wait_tv;
+	struct timeval after_wait_tv;
 };
+
+static inline void smbd_tevent_trace_callback_before_wait(
+	struct smbd_tevent_trace_state *state)
+{
+	struct timeval now = timeval_current();
+	struct timeval diff;
+
+	diff = tevent_timeval_until(&state->after_wait_tv, &now);
+	if (diff.tv_sec > 3) {
+		DBG_ERR("Handling event took %ld seconds!\n", (long)diff.tv_sec);
+	}
+	state->before_wait_tv = now;
+}
+
+static inline void smbd_tevent_trace_callback_after_wait(
+	struct smbd_tevent_trace_state *state)
+{
+	struct timeval now = timeval_current();
+	struct timeval diff;
+
+	diff = tevent_timeval_until(&state->before_wait_tv, &now);
+	if (diff.tv_sec > 30) {
+		DBG_NOTICE("No event for %ld seconds!\n", (long)diff.tv_sec);
+	}
+	state->after_wait_tv = now;
+}
 
 static inline void smbd_tevent_trace_callback_before_loop_once(
 	struct smbd_tevent_trace_state *state)
@@ -1729,6 +1804,30 @@ static void smbd_tevent_trace_callback(enum tevent_trace_point point,
 	errno = 0;
 }
 
+static void smbd_tevent_trace_callback_debug(enum tevent_trace_point point,
+					     void *private_data)
+{
+	struct smbd_tevent_trace_state *state =
+		(struct smbd_tevent_trace_state *)private_data;
+
+	switch (point) {
+	case TEVENT_TRACE_BEFORE_WAIT:
+		smbd_tevent_trace_callback_before_wait(state);
+		break;
+	case TEVENT_TRACE_AFTER_WAIT:
+		smbd_tevent_trace_callback_after_wait(state);
+		break;
+	case TEVENT_TRACE_BEFORE_LOOP_ONCE:
+		smbd_tevent_trace_callback_before_loop_once(state);
+		break;
+	case TEVENT_TRACE_AFTER_LOOP_ONCE:
+		smbd_tevent_trace_callback_after_loop_once(state);
+		break;
+	}
+
+	errno = 0;
+}
+
 static void smbd_tevent_trace_callback_profile(enum tevent_trace_point point,
 					       void *private_data)
 {
@@ -1737,6 +1836,7 @@ static void smbd_tevent_trace_callback_profile(enum tevent_trace_point point,
 
 	switch (point) {
 	case TEVENT_TRACE_BEFORE_WAIT:
+		smbd_tevent_trace_callback_before_wait(state);
 		if (!smbprofile_dump_pending()) {
 			/*
 			 * If there's no dump pending
@@ -1749,6 +1849,7 @@ static void smbd_tevent_trace_callback_profile(enum tevent_trace_point point,
 		SMBPROFILE_BASIC_ASYNC_START(idle, profile_p, state->profile_idle);
 		break;
 	case TEVENT_TRACE_AFTER_WAIT:
+		smbd_tevent_trace_callback_after_wait(state);
 		SMBPROFILE_BASIC_ASYNC_END(state->profile_idle);
 		if (!smbprofile_dump_pending()) {
 			/*
@@ -1783,10 +1884,6 @@ void smbd_process(struct tevent_context *ev_ctx,
 		  int sock_fd,
 		  bool interactive)
 {
-	struct smbd_tevent_trace_state trace_state = {
-		.ev = ev_ctx,
-		.frame = talloc_stackframe(),
-	};
 	const struct loadparm_substitution *lp_sub =
 		loadparm_s3_global_substitution();
 	struct smbXsrv_client *client = NULL;
@@ -1797,6 +1894,16 @@ void smbd_process(struct tevent_context *ev_ctx,
 	int ret;
 	NTSTATUS status;
 	struct timeval tv = timeval_current();
+	struct smbd_tevent_trace_state trace_state = {
+		.ev = ev_ctx,
+		.frame = talloc_stackframe(),
+		.before_wait_tv = tv,
+		.after_wait_tv = tv,
+	};
+	bool debug = lp_parm_bool(GLOBAL_SECTION_SNUM,
+				  "smbd",
+				  "debug events",
+				  CHECK_DEBUGLVL(DBGLVL_DEBUG));
 	NTTIME now = timeval_to_nttime(&tv);
 	char *chroot_dir = NULL;
 	int rc;
@@ -1828,21 +1935,6 @@ void smbd_process(struct tevent_context *ev_ctx,
 	if (ret != 0) {
 		exit_server("pthreadpool_tevent_init() failed.");
 	}
-
-#if defined(WITH_SMB1SERVER)
-	if (lp_server_max_protocol() >= PROTOCOL_SMB2_02) {
-#endif
-		/*
-		 * We're not making the decision here,
-		 * we're just allowing the client
-		 * to decide between SMB1 and SMB2
-		 * with the first negprot
-		 * packet.
-		 */
-		sconn->using_smb2 = true;
-#if defined(WITH_SMB1SERVER)
-	}
-#endif
 
 	if (!interactive) {
 		smbd_setup_sig_term_handler(sconn);
@@ -2004,27 +2096,44 @@ void smbd_process(struct tevent_context *ev_ctx,
 	messaging_register(sconn->msg_ctx, NULL,
 			   MSG_DEBUG, debug_message);
 
+	messaging_deregister(sconn->msg_ctx, MSG_SMB_IP_DROPPED, NULL);
+	messaging_register(sconn->msg_ctx,
+			   sconn,
+			   MSG_SMB_IP_DROPPED,
+			   msg_kill_client_with_server_ip);
+
 #if defined(WITH_SMB1SERVER)
-	if ((lp_keepalive() != 0)
-	    && !(event_add_idle(ev_ctx, NULL,
-				timeval_set(lp_keepalive(), 0),
-				"keepalive", keepalive_fn,
-				sconn))) {
+	if ((lp_keepalive() != 0) &&
+	    !(event_add_idle(ev_ctx,
+			     NULL,
+			     tevent_timeval_set(lp_keepalive(), 0),
+			     "keepalive",
+			     keepalive_fn,
+			     sconn)))
+	{
 		DEBUG(0, ("Could not add keepalive event\n"));
 		exit(1);
 	}
 #endif
 
-	if (!(event_add_idle(ev_ctx, NULL,
-			     timeval_set(IDLE_CLOSED_TIMEOUT, 0),
-			     "deadtime", deadtime_fn, sconn))) {
+	if (!(event_add_idle(ev_ctx,
+			     NULL,
+			     tevent_timeval_set(IDLE_CLOSED_TIMEOUT, 0),
+			     "deadtime",
+			     deadtime_fn,
+			     sconn)))
+	{
 		DEBUG(0, ("Could not add deadtime event\n"));
 		exit(1);
 	}
 
-	if (!(event_add_idle(ev_ctx, NULL,
-			     timeval_set(SMBD_HOUSEKEEPING_INTERVAL, 0),
-			     "housekeeping", housekeeping_fn, sconn))) {
+	if (!(event_add_idle(ev_ctx,
+			     NULL,
+			     tevent_timeval_set(SMBD_HOUSEKEEPING_INTERVAL, 0),
+			     "housekeeping",
+			     housekeeping_fn,
+			     sconn)))
+	{
 		DEBUG(0, ("Could not add housekeeping event\n"));
 		exit(1);
 	}
@@ -2040,6 +2149,10 @@ void smbd_process(struct tevent_context *ev_ctx,
 	if (smbprofile_active()) {
 		tevent_set_trace_callback(ev_ctx,
 					  smbd_tevent_trace_callback_profile,
+					  &trace_state);
+	} else if (debug) {
+		tevent_set_trace_callback(ev_ctx,
+					  smbd_tevent_trace_callback_debug,
 					  &trace_state);
 	} else {
 		tevent_set_trace_callback(ev_ctx,

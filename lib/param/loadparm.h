@@ -206,6 +206,7 @@ enum printing_types {PRINT_BSD,PRINT_SYSV,PRINT_AIX,PRINT_HPUX,
 enum ldap_server_require_strong_auth {
 	LDAP_SERVER_REQUIRE_STRONG_AUTH_NO,
 	LDAP_SERVER_REQUIRE_STRONG_AUTH_ALLOW_SASL_OVER_TLS,
+	LDAP_SERVER_REQUIRE_STRONG_AUTH_ALLOW_SASL_WITHOUT_TLS_CB,
 	LDAP_SERVER_REQUIRE_STRONG_AUTH_YES,
 };
 
@@ -256,6 +257,20 @@ enum store_nt_hash {
 	NT_HASH_STORE_AUTO,
 	NT_HASH_STORE_NEVER,
 	NT_HASH_STORE_ALWAYS
+};
+
+/* Controlling the storage of the NT password has on the AD DC */
+enum acl_claims_evaluation {
+	ACL_CLAIMS_EVALUATION_AD_DC_ONLY,
+	ACL_CLAIMS_EVALUATION_NEVER
+};
+
+/* Controlling the protocol for netlogon ping */
+enum client_netlogon_ping_protocol {
+	CLIENT_NETLOGON_PING_CLDAP,
+	CLIENT_NETLOGON_PING_LDAP,
+	CLIENT_NETLOGON_PING_LDAPS,
+	CLIENT_NETLOGON_PING_STARTTLS
 };
 
 /*

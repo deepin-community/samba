@@ -32,7 +32,7 @@
 /*   to a particular network operating system        */
 /*                                                   */
 /*   Although it has largely been replaced           */
-/*   for complex remote admistration and management  */
+/*   for complex remote administration and management  */
 /*   (of servers) by the relatively newer            */
 /*   DCE/RPC based remote API (which better handles  */
 /*   large >64K data structures), there are many     */
@@ -245,6 +245,66 @@ static char *make_header(char *param, uint16_t apinum, const char *reqfmt, const
 }
 
 /****************************************************************************
+ Call a remote api
+****************************************************************************/
+
+static bool cli_api(struct cli_state *cli,
+		    char *param, int prcnt, int mprcnt,
+		    char *data, int drcnt, int mdrcnt,
+		    char **rparam, unsigned int *rprcnt,
+		    char **rdata, unsigned int *rdrcnt)
+{
+	NTSTATUS status;
+
+	uint8_t *my_rparam, *my_rdata;
+	uint32_t num_my_rparam, num_my_rdata;
+
+	status = cli_trans(talloc_tos(), cli, SMBtrans,
+			   "\\PIPE\\LANMAN", 0, /* name, fid */
+			   0, 0,	   /* function, flags */
+			   NULL, 0, 0,	   /* setup */
+			   (uint8_t *)param, prcnt, mprcnt, /* Params, length, max */
+			   (uint8_t *)data, drcnt, mdrcnt,  /* Data, length, max */
+			   NULL,		 /* recv_flags2 */
+			   NULL, 0, NULL,	 /* rsetup */
+			   &my_rparam, 0, &num_my_rparam,
+			   &my_rdata, 0, &num_my_rdata);
+	if (!NT_STATUS_IS_OK(status)) {
+		return false;
+	}
+
+	/*
+	 * I know this memcpy massively hurts, but there are just tons
+	 * of callers of cli_api that eventually need changing to
+	 * talloc
+	 */
+
+	*rparam = (char *)smb_memdup(my_rparam, num_my_rparam);
+	if (*rparam == NULL) {
+		goto fail;
+	}
+	*rprcnt = num_my_rparam;
+	TALLOC_FREE(my_rparam);
+
+	*rdata = (char *)smb_memdup(my_rdata, num_my_rdata);
+	if (*rdata == NULL) {
+		goto fail;
+	}
+	*rdrcnt = num_my_rdata;
+	TALLOC_FREE(my_rdata);
+
+	return true;
+fail:
+	TALLOC_FREE(my_rdata);
+	TALLOC_FREE(my_rparam);
+	*rparam = NULL;
+	*rprcnt = 0;
+	*rdata = NULL;
+	*rdrcnt = 0;
+	return false;
+}
+
+/****************************************************************************
  call a NetGroupDelete - delete user group from remote server
 ****************************************************************************/
 
@@ -400,11 +460,10 @@ int cli_RNetGroupEnum(struct cli_state *cli, void (*fn)(const char *, const char
 		char *endp = rparam + rdrcnt;
 
 		res = GETRES(rparam, endp);
-		cli->rap_error = res;
-		if(cli->rap_error == 234) {
+		if(res == 234) {
 			DEBUG(1,("Not all group names were returned (such as those longer than 21 characters)\n"));
-		} else if (cli->rap_error != 0) {
-			DEBUG(1,("NetGroupEnum gave error %d\n", cli->rap_error));
+		} else if (res != 0) {
+			DEBUG(1,("NetGroupEnum gave error %d\n", res));
 		}
 	}
 
@@ -489,11 +548,10 @@ int cli_RNetGroupEnum0(struct cli_state *cli,
 			&rdata, &rdrcnt)) {
 		char *endp = rparam+rprcnt;
 		res = GETRES(rparam,endp);
-		cli->rap_error = res;
-		if(cli->rap_error == 234) {
+		if(res == 234) {
 			DEBUG(1,("Not all group names were returned (such as those longer than 21 characters)\n"));
-		} else if (cli->rap_error != 0) {
-			DEBUG(1,("NetGroupEnum gave error %d\n", cli->rap_error));
+		} else if (res != 0) {
+			DEBUG(1,("NetGroupEnum gave error %d\n", res));
 		}
 	}
 
@@ -680,7 +738,6 @@ int cli_NetGroupGetUsers(struct cli_state * cli, const char *group_name, void (*
 			&rdata, &rdrcnt)) {
 		char *endp = rparam + rprcnt;
 		res = GETRES(rparam,endp);
-		cli->rap_error = res;
 		if (res != 0) {
 			DEBUG(1,("NetGroupGetUsers gave error %d\n", res));
 		}
@@ -749,7 +806,6 @@ int cli_NetUserGetGroups(struct cli_state * cli, const char *user_name, void (*f
 			&rdata, &rdrcnt)) {
 		char *endp = rparam + rprcnt;
 		res = GETRES(rparam,endp);
-		cli->rap_error = res;
 		if (res != 0) {
 			DEBUG(1,("NetUserGetGroups gave error %d\n", res));
 		}
@@ -953,9 +1009,8 @@ int cli_RNetUserEnum(struct cli_state *cli, void (*fn)(const char *, const char 
 			&rdata, &rdrcnt)) {
 		char *endp = rparam + rprcnt;
 		res = GETRES(rparam,endp);
-		cli->rap_error = res;
-		if (cli->rap_error != 0) {
-			DEBUG(1,("NetUserEnum gave error %d\n", cli->rap_error));
+		if (res != 0) {
+			DEBUG(1,("NetUserEnum gave error %d\n", res));
 		}
 	}
 
@@ -1061,9 +1116,8 @@ int cli_RNetUserEnum0(struct cli_state *cli,
 			&rdata, &rdrcnt)) {
 		char *endp = rparam + rprcnt;
 		res = GETRES(rparam,endp);
-		cli->rap_error = res;
-		if (cli->rap_error != 0) {
-			DEBUG(1,("NetUserEnum gave error %d\n", cli->rap_error));
+		if (res != 0) {
+			DEBUG(1,("NetUserEnum gave error %d\n", res));
 		}
 	}
 
@@ -1517,13 +1571,12 @@ bool cli_get_pdc_name(struct cli_state *cli, const char *workgroup, char **pdc_n
 
 		char *endp = rparam + rprcnt;
 		res = GETRES(rparam, endp);
-		cli->rap_error = res;
 
 		/*
 		 * We only really care to copy a name if the
 		 * API succeeded and we got back a name.
 		 */
-		if (cli->rap_error == 0) {
+		if (res == 0) {
 			p = rparam + WORDSIZE + WORDSIZE; /* skip result and converter */
 			GETWORD(p, count, endp);
 			p = rdata;
@@ -1545,7 +1598,7 @@ bool cli_get_pdc_name(struct cli_state *cli, const char *workgroup, char **pdc_n
 			DEBUG(4, ("cli_get_pdc_name: machine %s failed the "
 				  "NetServerEnum call. Error was : %s.\n",
 				  smbXcli_conn_remote_name(cli->conn),
-				  win_errstr(W_ERROR(cli->rap_error))));
+				  win_errstr(W_ERROR(res))));
 		}
 	}
 
@@ -1614,167 +1667,6 @@ bool cli_get_server_name(TALLOC_CTX *mem_ctx, struct cli_state *cli,
 	return res;
 }
 
-/*************************************************************************
-*
-* Function Name:  cli_ns_check_server_type
-*
-* PURPOSE:  Remotes a NetServerEnum2 API call to the current server
-*           requesting server_info_0 level information of machines
-*           matching the given server type. If the returned server
-*           list contains the machine name contained in smbXcli_conn_remote_name(->conn)
-*           then we conclude the server type checks out. This routine
-*           is useful to retrieve list of server's of a certain
-*           type when all you have is a null session connection and
-*           can't remote API calls such as NetWkstaGetInfo or
-*           NetServerGetInfo.
-*
-* Dependencies: none
-*
-* Parameters:
-*             cli       - pointer to cli_state structure
-*             workgroup - pointer to string containing domain
-*             stype     - server type
-*
-* Returns:
-*             True      - success
-*             False     - failure
-*
-************************************************************************/
-
-bool cli_ns_check_server_type(struct cli_state *cli, char *workgroup, uint32_t stype)
-{
-	char *rparam = NULL;
-	char *rdata = NULL;
-	unsigned int rdrcnt,rprcnt;
-	char *p;
-	char param[WORDSIZE                       /* api number    */
-		+sizeof(RAP_NetServerEnum2_REQ) /* req string    */
-		+sizeof(RAP_SERVER_INFO_L0)     /* return string */
-		+WORDSIZE                       /* info level    */
-		+WORDSIZE                       /* buffer size   */
-		+DWORDSIZE                      /* server type   */
-		+RAP_MACHNAME_LEN];             /* workgroup     */
-	bool found_server = false;
-	int res = -1;
-	const char *remote_name = smbXcli_conn_remote_name(cli->conn);
-
-	/* send a SMBtrans command with api NetServerEnum */
-	p = make_header(param, RAP_NetServerEnum2,
-			RAP_NetServerEnum2_REQ, RAP_SERVER_INFO_L0);
-	PUTWORD(p, 0); /* info level 0 */
-	PUTWORD(p, CLI_BUFFER_SIZE);
-	PUTDWORD(p, stype);
-	PUTSTRING(p, workgroup, RAP_MACHNAME_LEN);
-
-	if (cli_api(cli,
-			param, PTR_DIFF(p,param), 8, /* params, length, max */
-			NULL, 0, CLI_BUFFER_SIZE,  /* data, length, max */
-			&rparam, &rprcnt,          /* return params, return size */
-			&rdata, &rdrcnt            /* return data, return size */
-			)) {
-		char *endp = rparam + rprcnt;
-		res = GETRES(rparam,endp);
-		cli->rap_error = res;
-
-		if (res == 0 || res == ERRmoredata) {
-			int i, count = 0;
-
-			p = rparam + WORDSIZE + WORDSIZE;
-			GETWORD(p, count,endp);
-
-			p = rdata;
-			endp = rdata + rdrcnt;
-			for (i = 0;i < count && p < endp;i++, p += 16) {
-				char ret_server[RAP_MACHNAME_LEN];
-
-				p += rap_getstringf(p,
-						ret_server,
-						RAP_MACHNAME_LEN,
-						RAP_MACHNAME_LEN,
-						endp);
-				if (strequal(ret_server, remote_name)) {
-					found_server = true;
-					break;
-				}
-			}
-		} else {
-			DEBUG(4, ("cli_ns_check_server_type: machine %s "
-				  "failed the NetServerEnum call. Error was : "
-				  "%s.\n", remote_name,
-				  win_errstr(W_ERROR(cli->rap_error))));
-		}
-	}
-
-	SAFE_FREE(rparam);
-	SAFE_FREE(rdata);
-
-	return found_server;
-}
-
-/****************************************************************************
- Perform a NetWkstaUserLogoff.
-****************************************************************************/
-
-bool cli_NetWkstaUserLogoff(struct cli_state *cli, const char *user, const char *workstation)
-{
-	char *rparam = NULL;
-	char *rdata = NULL;
-	char *p;
-	unsigned int rdrcnt,rprcnt;
-	char param[WORDSIZE                           /* api number    */
-			+sizeof(RAP_NetWkstaUserLogoff_REQ) /* req string    */
-			+sizeof(RAP_USER_LOGOFF_INFO_L1)    /* return string */
-			+RAP_USERNAME_LEN+1                 /* user name+pad */
-			+RAP_MACHNAME_LEN                   /* wksta name    */
-			+WORDSIZE                           /* buffer size   */
-			+WORDSIZE];                         /* buffer size?  */
-	char upperbuf[MAX(RAP_USERNAME_LEN,RAP_MACHNAME_LEN)];
-	int res = -1;
-	char *tmp = NULL;
-
-	memset(param, 0, sizeof(param));
-
-	/* send a SMBtrans command with api NetWkstaUserLogoff */
-	p = make_header(param, RAP_WWkstaUserLogoff,
-		RAP_NetWkstaUserLogoff_REQ, RAP_USER_LOGOFF_INFO_L1);
-	PUTDWORD(p, 0); /* Null pointer */
-	PUTDWORD(p, 0); /* Null pointer */
-	strlcpy(upperbuf, user, sizeof(upperbuf));
-	if (!strupper_m(upperbuf)) {
-		return false;
-	}
-	tmp = upperbuf;
-	PUTSTRINGF(p, tmp, RAP_USERNAME_LEN);
-	p++; /* strange format, but ok */
-	strlcpy(upperbuf, workstation, sizeof(upperbuf));
-	if (!strupper_m(upperbuf)) {
-		return false;
-	}
-	tmp = upperbuf;
-	PUTSTRINGF(p, tmp, RAP_MACHNAME_LEN);
-	PUTWORD(p, CLI_BUFFER_SIZE);
-	PUTWORD(p, CLI_BUFFER_SIZE);
-
-	if (cli_api(cli,
-			param, PTR_DIFF(p,param),1024,  /* param, length, max */
-			NULL, 0, CLI_BUFFER_SIZE,       /* data, length, max */
-			&rparam, &rprcnt,               /* return params, return size */
-			&rdata, &rdrcnt                 /* return data, return size */
-			)) {
-		char *endp = rparam + rprcnt;
-		res = GETRES(rparam,endp);
-		cli->rap_error = res;
-
-		if (cli->rap_error != 0) {
-			DEBUG(4,("NetwkstaUserLogoff gave error %d\n", cli->rap_error));
-		}
-	}
-
-	SAFE_FREE(rparam);
-	SAFE_FREE(rdata);
-	return (cli->rap_error == 0);
-}
-
 int cli_NetPrintQEnum(struct cli_state *cli,
 		void (*qfn)(const char*,uint16_t,uint16_t,uint16_t,const char*,const char*,const char*,const char*,const char*,uint16_t,uint16_t),
 		void (*jfn)(uint16_t,const char*,const char*,const char*,const char*,uint16_t,uint16_t,const char*,unsigned int,unsigned int,const char*))
@@ -1805,7 +1697,6 @@ int cli_NetPrintQEnum(struct cli_state *cli,
 			&rdata, &rdrcnt)) {
 		char *endp = rparam + rprcnt;
 		res = GETRES(rparam, endp);
-		cli->rap_error = res;
 		if (res != 0) {
 			DEBUG(1,("NetPrintQEnum gave error %d\n", res));
 		}
@@ -1983,7 +1874,6 @@ int cli_NetPrintQGetInfo(struct cli_state *cli, const char *printer,
 			&rdata, &rdrcnt)) {
 		char *endp = rparam + rprcnt;
 		res = GETRES(rparam, endp);
-		cli->rap_error = res;
 		if (res != 0) {
 			DEBUG(1,("NetPrintQGetInfo gave error %d\n", res));
 		}
@@ -2156,11 +2046,10 @@ int cli_RNetServiceEnum(struct cli_state *cli, void (*fn)(const char *, const ch
 			&rdata, &rdrcnt)) {
 		char *endp = rparam + rprcnt;
 		res = GETRES(rparam, endp);
-		cli->rap_error = res;
-		if(cli->rap_error == 234) {
+		if(res == 234) {
 			DEBUG(1,("Not all service names were returned (such as those longer than 15 characters)\n"));
-		} else if (cli->rap_error != 0) {
-			DEBUG(1,("NetServiceEnum gave error %d\n", cli->rap_error));
+		} else if (res != 0) {
+			DEBUG(1,("NetServiceEnum gave error %d\n", res));
 		}
 	}
 
@@ -2239,14 +2128,13 @@ int cli_NetSessionEnum(struct cli_state *cli, void (*fn)(char *, char *, uint16_
 			&rdata, &rdrcnt)) {
 		char *endp = rparam + rprcnt;
 		res = GETRES(rparam, endp);
-		cli->rap_error = res;
 		if (res != 0) {
 			DEBUG(1,("NetSessionEnum gave error %d\n", res));
 		}
 	}
 
 	if (!rdata) {
-		DEBUG(4,("NetSesssionEnum no data returned\n"));
+		DEBUG(4,("NetSessionEnum no data returned\n"));
 		goto out;
 	}
 
@@ -2342,9 +2230,8 @@ int cli_NetSessionGetInfo(struct cli_state *cli, const char *workstation,
 			&rdata, &rdrcnt)) {
 		endp = rparam + rprcnt;
 		res = GETRES(rparam, endp);
-		cli->rap_error = res;
-		if (cli->rap_error != 0) {
-			DEBUG(1,("NetSessionGetInfo gave error %d\n", cli->rap_error));
+		if (res != 0) {
+			DEBUG(1,("NetSessionGetInfo gave error %d\n", res));
 		}
 	}
 
@@ -2440,7 +2327,6 @@ int cli_NetSessionDel(struct cli_state *cli, const char *workstation)
 	{
 		char *endp = rparam + rprcnt;
 		res = GETRES(rparam, endp);
-		cli->rap_error = res;
 
 		if (res == 0) {
 			/* nothing to do */
@@ -2490,7 +2376,6 @@ int cli_NetConnectionEnum(struct cli_state *cli, const char *qualifier,
 			&rdata, &rdrcnt)) {
 		char *endp = rparam + rprcnt;
 		res = GETRES(rparam, endp);
-		cli->rap_error = res;
 		if (res != 0) {
 			DEBUG(1,("NetConnectionEnum gave error %d\n", res));
 		}

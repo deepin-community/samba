@@ -14,7 +14,7 @@ URL: http://ctdb.samba.org/
 Source: ctdb-%{version}.tar.gz
 
 # Packages
-Requires: coreutils, sed, gawk, iptables, iproute, procps, ethtool, sudo
+Requires: coreutils, sed, gawk, iptables, iproute, procps, ethtool
 # Commands - package name might vary
 Requires: /usr/bin/killall, /bin/kill, /bin/ss
 
@@ -109,9 +109,6 @@ make -j
 # Clean up in case there is trash left from a previous build
 rm -rf $RPM_BUILD_ROOT
 
-# Create the target build directory hierarchy
-mkdir -p $RPM_BUILD_ROOT%{_sysconfdir}/sudoers.d
-
 DESTDIR=$RPM_BUILD_ROOT make -j install
 
 install -m644 config/ctdb.conf $RPM_BUILD_ROOT%{_sysconfdir}/ctdb
@@ -154,6 +151,7 @@ if [ ! -L "$required_path" ] && [ ! -e "$required_path" ] ; then
 			 01.reclock
 			 05.system
 			 10.interface
+			 95.database
 			 "
 	for t in $default_scripts ; do
 		tgt="%{_datadir}/ctdb/events/legacy/${t}.script"
@@ -199,9 +197,9 @@ fi
 %doc doc/cluster_mutex_helper.txt
 %doc doc/*.html
 %doc doc/examples
-%{_sysconfdir}/sudoers.d/ctdb
 %dir %{_sysconfdir}/ctdb
 %{_sysconfdir}/ctdb/functions
+%{_sysconfdir}/ctdb/ctdb-backup-persistent-tdbs.sh
 %dir %{_sysconfdir}/ctdb/events
 %{_sysconfdir}/ctdb/events/*
 %dir %{_sysconfdir}/ctdb/nfs-checks.d

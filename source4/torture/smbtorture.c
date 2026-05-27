@@ -1,24 +1,25 @@
-/* 
+/*
    Unix SMB/CIFS implementation.
    SMB torture tester
    Copyright (C) Andrew Tridgell 1997-2003
    Copyright (C) Jelmer Vernooij 2006-2008
-   
+
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
    the Free Software Foundation; either version 3 of the License, or
    (at your option) any later version.
-   
+
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
    GNU General Public License for more details.
-   
+
    You should have received a copy of the GNU General Public License
    along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
 #include "includes.h"
+#include "lib/util/util_file.h"
 #include "lib/cmdline/cmdline.h"
 #include "system/time.h"
 #include "system/wait.h"
@@ -72,7 +73,7 @@ static void print_test_list(const struct torture_suite *suite, const char *prefi
 }
 
 static bool run_matching(struct torture_context *torture,
-						 const char *prefix, 
+						 const char *prefix,
 						 const char *expr,
 						 const char **restricted,
 						 struct torture_suite *suite,
@@ -188,7 +189,7 @@ bool torture_parse_target(TALLOC_CTX *ctx,
 	NTSTATUS status;
 
 	/* see if its a RPC transport specifier */
-	if (!smbcli_parse_unc(target, NULL, &host, &share)) {
+	if (!smbcli_parse_unc(target, ctx, &host, &share)) {
 		const char *h;
 
 		status = dcerpc_parse_binding(ctx, target, &binding_struct);
@@ -210,6 +211,9 @@ bool torture_parse_target(TALLOC_CTX *ctx,
 		lpcfg_set_cmdline(lp_ctx, "torture:host", host);
 		lpcfg_set_cmdline(lp_ctx, "torture:share", share);
 		lpcfg_set_cmdline(lp_ctx, "torture:binding", host);
+
+		TALLOC_FREE(host);
+		TALLOC_FREE(share);
 	}
 
 	return true;
@@ -449,7 +453,7 @@ int main(int argc, const char *argv[])
 		 "run async tests", NULL},
 		{"num-async",    0, POPT_ARG_INT,  &torture_numasync,  0,
 		 "number of simultaneous async requests", NULL},
-		{"maximum-runtime", 0, POPT_ARG_INT, &max_runtime, 0, 
+		{"maximum-runtime", 0, POPT_ARG_INT, &max_runtime, 0,
 		 "set maximum time for smbtorture to live", "seconds"},
 		{"extra-user",   0, POPT_ARG_STRING, NULL, OPT_EXTRA_USER,
 		 "extra user credentials", NULL},
@@ -627,16 +631,16 @@ int main(int argc, const char *argv[])
 	if (extra_module != NULL) {
 		init_module_fn fn = load_module(poptGetOptArg(pc), false, NULL);
 
-		if (fn == NULL) 
+		if (fn == NULL)
 			d_printf("Unable to load module from %s\n", poptGetOptArg(pc));
 		else {
 			status = fn(mem_ctx);
 			if (NT_STATUS_IS_ERR(status)) {
-				d_printf("Error initializing module %s: %s\n", 
+				d_printf("Error initializing module %s: %s\n",
 					poptGetOptArg(pc), nt_errstr(status));
 			}
 		}
-	} else { 
+	} else {
 		torture_init(mem_ctx);
 	}
 
@@ -672,7 +676,7 @@ int main(int argc, const char *argv[])
 
 	if (torture_seed == 0) {
 		torture_seed = time(NULL);
-	} 
+	}
 	printf("Using seed %d\n", torture_seed);
 	srandom(torture_seed);
 
@@ -733,7 +737,7 @@ int main(int argc, const char *argv[])
 
 		/* At this point, we should just have a target string,
 		 * followed by a series of test names. Unless we are in
-		 * shell mode, in which case we don't need anythig more.
+		 * shell mode, in which case we don't need anything more.
 		 */
 
 		if (argc_new < 3) {

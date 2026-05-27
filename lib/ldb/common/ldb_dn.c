@@ -38,7 +38,7 @@
 
 #define LDB_DN_NULL_FAILED(x) if (!(x)) goto failed
 
-#define LDB_FREE(x) do { talloc_free(x); x = NULL; } while(0)
+#define LDB_FREE(x) TALLOC_FREE(x)
 
 /**
    internal ldb exploded dn structures
@@ -232,6 +232,10 @@ static int ldb_dn_escape_internal(char *dst, const char *src, int len)
 		case '\0': {
 			/* any others get \XX form */
 			unsigned char v;
+			/*
+			 * Do not use libreplace for this. We don't want to have
+			 * a hard requirement for it.
+			 */
 			const char *hexbytes = "0123456789ABCDEF";
 			v = (const unsigned char)c;
 			*d++ = '\\';
@@ -927,7 +931,7 @@ char *ldb_dn_alloc_linearized(TALLOC_CTX *mem_ctx, struct ldb_dn *dn)
 
 static bool ldb_dn_casefold_internal(struct ldb_dn *dn)
 {
-	unsigned int i;
+	unsigned int i, j;
 	int ret;
 
 	if ( ! dn || dn->invalid) return false;
@@ -955,18 +959,24 @@ static bool ldb_dn_casefold_internal(struct ldb_dn *dn)
 						 &(dn->components[i].value),
 						 &(dn->components[i].cf_value));
 		if (ret != 0) {
-			goto failed;
+			goto failed_1;
 		}
 	}
 
 	dn->valid_case = true;
 
 	return true;
-
-failed:
-	for (i = 0; i < dn->comp_num; i++) {
-		LDB_FREE(dn->components[i].cf_name);
-		LDB_FREE(dn->components[i].cf_value.data);
+  failed_1:
+	/*
+	 * Although we try to always initialise .cf_name and .cf.value.data to
+	 * NULL, we want to avoid TALLOC_FREEing the values we have not just
+	 * set here.
+	 */
+	TALLOC_FREE(dn->components[i].cf_name);
+  failed:
+	for (j = 0; j < i; j++) {
+		TALLOC_FREE(dn->components[j].cf_name);
+		TALLOC_FREE(dn->components[j].cf_value.data);
 	}
 	return false;
 }
@@ -1038,7 +1048,11 @@ char *ldb_dn_alloc_casefold(TALLOC_CTX *mem_ctx, struct ldb_dn *dn)
 
 /* Determine if dn is below base, in the ldap tree.  Used for
  * evaluating a subtree search.
- * 0 if they match, otherwise non-zero
+ *
+ * 0 if they match, otherwise non-zero.
+ *
+ * This is not for use in a qsort()-like function, as the comparison
+ * is not symmetric.
  */
 
 int ldb_dn_compare_base(struct ldb_dn *base, struct ldb_dn *dn)
@@ -1053,13 +1067,15 @@ int ldb_dn_compare_base(struct ldb_dn *base, struct ldb_dn *dn)
 		if (base->linearized && dn->linearized && dn->special == base->special) {
 			/* try with a normal compare first, if we are lucky
 			 * we will avoid exploding and casefolding */
-			int dif;
-			dif = strlen(dn->linearized) - strlen(base->linearized);
-			if (dif < 0) {
-				return dif;
+			size_t len_dn = strlen(dn->linearized);
+			size_t len_base = strlen(base->linearized);
+
+			if (len_dn < len_base) {
+				return -1;
 			}
+
 			if (strcmp(base->linearized,
-				   &dn->linearized[dif]) == 0) {
+				   &dn->linearized[len_dn - len_base]) == 0) {
 				return 0;
 			}
 		}
@@ -1111,7 +1127,7 @@ int ldb_dn_compare_base(struct ldb_dn *base, struct ldb_dn *dn)
 
 		/* compare attr.cf_value. */
 		if (b_vlen != dn_vlen) {
-			return b_vlen - dn_vlen;
+			return NUMERIC_CMP(b_vlen, dn_vlen);
 		}
 		ret = strncmp(b_vdata, dn_vdata, b_vlen);
 		if (ret != 0) return ret;
@@ -1132,12 +1148,37 @@ int ldb_dn_compare(struct ldb_dn *dn0, struct ldb_dn *dn1)
 {
 	unsigned int i;
 	int ret;
+	/*
+	 * If used in sort, we shift NULL and invalid DNs to the end.
+	 *
+	 * If ldb_dn_casefold_internal() fails, that goes to the end too, so
+	 * we end up with:
+	 *
+	 * | normal DNs, sorted | casefold failed DNs | invalid DNs | NULLs |
+	 */
 
-	if (( ! dn0) || dn0->invalid || ! dn1 || dn1->invalid) {
+	if (dn0 == dn1) {
+		/* this includes the both-NULL case */
+		return 0;
+	}
+	if (dn0 == NULL) {
+		return 1;
+	}
+	if (dn1 == NULL) {
+		return -1;
+	}
+	if (dn0->invalid && dn1->invalid) {
+		return 0;
+	}
+	if (dn0->invalid) {
+		return 1;
+	}
+	if (dn1->invalid) {
 		return -1;
 	}
 
 	if (( ! dn0->valid_case) || ( ! dn1->valid_case)) {
+		bool ok0, ok1;
 		if (dn0->linearized && dn1->linearized) {
 			/* try with a normal compare first, if we are lucky
 			 * we will avoid exploding and casefolding */
@@ -1145,19 +1186,31 @@ int ldb_dn_compare(struct ldb_dn *dn0, struct ldb_dn *dn1)
 				return 0;
 			}
 		}
-
-		if ( ! ldb_dn_casefold_internal(dn0)) {
+		/*
+		 * If a DN can't casefold, it goes to the end.
+		 */
+		ok0 = ldb_dn_casefold_internal(dn0);
+		ok1 = ldb_dn_casefold_internal(dn1);
+		if (! ok0) {
+			if (! ok1) {
+				return 0;
+			}
 			return 1;
 		}
-
-		if ( ! ldb_dn_casefold_internal(dn1)) {
+		if (! ok1) {
 			return -1;
 		}
-
 	}
 
-	if (dn0->comp_num != dn1->comp_num) {
-		return (dn1->comp_num - dn0->comp_num);
+	/*
+	 * Notice that for comp_num, Samba reverses the usual order of
+	 * comparison. A DN with fewer components is greater than one
+	 * with more.
+	 */
+	if (dn0->comp_num > dn1->comp_num) {
+		return -1;
+	} else if (dn0->comp_num < dn1->comp_num) {
+		return 1;
 	}
 
 	if (dn0->comp_num == 0) {
@@ -1190,7 +1243,7 @@ int ldb_dn_compare(struct ldb_dn *dn0, struct ldb_dn *dn1)
 
 		/* compare attr.cf_value. */
 		if (dn0_vlen != dn1_vlen) {
-			return dn0_vlen - dn1_vlen;
+			return NUMERIC_CMP(dn0_vlen, dn1_vlen);
 		}
 		ret = strncmp(dn0_vdata, dn1_vdata, dn0_vlen);
 		if (ret != 0) {
@@ -1360,6 +1413,22 @@ struct ldb_dn *ldb_dn_copy(TALLOC_CTX *mem_ctx, struct ldb_dn *dn)
 		}
 	}
 
+	return new_dn;
+}
+
+struct ldb_dn *ldb_dn_copy_with_ldb_context(TALLOC_CTX *mem_ctx,
+					    struct ldb_dn *dn,
+					    struct ldb_context *ldb)
+{
+	struct ldb_dn *new_dn = NULL;
+
+	new_dn = ldb_dn_copy(mem_ctx, dn);
+	if (new_dn == NULL) {
+		return NULL;
+	}
+
+	/* Set the ldb context. */
+	new_dn->ldb = ldb;
 	return new_dn;
 }
 
@@ -2036,7 +2105,7 @@ int ldb_dn_set_extended_component(struct ldb_dn *dn,
 	unsigned int i;
 	struct ldb_val v2;
 	const struct ldb_dn_extended_syntax *ext_syntax;
-	
+
 	if ( ! ldb_dn_validate(dn)) {
 		return LDB_ERR_OTHER;
 	}

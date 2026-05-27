@@ -1,0 +1,46 @@
+From: Michael Tokarev <mjt@tls.msk.ru>
+Subject: replace: use __xpg_strerror_r if available
+Date: Fri, 07 Feb 2025 10:04:37 +0300
+Forwarded: no
+
+In order to avoid linking libreplace, use __xpg_strerror_r
+instead of rep_strerror_r
+
+diff --git a/lib/replace/replace.c b/lib/replace/replace.c
+index f7f26712614..d6b1383c2ea 100644
+--- a/lib/replace/replace.c
++++ b/lib/replace/replace.c
+@@ -825,5 +825,5 @@ int rep_strerror_r(int errnum, char *buf, size_t buflen)
+ 	return 0;
+ }
+-#elif (!defined(STRERROR_R_XSI_NOT_GNU))
++#elif (!defined(STRERROR_R_XSI_NOT_GNU)) && (!defined(HAVE___XPG_STRERROR_R))
+ #undef strerror_r
+ int rep_strerror_r(int errnum, char *buf, size_t buflen)
+diff --git a/lib/replace/replace.h b/lib/replace/replace.h
+index 4923e1f301d..2d510b041df 100644
+--- a/lib/replace/replace.h
++++ b/lib/replace/replace.h
+@@ -644,7 +644,12 @@ char *rep_get_current_dir_name(void);
+ 
+ #if (!defined(HAVE_STRERROR_R) || !defined(STRERROR_R_XSI_NOT_GNU))
++#if defined(HAVE___XPG_STRERROR_R)
++extern int __xpg_strerror_r (int, char *, size_t);
++#  define strerror_r __xpg_strerror_r
++#else
+ #define strerror_r rep_strerror_r
+ int rep_strerror_r(int errnum, char *buf, size_t buflen);
+ #endif
++#endif
+ 
+ #if !defined(HAVE_CLOCK_GETTIME)
+diff --git a/lib/replace/wscript b/lib/replace/wscript
+index 9c0cb7047f1..58f1f794726 100644
+--- a/lib/replace/wscript
++++ b/lib/replace/wscript
+@@ -495,4 +495,5 @@ def configure(conf):
+                         )
+     conf.CHECK_FUNCS('if_nameindex if_nametoindex strerror_r')
++    conf.CHECK_FUNCS('__xpg_strerror_r')
+     conf.CHECK_FUNCS('syslog')
+     conf.CHECK_FUNCS('gai_strerror get_current_dir_name')

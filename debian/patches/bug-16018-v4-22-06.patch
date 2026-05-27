@@ -1,0 +1,4354 @@
+Subject: samba May-2026 security fixes
+Date: Fri, 15 May 2026 06:29:04 +0300
+Origin: upstream, https://bugzilla.samba.org/show_bug.cgi?id=16018
+Forwarded: not-needed
+
+This is bug-16018-v4-22-06.patch, with addition+deletion of
+selftest/knownfail.d/vfs-worm commented-out (as dpkg does not
+handle this situation well).
+
+From f428950037af7a8e96b625b3bfc6e33fb7162aa3 Mon Sep 17 00:00:00 2001
+From: Volker Lendecke <vl@samba.org>
+Date: Thu, 5 Feb 2026 20:24:12 +0100
+Subject: [PATCH 01/31] CVE-2026-1933 tests: Fix permissions used for creating
+ reparse points
+
+SEC_STD_ALL does not lead to fsp->access_mask to include the required
+bits.
+
+Bug: https://bugzilla.samba.org/show_bug.cgi?id=15992
+Signed-off-by: Volker Lendecke <vl@samba.org>
+Reviewed-by: Stefan Metzmacher <metze@samba.org>
+---
+ python/samba/tests/smb3unix.py | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/python/samba/tests/smb3unix.py b/python/samba/tests/smb3unix.py
+index 5c8ab182061..5ecb02fbaed 100644
+--- a/python/samba/tests/smb3unix.py
++++ b/python/samba/tests/smb3unix.py
+@@ -429,7 +429,7 @@ class Smb3UnixTests(samba.tests.libsmb.LibsmbTests):
+ 
+             wire_mode = libsmb.unix_mode_to_wire(0o600)
+             f,_,cc_out = c.create_ex('\\reparse',
+-                                     DesiredAccess=security.SEC_STD_ALL,
++                                     DesiredAccess=security.SEC_FILE_WRITE_ATTRIBUTE,
+                                      CreateDisposition=libsmb.FILE_CREATE,
+                                      CreateContexts=[posix_context(wire_mode)])
+ 
+@@ -443,7 +443,7 @@ class Smb3UnixTests(samba.tests.libsmb.LibsmbTests):
+ 
+             wire_mode = libsmb.unix_mode_to_wire(0o600)
+             f,_,cc_out = c.create_ex('\\reparse',
+-                                     DesiredAccess=security.SEC_STD_ALL,
++                                     DesiredAccess=security.SEC_FILE_WRITE_ATTRIBUTE,
+                                      CreateDisposition=libsmb.FILE_OPEN,
+                                      CreateContexts=[posix_context(wire_mode)])
+             c.close(f)
+-- 
+2.43.0
+
+
+From 6d66d708ba745212f0b0a57134027a5e74f29f33 Mon Sep 17 00:00:00 2001
+From: Stefan Metzmacher <metze@samba.org>
+Date: Mon, 2 Feb 2026 11:43:37 +0100
+Subject: [PATCH 02/31] CVE-2026-1933 smbd: Add access checks to reparse point
+ operations
+
+On a share marked "read only = yes" and on file handles opened R/O
+users can set or delete the reparse point xattrs on files that the
+user has write-access in the file system for. Add the required access
+checks.
+
+Thanks to Asim Viladi Oglu Manizada for reporting the issue.
+
+Bug: https://bugzilla.samba.org/show_bug.cgi?id=15992
+Signed-off-by: Stefan Metzmacher <metze@samba.org>
+Reviewed-by: Volker Lendecke <vl@samba.org>
+---
+ source3/modules/util_reparse.c | 16 ++++++++++++++++
+ 1 file changed, 16 insertions(+)
+
+diff --git a/source3/modules/util_reparse.c b/source3/modules/util_reparse.c
+index 60373d7fd4e..75aa745e070 100644
+--- a/source3/modules/util_reparse.c
++++ b/source3/modules/util_reparse.c
+@@ -320,6 +320,14 @@ NTSTATUS fsctl_set_reparse_point(struct files_struct *fsp,
+ 		return NT_STATUS_ACCESS_DENIED;
+ 	}
+ 
++	if ((fsp->fsp_name->twrp != 0) ||
++	    ((fsp->access_mask &
++	      (SEC_FILE_WRITE_DATA | SEC_FILE_WRITE_ATTRIBUTE)) == 0))
++	{
++		DBG_DEBUG("Access denied on a readonly handle\n");
++		return NT_STATUS_ACCESS_DENIED;
++	}
++
+ 	status = reparse_buffer_check(in_data,
+ 				      in_len,
+ 				      &reparse_tag,
+@@ -390,6 +398,14 @@ NTSTATUS fsctl_del_reparse_point(struct files_struct *fsp,
+ 	uint32_t dos_mode;
+ 	int ret;
+ 
++	if ((fsp->fsp_name->twrp != 0) ||
++	    ((fsp->access_mask &
++	      (SEC_FILE_WRITE_DATA | SEC_FILE_WRITE_ATTRIBUTE)) == 0))
++	{
++		DBG_DEBUG("Access denied on a readonly handle\n");
++		return NT_STATUS_ACCESS_DENIED;
++	}
++
+ 	status = fsctl_get_reparse_tag(fsp, &existing_tag);
+ 	if (!NT_STATUS_IS_OK(status)) {
+ 		return status;
+-- 
+2.43.0
+
+
+From 951e86f69b65378c1eb602b7e3199299790ee3ff Mon Sep 17 00:00:00 2001
+From: Douglas Bagnall <douglas.bagnall@catalyst.net.nz>
+Date: Thu, 19 Feb 2026 12:50:38 +1300
+Subject: [PATCH 03/31] CVE-2026-2340: test whether vfs_worm allows overwrite
+
+BUG: https://bugzilla.samba.org/show_bug.cgi?id=15997
+
+Signed-off-by: Douglas Bagnall <douglas.bagnall@catalyst.net.nz>
+Reviewed-by: Volker Lendecke <vl@samba.org>
+---
+ selftest/knownfail.d/vfs-worm     |  2 ++
+ source3/script/tests/test_worm.sh | 30 ++++++++++++++++++++++++++++++
+ 2 files changed, 32 insertions(+)
+ create mode 100644 selftest/knownfail.d/vfs-worm
+
+#diff --git a/selftest/knownfail.d/vfs-worm b/selftest/knownfail.d/vfs-worm
+#new file mode 100644
+#index 00000000000..f4a330c744b
+#--- /dev/null
+#+++ b/selftest/knownfail.d/vfs-worm
+#@@ -0,0 +1,2 @@
+#+^samba3.blackbox.worm.SMB3
+#+^samba3.blackbox.worm.NT1
+diff --git a/source3/script/tests/test_worm.sh b/source3/script/tests/test_worm.sh
+index f96c8ec7e47..d38488cb790 100755
+--- a/source3/script/tests/test_worm.sh
++++ b/source3/script/tests/test_worm.sh
+@@ -40,6 +40,7 @@ do_cleanup()
+ 		#subshell.
+ 		cd "$share_test_dir" || return
+ 		rm -f must-be-deleted must-not-be-deleted must-be-deleted-after-ctime-refresh
++		rm -f must-not-be-overwritten sentinel-value
+ 	)
+ 	rm -f $tmpfile
+ }
+@@ -51,6 +52,10 @@ do_cleanup
+ 
+ tmpfile=$PREFIX/smbclient_interactive_prompt_commands
+ 
++tmp_sentinel=$PREFIX/sentinel_value
++SENTINEL_VALUE='1'
++echo $SENTINEL_VALUE > $tmp_sentinel
++
+ test_worm()
+ {
+ 	# use echo because helo scripts don't support variables
+@@ -58,6 +63,7 @@ test_worm()
+ put $tmpfile must-be-deleted
+ put $tmpfile must-be-deleted-after-ctime-refresh
+ put $tmpfile must-not-be-deleted
++put $tmpfile must-not-be-overwritten
+ del must-be-deleted
+ quit" > $tmpfile
+ 	# make sure the directory is not too old for worm:
+@@ -97,6 +103,30 @@ quit" > $tmpfile
+ 		printf "$0: ERROR: must-not-be-deleted WAS deleted\n"
+ 		return 1
+ 	}
++
++	# Check we can't change a protected file by renaming over it.
++	# The source file needs to recently created or access will be
++	# denied before RENAME_AT is reached, which is the thing we
++	# want to test.
++	original_contents=`cat $share_test_dir/must-not-be-overwritten`
++	echo "
++put $tmp_sentinel sentinel-value
++rename sentinel-value must-not-be-overwritten  -f
++quit" > $tmpfile
++	cmd='CLI_FORCE_INTERACTIVE=yes $SMBCLIENT -U$USERNAME%$PASSWORD //$SERVER/worm -I$SERVER_IP $ADDARGS < $tmpfile 2>&1'
++	eval echo "$cmd"
++	out=$(eval "$cmd")
++	new_contents=`cat $share_test_dir/must-not-be-overwritten`
++
++	if [ "$new_contents" = "$SENTINEL_VALUE" ]; then
++	    echo "must-not-be-overwritten was overwritten"
++	    return 1
++	fi
++	if [ "$new_contents" != "$original_contents" ]; then
++	    echo "must-not-be-overwritten was changed (but not precisely overwritten)"
++	    return 1
++	fi
++
+ 	# if we're not root, return here:
+ 	test "$UID" = "0" ||  {
+ 		return 0
+-- 
+2.43.0
+
+
+From de161a5e97c8c9ec921e957a3d550b9f5eeaf00c Mon Sep 17 00:00:00 2001
+From: Pavel Kohout <pavel@aisle.com>
+Date: Fri, 13 Feb 2026 15:51:41 +1300
+Subject: [PATCH 04/31] CVE-2026-2340: vfs_worm: Check destination WORM status
+ in rename
+
+vfs_worm_renameat() only checked if the source file was WORM-protected,
+but not the destination. This allowed overwriting immutable files via
+SMB2 rename with ReplaceIfExists=1, bypassing WORM protection.
+
+Add destination check using FSTATAT on the destination dirfsp, as
+suggested by the maintainer.
+
+CWE-284 (Improper Access Control)
+
+Reported-by: Pavel Kohout, Aisle Research, www.aisle.com
+
+BUG: https://bugzilla.samba.org/show_bug.cgi?id=15997
+
+To backport to 4.22 we change the name of dst_dirfsp and src_dirfsp to
+dstfsp and srcfsp, respectively (accounting for
+76796180cf3af3252db2c29d0e95282a498a8527 in 4.24/master).
+
+Signed-off-by: Pavel Kohout <pavel.kohout@aisle.com>
+Reviewed-by: Volker Lendecke <vl@samba.org>
+Reviewed-by: Douglas Bagnall <douglas.bagnall@catalyst.net.nz>
+---
+ selftest/knownfail.d/vfs-worm |  2 --
+ source3/modules/vfs_worm.c    | 26 ++++++++++++++++++++++++--
+ 2 files changed, 24 insertions(+), 4 deletions(-)
+ delete mode 100644 selftest/knownfail.d/vfs-worm
+
+#diff --git a/selftest/knownfail.d/vfs-worm b/selftest/knownfail.d/vfs-worm
+#deleted file mode 100644
+#index f4a330c744b..00000000000
+#--- a/selftest/knownfail.d/vfs-worm
+#+++ /dev/null
+#@@ -1,2 +0,0 @@
+#-^samba3.blackbox.worm.SMB3
+#-^samba3.blackbox.worm.NT1
+diff --git a/source3/modules/vfs_worm.c b/source3/modules/vfs_worm.c
+index 0fcda162cd7..a1dca280279 100644
+--- a/source3/modules/vfs_worm.c
++++ b/source3/modules/vfs_worm.c
+@@ -218,13 +218,35 @@ static int vfs_worm_renameat(vfs_handle_struct *handle,
+ 			     const struct smb_filename *smb_fname_dst,
+ 			     const struct vfs_rename_how *how)
+ {
++	struct stat_ex dst_st;
++	int ret;
++
+ 	if (is_readonly(handle, smb_fname_src)) {
+ 		errno = EACCES;
+ 		return -1;
+ 	}
+ 
+-	return SMB_VFS_NEXT_RENAMEAT(
+-		handle, srcfsp, smb_fname_src, dstfsp, smb_fname_dst, how);
++	/* Check if destination is WORM-protected (fixes CVE-2026-2340) */
++	ret = SMB_VFS_FSTATAT(handle->conn,
++			      dstfsp,
++			      smb_fname_dst,
++			      &dst_st,
++			      AT_SYMLINK_NOFOLLOW);
++	if (ret == 0) {
++		struct smb_filename dst_with_stat = *smb_fname_dst;
++		dst_with_stat.st = dst_st;
++		if (is_readonly(handle, &dst_with_stat)) {
++			errno = EACCES;
++			return -1;
++		}
++	}
++
++	return SMB_VFS_NEXT_RENAMEAT(handle,
++				     srcfsp,
++				     smb_fname_src,
++				     dstfsp,
++				     smb_fname_dst,
++				     how);
+ }
+ 
+ static int vfs_worm_fsetxattr(struct vfs_handle_struct *handle,
+-- 
+2.43.0
+
+
+From 3fb934109f998e6b0dba9d683dc9079d5840eb8a Mon Sep 17 00:00:00 2001
+From: Douglas Bagnall <douglas.bagnall@catalyst.net.nz>
+Date: Fri, 27 Feb 2026 11:30:40 +1300
+Subject: [PATCH 05/31] CVE-2026-3012: gpo tests: fix test cleanup
+
+These tests are going to fail soon but as currently written they do
+not clean up after themselves, erroring instead of failing and causing
+cascading errors in subsequent tests. For now we don't care to make
+the other tests less fragile.
+
+BUG: https://bugzilla.samba.org/show_bug.cgi?id=16003
+
+Signed-off-by: Douglas Bagnall <douglas.bagnall@catalyst.net.nz>
+Reviewed-by: Jennifer Sutton <jennifersutton@catalyst.net.nz>
+---
+ python/samba/tests/gpo.py | 42 +++++++++++++++++++++++----------------
+ 1 file changed, 25 insertions(+), 17 deletions(-)
+
+diff --git a/python/samba/tests/gpo.py b/python/samba/tests/gpo.py
+index 2e4696cd926..0972cd2f63c 100644
+--- a/python/samba/tests/gpo.py
++++ b/python/samba/tests/gpo.py
+@@ -6951,6 +6951,7 @@ class GPOTests(tests.TestCase):
+         confdn = 'CN=Public Key Services,CN=Services,CN=Configuration,%s' % base_dn
+         ca_cn = '%s-CA' % hostname.replace('.', '-')
+         certa_dn = 'CN=%s,CN=Certification Authorities,%s' % (ca_cn, confdn)
++        self.addCleanup(ldb.delete, certa_dn)
+         ldb.add({'dn': certa_dn,
+                  'objectClass': 'certificationAuthority',
+                  'authorityRevocationList': ['XXX'],
+@@ -6959,6 +6960,7 @@ class GPOTests(tests.TestCase):
+                 })
+         # Write the dummy pKIEnrollmentService
+         enroll_dn = 'CN=%s,CN=Enrollment Services,%s' % (ca_cn, confdn)
++        self.addCleanup(ldb.delete, enroll_dn)
+         ldb.add({'dn': enroll_dn,
+                  'objectClass': 'pKIEnrollmentService',
+                  'cACertificate': dummy_certificate(),
+@@ -6967,6 +6969,7 @@ class GPOTests(tests.TestCase):
+                 })
+         # Write the dummy pKICertificateTemplate
+         template_dn = 'CN=Machine,CN=Certificate Templates,%s' % confdn
++        self.addCleanup(ldb.delete, template_dn)
+         ldb.add({'dn': template_dn,
+                  'objectClass': 'pKICertificateTemplate',
+                 })
+@@ -7012,11 +7015,6 @@ class GPOTests(tests.TestCase):
+             self.assertNotIn(b'Workstation', out,
+                              'Workstation certificate not removed')
+ 
+-        # Remove the dummy CA, pKIEnrollmentService, and pKICertificateTemplate
+-        ldb.delete(certa_dn)
+-        ldb.delete(enroll_dn)
+-        ldb.delete(template_dn)
+-
+         # Unstage the Registry.pol file
+         unstage_file(reg_pol)
+ 
+@@ -7027,6 +7025,7 @@ class GPOTests(tests.TestCase):
+                                'MACHINE/REGISTRY.POL')
+         cache_dir = self.lp.get('cache directory')
+         store = GPOStorage(os.path.join(cache_dir, 'gpo.tdb'))
++        self.addCleanup(store.log.close)
+ 
+         machine_creds = Credentials()
+         machine_creds.guess(self.lp)
+@@ -7059,6 +7058,7 @@ class GPOTests(tests.TestCase):
+         confdn = 'CN=Public Key Services,CN=Services,CN=Configuration,%s' % base_dn
+         ca_cn = '%s-CA' % hostname.replace('.', '-')
+         certa_dn = 'CN=%s,CN=Certification Authorities,%s' % (ca_cn, confdn)
++        self.addCleanup(ldb.delete, certa_dn)
+         ldb.add({'dn': certa_dn,
+                  'objectClass': 'certificationAuthority',
+                  'authorityRevocationList': ['XXX'],
+@@ -7067,6 +7067,7 @@ class GPOTests(tests.TestCase):
+                 })
+         # Write the dummy pKIEnrollmentService
+         enroll_dn = 'CN=%s,CN=Enrollment Services,%s' % (ca_cn, confdn)
++        self.addCleanup(ldb.delete, enroll_dn)
+         ldb.add({'dn': enroll_dn,
+                  'objectClass': 'pKIEnrollmentService',
+                  'cACertificate': b'0\x82\x03u0\x82\x02]\xa0\x03\x02\x01\x02\x02\x10I',
+@@ -7075,12 +7076,16 @@ class GPOTests(tests.TestCase):
+                 })
+         # Write the dummy pKICertificateTemplate
+         template_dn = 'CN=Machine,CN=Certificate Templates,%s' % confdn
++        self.addCleanup(ldb.delete, template_dn)
+         ldb.add({'dn': template_dn,
+                  'objectClass': 'pKICertificateTemplate',
+                 })
+ 
+         with TemporaryDirectory() as dname:
+-            ext.process_group_policy([], gpos, dname, dname)
++            try:
++                ext.process_group_policy([], gpos, dname, dname)
++            except Exception as e:
++                self.fail(f"process_group_policy() raised {e}")
+             ca_crt = os.path.join(dname, '%s.crt' % ca_cn)
+             self.assertTrue(os.path.exists(ca_crt),
+                             'Root CA certificate was not requested')
+@@ -7169,11 +7174,6 @@ class GPOTests(tests.TestCase):
+             self.assertNotIn(b'Workstation', out,
+                              'Workstation certificate not removed')
+ 
+-        # Remove the dummy CA, pKIEnrollmentService, and pKICertificateTemplate
+-        ldb.delete(certa_dn)
+-        ldb.delete(enroll_dn)
+-        ldb.delete(template_dn)
+-
+         # Unstage the Registry.pol file
+         unstage_file(reg_pol)
+ 
+@@ -7626,6 +7626,7 @@ class GPOTests(tests.TestCase):
+                                'MACHINE/REGISTRY.POL')
+         cache_dir = self.lp.get('cache directory')
+         store = GPOStorage(os.path.join(cache_dir, 'gpo.tdb'))
++        self.addCleanup(store.log.close)
+ 
+         machine_creds = Credentials()
+         machine_creds.guess(self.lp)
+@@ -7667,6 +7668,8 @@ class GPOTests(tests.TestCase):
+         confdn = 'CN=Public Key Services,CN=Services,CN=Configuration,%s' % base_dn
+         ca_cn = '%s-CA' % hostname.replace('.', '-')
+         certa_dn = 'CN=%s,CN=Certification Authorities,%s' % (ca_cn, confdn)
++        self.addCleanup(ldb.delete, certa_dn)
++
+         ldb.add({'dn': certa_dn,
+                  'objectClass': 'certificationAuthority',
+                  'authorityRevocationList': ['XXX'],
+@@ -7675,6 +7678,7 @@ class GPOTests(tests.TestCase):
+                 })
+         # Write the dummy pKIEnrollmentService
+         enroll_dn = 'CN=%s,CN=Enrollment Services,%s' % (ca_cn, confdn)
++        self.addCleanup(ldb.delete, enroll_dn)
+         ldb.add({'dn': enroll_dn,
+                  'objectClass': 'pKIEnrollmentService',
+                  'cACertificate': b'0\x82\x03u0\x82\x02]\xa0\x03\x02\x01\x02\x02\x10I',
+@@ -7683,12 +7687,21 @@ class GPOTests(tests.TestCase):
+                 })
+         # Write the dummy pKICertificateTemplate
+         template_dn = 'CN=Machine,CN=Certificate Templates,%s' % confdn
++        try:
++            ldb.delete(template_dn)
++        except _ldb.LdbError:
++            pass
++
++        self.addCleanup(ldb.delete, template_dn)
+         ldb.add({'dn': template_dn,
+                  'objectClass': 'pKICertificateTemplate',
+                 })
+ 
+         with TemporaryDirectory() as dname:
+-            ext.process_group_policy([], gpos, dname, dname)
++            try:
++                ext.process_group_policy([], gpos, dname, dname)
++            except Exception as e:
++                self.fail(f"process_group_policy() raised {e}")
+             ca_list = [ca_cn, 'example0-com-CA', 'example1-com-CA',
+                        'example2-com-CA']
+             for ca in ca_list:
+@@ -7751,11 +7764,6 @@ class GPOTests(tests.TestCase):
+             self.assertNotIn(b'Workstation', out,
+                              'Workstation certificate not removed')
+ 
+-        # Remove the dummy CA, pKIEnrollmentService, and pKICertificateTemplate
+-        ldb.delete(certa_dn)
+-        ldb.delete(enroll_dn)
+-        ldb.delete(template_dn)
+-
+         # Unstage the Registry.pol file
+         unstage_file(reg_pol)
+ 
+-- 
+2.43.0
+
+
+From 49d2957c454c8ee2bd7d7cb1cf88b6e8b68cc2da Mon Sep 17 00:00:00 2001
+From: Douglas Bagnall <douglas.bagnall@catalyst.net.nz>
+Date: Mon, 23 Feb 2026 11:01:57 +1300
+Subject: [PATCH 06/31] CVE-2026-3012: do not fetch certificate over http
+
+In the case where a certificate was found via HTTP, it was trusted
+without verification and put in the global CA store.
+
+There is no means to check the certificate other than by comparing it
+to certificates we may have gathered via LDAP, but in that case there
+is no advantage over just using the LDAP-derived certificates.
+
+Using the LDAP certificates was already the fallback case if HTTP
+failed, so we just make it the default.
+
+The HTTP fetch depends on the NDES service, which is a variant of
+Simple Certificate Enrolment Protocol (SCEP, RFC8894), but in fact
+Samba implements none of that protocol other than the HTTP fetch. SCEP
+is for clients that are not true domain members. Domain members can
+access to certificates over LDAP. This patch is not reducing SCEP
+client support because Samba never had it.
+
+BUG: https://bugzilla.samba.org/show_bug.cgi?id=16003
+
+Reported-by: Arad Inbar, DREAM Security Research Team
+Reported-by: Nir Somech, DREAM Security Research Team
+Reported-by: Ben Grinberg, DREAM Security Research Team
+
+Signed-off-by: Douglas Bagnall <douglas.bagnall@catalyst.net.nz>
+Reviewed-by: Jennifer Sutton <jennifersutton@catalyst.net.nz>
+---
+ python/samba/gp/gp_cert_auto_enroll_ext.py | 54 ++++------------------
+ selftest/knownfail.d/gpo-auto-enrol        |  2 +
+ 2 files changed, 11 insertions(+), 45 deletions(-)
+ create mode 100644 selftest/knownfail.d/gpo-auto-enrol
+
+diff --git a/python/samba/gp/gp_cert_auto_enroll_ext.py b/python/samba/gp/gp_cert_auto_enroll_ext.py
+index 877659b043e..815436e11e9 100644
+--- a/python/samba/gp/gp_cert_auto_enroll_ext.py
++++ b/python/samba/gp/gp_cert_auto_enroll_ext.py
+@@ -16,7 +16,6 @@
+ 
+ import os
+ import operator
+-import requests
+ from samba.gp.gpclass import gp_pol_ext, gp_applier, GPOSTATE
+ from samba import Ldb
+ from samba.dcerpc import misc
+@@ -195,58 +194,24 @@ def get_supported_templates(server):
+     return out.strip().split()
+ 
+ 
+-def getca(ca, url, trust_dir):
+-    """Fetch Certificate Chain from the CA."""
++def getca(ca, trust_dir):
++    """Fetch a certificate from LDAP."""
+     root_cert = os.path.join(trust_dir, '%s.crt' % ca['name'])
+     root_certs = []
+-
+-    try:
+-        r = requests.get(url=url, params={'operation': 'GetCACert',
+-                                          'message': 'CAIdentifier'})
+-    except requests.exceptions.ConnectionError:
+-        log.warn('Could not connect to Network Device Enrollment Service.')
+-        r = None
+-    if r is None or r.content == b'' or r.headers['Content-Type'] == 'text/html':
+-        log.warn('Unable to fetch root certificates (requires NDES).')
+-        if 'cACertificate' in ca:
+-            log.warn('Installing the server certificate only.')
+-            der_certificate = base64.b64decode(ca['cACertificate'])
+-            try:
+-                cert = load_der_x509_certificate(der_certificate)
+-            except TypeError:
+-                cert = load_der_x509_certificate(der_certificate,
+-                                                 default_backend())
+-            cert_data = cert.public_bytes(Encoding.PEM)
+-            with open(root_cert, 'wb') as w:
+-                w.write(cert_data)
+-            root_certs.append(root_cert)
+-        return root_certs
+-
+-    if r.headers['Content-Type'] == 'application/x-x509-ca-cert':
+-        # Older versions of load_der_x509_certificate require a backend param
++    if 'cACertificate' in ca:
++        log.warn('Installing the server certificate only.')
++        der_certificate = base64.b64decode(ca['cACertificate'])
+         try:
+-            cert = load_der_x509_certificate(r.content)
++            cert = load_der_x509_certificate(der_certificate)
+         except TypeError:
+-            cert = load_der_x509_certificate(r.content, default_backend())
++            cert = load_der_x509_certificate(der_certificate,
++                                             default_backend())
+         cert_data = cert.public_bytes(Encoding.PEM)
+         with open(root_cert, 'wb') as w:
+             w.write(cert_data)
+         root_certs.append(root_cert)
+-    elif r.headers['Content-Type'] == 'application/x-x509-ca-ra-cert':
+-        certs = load_der_pkcs7_certificates(r.content)
+-        for i in range(0, len(certs)):
+-            cert = certs[i].public_bytes(Encoding.PEM)
+-            filename, extension = root_cert.rsplit('.', 1)
+-            dest = '%s.%d.%s' % (filename, i, extension)
+-            with open(dest, 'wb') as w:
+-                w.write(cert)
+-            root_certs.append(dest)
+-    else:
+-        log.warn('getca: Wrong (or missing) MIME content type')
+-
+     return root_certs
+ 
+-
+ def find_global_trust_dir():
+     """Return the global trust dir using known paths from various Linux distros."""
+     for trust_dir in global_trust_dirs:
+@@ -266,11 +231,10 @@ def changed(new_data, old_data):
+ def cert_enroll(ca, ldb, trust_dir, private_dir, auth='Kerberos'):
+     """Install the root certificate chain."""
+     data = dict({'files': [], 'templates': []}, **ca)
+-    url = 'http://%s/CertSrv/mscep/mscep.dll/pkiclient.exe?' % ca['hostname']
+ 
+     log.info("Try to get root or server certificates")
+ 
+-    root_certs = getca(ca, url, trust_dir)
++    root_certs = getca(ca, trust_dir)
+     data['files'].extend(root_certs)
+     global_trust_dir = find_global_trust_dir()
+     for src in root_certs:
+diff --git a/selftest/knownfail.d/gpo-auto-enrol b/selftest/knownfail.d/gpo-auto-enrol
+new file mode 100644
+index 00000000000..4bf4b8e3c72
+--- /dev/null
++++ b/selftest/knownfail.d/gpo-auto-enrol
+@@ -0,0 +1,2 @@
++^samba\.tests\.gpo\.samba\.tests\.gpo\.GPOTests\.test_advanced_gp_cert_auto_enroll_ext\(ad_dc:local\)
++^samba\.tests\.gpo\.samba\.tests\.gpo\.GPOTests\.test_gp_cert_auto_enroll_ext\(ad_dc:local\)
+-- 
+2.43.0
+
+
+From 3bf714a1d5acb763edcaeebbc0ad5490998caa4c Mon Sep 17 00:00:00 2001
+From: Douglas Bagnall <douglas.bagnall@catalyst.net.nz>
+Date: Thu, 26 Feb 2026 14:21:01 +1300
+Subject: [PATCH 07/31] CVE-2026-3012: gp_auto_enrol: skip CAs not found in
+ LDAP
+
+If a certificate is mentioned in a GPO but is not present as a
+cACertificate attribute on a pKIEnrollmentService object, we have no way
+of obtaining it, so we might as well forget it.
+
+BUG: https://bugzilla.samba.org/show_bug.cgi?id=16003
+
+Signed-off-by: Douglas Bagnall <douglas.bagnall@catalyst.net.nz>
+Reviewed-by: Jennifer Sutton <jennifersutton@catalyst.net.nz>
+---
+ python/samba/gp/gp_cert_auto_enroll_ext.py | 10 ++++++++++
+ 1 file changed, 10 insertions(+)
+
+diff --git a/python/samba/gp/gp_cert_auto_enroll_ext.py b/python/samba/gp/gp_cert_auto_enroll_ext.py
+index 815436e11e9..de8b310afd9 100644
+--- a/python/samba/gp/gp_cert_auto_enroll_ext.py
++++ b/python/samba/gp/gp_cert_auto_enroll_ext.py
+@@ -452,11 +452,21 @@ class gp_cert_auto_enroll_ext(gp_pol_ext, gp_applier):
+                     # This is a basic configuration.
+                     cas = fetch_certification_authorities(ldb)
+                     for _ca in cas:
++                        if 'cACertificate' not in _ca:
++                            log.warning(f"ignoring CA '{_ca['name']}' with no "
++                                        "cACertificate in LDAP.")
++                            continue
++
+                         self.apply(guid, _ca, cert_enroll, _ca, ldb, trust_dir,
+                                    private_dir)
+                         ca_names.append(_ca['name'])
+                 # If EndPoint.URI starts with "HTTPS//":
+                 elif ca['URL'].lower().startswith('https://'):
++                    if 'cACertificate' not in ca:
++                        log.warning(f"ignoring CA '{ca['name']}' "
++                                    f"({ca['URL']}) with no "
++                                    "cACertificate in LDAP.")
++                        continue
+                     self.apply(guid, ca, cert_enroll, ca, ldb, trust_dir,
+                                private_dir, auth=ca['auth'])
+                     ca_names.append(ca['name'])
+-- 
+2.43.0
+
+
+From db80d1ec7a9f8df842ff803b5b6735bebce6dd4c Mon Sep 17 00:00:00 2001
+From: Douglas Bagnall <douglas.bagnall@catalyst.net.nz>
+Date: Fri, 27 Feb 2026 14:46:04 +1300
+Subject: [PATCH 08/31] CVE-2026-3012: gpo tests should use real certificates
+
+Or at least, more real than a short arbitrary byte string, so that
+the certificates can be parsed.
+
+This shows that certificate enrolment works via LDAP in the situations
+where we would have fetched them via HTTP.
+
+This does not fix the advanced_gp_cert_auto_enroll_ext test which
+wants to install certificates it has no access too. This will not be
+fixed in the security release.
+
+BUG: https://bugzilla.samba.org/show_bug.cgi?id=16003
+
+Signed-off-by: Douglas Bagnall <douglas.bagnall@catalyst.net.nz>
+Reviewed-by: Jennifer Sutton <jennifersutton@catalyst.net.nz>
+---
+ python/samba/tests/gpo.py           | 8 ++++----
+ selftest/knownfail.d/gpo-auto-enrol | 1 -
+ 2 files changed, 4 insertions(+), 5 deletions(-)
+
+diff --git a/python/samba/tests/gpo.py b/python/samba/tests/gpo.py
+index 0972cd2f63c..5bdee29b50a 100644
+--- a/python/samba/tests/gpo.py
++++ b/python/samba/tests/gpo.py
+@@ -7062,7 +7062,7 @@ class GPOTests(tests.TestCase):
+         ldb.add({'dn': certa_dn,
+                  'objectClass': 'certificationAuthority',
+                  'authorityRevocationList': ['XXX'],
+-                 'cACertificate': b'0\x82\x03u0\x82\x02]\xa0\x03\x02\x01\x02\x02\x10I',
++                 'cACertificate': dummy_certificate(),
+                  'certificateRevocationList': ['XXX'],
+                 })
+         # Write the dummy pKIEnrollmentService
+@@ -7070,7 +7070,7 @@ class GPOTests(tests.TestCase):
+         self.addCleanup(ldb.delete, enroll_dn)
+         ldb.add({'dn': enroll_dn,
+                  'objectClass': 'pKIEnrollmentService',
+-                 'cACertificate': b'0\x82\x03u0\x82\x02]\xa0\x03\x02\x01\x02\x02\x10I',
++                 'cACertificate': dummy_certificate(),
+                  'certificateTemplates': ['Machine'],
+                  'dNSHostName': hostname,
+                 })
+@@ -7673,7 +7673,7 @@ class GPOTests(tests.TestCase):
+         ldb.add({'dn': certa_dn,
+                  'objectClass': 'certificationAuthority',
+                  'authorityRevocationList': ['XXX'],
+-                 'cACertificate': b'0\x82\x03u0\x82\x02]\xa0\x03\x02\x01\x02\x02\x10I',
++                 'cACertificate': dummy_certificate(),
+                  'certificateRevocationList': ['XXX'],
+                 })
+         # Write the dummy pKIEnrollmentService
+@@ -7681,7 +7681,7 @@ class GPOTests(tests.TestCase):
+         self.addCleanup(ldb.delete, enroll_dn)
+         ldb.add({'dn': enroll_dn,
+                  'objectClass': 'pKIEnrollmentService',
+-                 'cACertificate': b'0\x82\x03u0\x82\x02]\xa0\x03\x02\x01\x02\x02\x10I',
++                 'cACertificate': dummy_certificate(),
+                  'certificateTemplates': ['Machine'],
+                  'dNSHostName': hostname,
+                 })
+diff --git a/selftest/knownfail.d/gpo-auto-enrol b/selftest/knownfail.d/gpo-auto-enrol
+index 4bf4b8e3c72..4b787a5ac86 100644
+--- a/selftest/knownfail.d/gpo-auto-enrol
++++ b/selftest/knownfail.d/gpo-auto-enrol
+@@ -1,2 +1 @@
+ ^samba\.tests\.gpo\.samba\.tests\.gpo\.GPOTests\.test_advanced_gp_cert_auto_enroll_ext\(ad_dc:local\)
+-^samba\.tests\.gpo\.samba\.tests\.gpo\.GPOTests\.test_gp_cert_auto_enroll_ext\(ad_dc:local\)
+-- 
+2.43.0
+
+
+From 114deac3009e76f3fba209194fc59a13b393002a Mon Sep 17 00:00:00 2001
+From: Volker Lendecke <vl@samba.org>
+Date: Tue, 24 Feb 2026 16:11:15 +0100
+Subject: [PATCH 09/31] CVE-2026-3238 winsserver4: Dissolve direct variable
+ initialization
+
+Checks are required before the packet is dereferenced
+
+Bug: https://bugzilla.samba.org/show_bug.cgi?id=16012
+Signed-off-by: Volker Lendecke <vl@samba.org>
+Reviewed-by: Douglas Bagnall <douglas.bagnall@catalyst.net.nz>
+---
+ source4/nbt_server/wins/winsserver.c | 27 +++++++++++++++++++++------
+ 1 file changed, 21 insertions(+), 6 deletions(-)
+
+diff --git a/source4/nbt_server/wins/winsserver.c b/source4/nbt_server/wins/winsserver.c
+index 6679961dc03..1b7fe5641a6 100644
+--- a/source4/nbt_server/wins/winsserver.c
++++ b/source4/nbt_server/wins/winsserver.c
+@@ -460,16 +460,27 @@ static void nbtd_winsserver_register(struct nbt_name_socket *nbtsock,
+ 	struct nbtd_interface *iface = talloc_get_type(nbtsock->incoming.private_data,
+ 						       struct nbtd_interface);
+ 	struct wins_server *winssrv = iface->nbtsrv->winssrv;
+-	struct nbt_name *name = &packet->questions[0].name;
++	struct nbt_name *name = NULL;
+ 	struct winsdb_record *rec;
+ 	uint8_t rcode = NBT_RCODE_OK;
+-	uint16_t nb_flags = packet->additional[0].rdata.netbios.addresses[0].nb_flags;
+-	const char *address = packet->additional[0].rdata.netbios.addresses[0].ipaddr;
++	struct nbt_res_rec *additional = NULL;
++	uint16_t nb_flags;
++	const char *address = NULL;
++	struct nbt_rdata_address *addresses = NULL;
+ 	bool mhomed = ((packet->operation & NBT_OPCODE) == NBT_OPCODE_MULTI_HOME_REG);
+-	enum wrepl_name_type new_type = wrepl_type(nb_flags, name, mhomed);
++	enum wrepl_name_type new_type;
+ 	struct winsdb_addr *winsdb_addr = NULL;
+ 	bool duplicate_packet;
+ 
++	name = &packet->questions[0].name;
++	additional = packet->additional;
++
++	addresses = additional[0].rdata.netbios.addresses;
++
++	nb_flags = addresses[0].nb_flags;
++	address = addresses[0].ipaddr;
++	new_type = wrepl_type(nb_flags, name, mhomed);
++
+ 	/*
+ 	 * as a special case, the local master browser name is always accepted
+ 	 * for registration, but never stored, but w2k3 stores it if it's registered
+@@ -729,13 +740,15 @@ static void nbtd_winsserver_query(struct loadparm_context *lp_ctx,
+ 	struct nbtd_interface *iface = talloc_get_type(nbtsock->incoming.private_data,
+ 						       struct nbtd_interface);
+ 	struct wins_server *winssrv = iface->nbtsrv->winssrv;
+-	struct nbt_name *name = &packet->questions[0].name;
++	struct nbt_name *name = NULL;
+ 	struct winsdb_record *rec;
+ 	struct winsdb_record *rec_1b = NULL;
+ 	const char **addresses;
+ 	const char **addresses_1b = NULL;
+ 	uint16_t nb_flags = 0;
+ 
++	name = &packet->questions[0].name;
++
+ 	if (name->type == NBT_NAME_MASTER) {
+ 		goto notfound;
+ 	}
+@@ -871,11 +884,13 @@ static void nbtd_winsserver_release(struct nbt_name_socket *nbtsock,
+ 	struct nbtd_interface *iface = talloc_get_type(nbtsock->incoming.private_data,
+ 						       struct nbtd_interface);
+ 	struct wins_server *winssrv = iface->nbtsrv->winssrv;
+-	struct nbt_name *name = &packet->questions[0].name;
++	struct nbt_name *name = NULL;
+ 	struct winsdb_record *rec;
+ 	uint32_t modify_flags = 0;
+ 	uint8_t ret;
+ 
++	name = &packet->questions[0].name;
++
+ 	if (name->type == NBT_NAME_MASTER) {
+ 		goto done;
+ 	}
+-- 
+2.43.0
+
+
+From 9a84fa95983158898920113bc593c1840ca9b4a6 Mon Sep 17 00:00:00 2001
+From: Volker Lendecke <vl@samba.org>
+Date: Tue, 24 Feb 2026 16:30:46 +0100
+Subject: [PATCH 10/31] CVE-2026-3238 winsserver4: Validate incoming packets
+
+Avoid NULL pointer dereferences, leading to a crash in the nbt process
+serving wins.
+
+Thanks to Arad Inbar, Erez Cohen, Nir Somech and Ben Grinberg from
+DREAM Security Research Team for pointing out this crash bug out to
+the Samba team.
+
+Bug: https://bugzilla.samba.org/show_bug.cgi?id=16012
+Signed-off-by: Volker Lendecke <vl@samba.org>
+Reviewed-by: Douglas Bagnall <douglas.bagnall@catalyst.net.nz>
+---
+ source4/nbt_server/wins/winsserver.c | 11 +++++++++++
+ 1 file changed, 11 insertions(+)
+
+diff --git a/source4/nbt_server/wins/winsserver.c b/source4/nbt_server/wins/winsserver.c
+index 1b7fe5641a6..c637657f07c 100644
+--- a/source4/nbt_server/wins/winsserver.c
++++ b/source4/nbt_server/wins/winsserver.c
+@@ -472,9 +472,16 @@ static void nbtd_winsserver_register(struct nbt_name_socket *nbtsock,
+ 	struct winsdb_addr *winsdb_addr = NULL;
+ 	bool duplicate_packet;
+ 
++	NBTD_ASSERT_PACKET(packet, src, packet->qdcount > 0);
++	NBTD_ASSERT_PACKET(packet, src, packet->arcount > 0);
++
+ 	name = &packet->questions[0].name;
+ 	additional = packet->additional;
+ 
++	NBTD_ASSERT_PACKET(packet,
++			   src,
++			   additional[0].rdata.netbios.length > 0);
++
+ 	addresses = additional[0].rdata.netbios.addresses;
+ 
+ 	nb_flags = addresses[0].nb_flags;
+@@ -747,6 +754,8 @@ static void nbtd_winsserver_query(struct loadparm_context *lp_ctx,
+ 	const char **addresses_1b = NULL;
+ 	uint16_t nb_flags = 0;
+ 
++	NBTD_ASSERT_PACKET(packet, src, packet->qdcount > 0);
++
+ 	name = &packet->questions[0].name;
+ 
+ 	if (name->type == NBT_NAME_MASTER) {
+@@ -889,6 +898,8 @@ static void nbtd_winsserver_release(struct nbt_name_socket *nbtsock,
+ 	uint32_t modify_flags = 0;
+ 	uint8_t ret;
+ 
++	NBTD_ASSERT_PACKET(packet, src, packet->qdcount > 0);
++
+ 	name = &packet->questions[0].name;
+ 
+ 	if (name->type == NBT_NAME_MASTER) {
+-- 
+2.43.0
+
+
+From aeed1a0ce8ff857c4c66114e9af130d1ea032b81 Mon Sep 17 00:00:00 2001
+From: Stefan Metzmacher <metze@samba.org>
+Date: Thu, 23 Apr 2026 18:20:15 +0200
+Subject: [PATCH 11/31] CVE-2026-4480/CVE-2026-4408: lib/util: inline
+ string_sub2() into string_sub() the only caller
+
+This will simplify further changes.
+
+BUG: https://bugzilla.samba.org/show_bug.cgi?id=16033
+BUG: https://bugzilla.samba.org/show_bug.cgi?id=16034
+
+Signed-off-by: Stefan Metzmacher <metze@samba.org>
+Reviewed-by: Douglas Bagnall <douglas.bagnall@catalyst.net.nz>
+---
+ lib/util/substitute.c | 20 ++------------------
+ 1 file changed, 2 insertions(+), 18 deletions(-)
+
+diff --git a/lib/util/substitute.c b/lib/util/substitute.c
+index b7b5588da86..26362ca77b2 100644
+--- a/lib/util/substitute.c
++++ b/lib/util/substitute.c
+@@ -47,10 +47,9 @@
+  use of len==0 which was for no length checks to be done.
+ **/
+ 
+-static void string_sub2(char *s,const char *pattern, const char *insert, size_t len,
+-			bool remove_unsafe_characters, bool replace_once,
+-			bool allow_trailing_dollar)
++void string_sub(char *s, const char *pattern, const char *insert, size_t len)
+ {
++	bool remove_unsafe_characters = true;
+ 	char *p;
+ 	size_t ls, lp, li, i;
+ 
+@@ -79,13 +78,6 @@ static void string_sub2(char *s,const char *pattern, const char *insert, size_t
+ 		for (i=0;i<li;i++) {
+ 			switch (insert[i]) {
+ 			case '$':
+-				/* allow a trailing $
+-				 * (as in machine accounts) */
+-				if (allow_trailing_dollar && (i == li - 1 )) {
+-					p[i] = insert[i];
+-					break;
+-				}
+-				FALL_THROUGH;
+ 			case '`':
+ 			case '"':
+ 			case '\'':
+@@ -107,17 +99,9 @@ static void string_sub2(char *s,const char *pattern, const char *insert, size_t
+ 		}
+ 		s = p + li;
+ 		ls = ls + li - lp;
+-
+-		if (replace_once)
+-			break;
+ 	}
+ }
+ 
+-void string_sub(char *s,const char *pattern, const char *insert, size_t len)
+-{
+-	string_sub2( s, pattern, insert, len, true, false, false );
+-}
+-
+ /**
+  Similar to string_sub() but allows for any character to be substituted. 
+  Use with caution!
+-- 
+2.43.0
+
+
+From a0ce940916acb602328c8bdecd0d59ee09a488f4 Mon Sep 17 00:00:00 2001
+From: Stefan Metzmacher <metze@samba.org>
+Date: Thu, 23 Apr 2026 18:20:15 +0200
+Subject: [PATCH 12/31] CVE-2026-4480/CVE-2026-4408: lib/util: remove unused
+ talloc_strdup(insert) from talloc_string_sub2()
+
+The insert string is not modified, so we do not need to copy it.
+
+This will simplify further changes.
+
+Review with: git show --patience
+
+BUG: https://bugzilla.samba.org/show_bug.cgi?id=16033
+BUG: https://bugzilla.samba.org/show_bug.cgi?id=16034
+
+Signed-off-by: Stefan Metzmacher <metze@samba.org>
+Reviewed-by: Douglas Bagnall <douglas.bagnall@catalyst.net.nz>
+---
+ lib/util/substitute.c | 57 +++++++++++++++++++------------------------
+ 1 file changed, 25 insertions(+), 32 deletions(-)
+
+diff --git a/lib/util/substitute.c b/lib/util/substitute.c
+index 26362ca77b2..4a0c58ab3a7 100644
+--- a/lib/util/substitute.c
++++ b/lib/util/substitute.c
+@@ -157,7 +157,7 @@ char *talloc_string_sub2(TALLOC_CTX *mem_ctx, const char *src,
+ 			bool replace_once,
+ 			bool allow_trailing_dollar)
+ {
+-	char *p, *in;
++	char *p;
+ 	char *s;
+ 	char *string;
+ 	ssize_t ls,lp,li,ld, i;
+@@ -175,22 +175,32 @@ char *talloc_string_sub2(TALLOC_CTX *mem_ctx, const char *src,
+ 
+ 	s = string;
+ 
+-	in = talloc_strdup(mem_ctx, insert);
+-	if (!in) {
+-		DEBUG(0, ("talloc_string_sub2: ENOMEM\n"));
+-		talloc_free(string);
+-		return NULL;
+-	}
+ 	ls = (ssize_t)strlen(s);
+ 	lp = (ssize_t)strlen(pattern);
+ 	li = (ssize_t)strlen(insert);
+ 	ld = li - lp;
+ 
+-	for (i=0;i<li;i++) {
+-		switch (in[i]) {
++	while ((p = strstr_m(s,pattern))) {
++		if (ld > 0) {
++			int offset = PTR_DIFF(s,string);
++			string = (char *)talloc_realloc_size(mem_ctx, string,
++							ls + ld + 1);
++			if (!string) {
++				DEBUG(0, ("talloc_string_sub: out of "
++					  "memory!\n"));
++				return NULL;
++			}
++			p = string + offset + (p - s);
++		}
++		if (li != lp) {
++			memmove(p+li,p+lp,strlen(p+lp)+1);
++		}
++		for (i=0; i<li; i++) {
++			switch (insert[i]) {
+ 			case '$':
+-				/* allow a trailing $
+-				 * (as in machine accounts) */
++				/*
++				 * allow a trailing $ (as in machine accounts)
++				 */
+ 				if (allow_trailing_dollar && (i == li - 1 )) {
+ 					break;
+ 				}
+@@ -204,34 +214,18 @@ char *talloc_string_sub2(TALLOC_CTX *mem_ctx, const char *src,
+ 			case '\r':
+ 			case '\n':
+ 				if (remove_unsafe_characters) {
+-					in[i] = '_';
+-					break;
++					p[i] = '_';
++					continue;
+ 				}
+ 
+ 				FALL_THROUGH;
+ 			default:
+ 				/* ok */
+ 				break;
+-		}
+-	}
+-
+-	while ((p = strstr_m(s,pattern))) {
+-		if (ld > 0) {
+-			int offset = PTR_DIFF(s,string);
+-			string = (char *)talloc_realloc_size(mem_ctx, string,
+-							ls + ld + 1);
+-			if (!string) {
+-				DEBUG(0, ("talloc_string_sub: out of "
+-					  "memory!\n"));
+-				TALLOC_FREE(in);
+-				return NULL;
+ 			}
+-			p = string + offset + (p - s);
++
++			p[i] = insert[i];
+ 		}
+-		if (li != lp) {
+-			memmove(p+li,p+lp,strlen(p+lp)+1);
+-		}
+-		memcpy(p, in, li);
+ 		s = p + li;
+ 		ls += ld;
+ 
+@@ -239,7 +233,6 @@ char *talloc_string_sub2(TALLOC_CTX *mem_ctx, const char *src,
+ 			break;
+ 		}
+ 	}
+-	TALLOC_FREE(in);
+ 	return string;
+ }
+ 
+-- 
+2.43.0
+
+
+From a6d52ff038000baa50e5bd0693e72bff2de0e29b Mon Sep 17 00:00:00 2001
+From: Stefan Metzmacher <metze@samba.org>
+Date: Thu, 23 Apr 2026 18:20:15 +0200
+Subject: [PATCH 13/31] CVE-2026-4480/CVE-2026-4408: lib/util: factor out a
+ mask_unsafe_character() helper function
+
+This moves the logic into a single place and
+makes if more flexible to be used with more
+values than STRING_SUB_UNSAFE_CHARACTERS.
+
+BUG: https://bugzilla.samba.org/show_bug.cgi?id=16033
+BUG: https://bugzilla.samba.org/show_bug.cgi?id=16034
+
+Signed-off-by: Stefan Metzmacher <metze@samba.org>
+Reviewed-by: Douglas Bagnall <douglas.bagnall@catalyst.net.nz>
+---
+ lib/util/substitute.c | 109 +++++++++++++++++++++---------------------
+ lib/util/substitute.h |   6 ++-
+ 2 files changed, 60 insertions(+), 55 deletions(-)
+
+diff --git a/lib/util/substitute.c b/lib/util/substitute.c
+index 4a0c58ab3a7..b9fe32e993e 100644
+--- a/lib/util/substitute.c
++++ b/lib/util/substitute.c
+@@ -35,6 +35,33 @@
+  * @brief Substitute utilities.
+  **/
+ 
++static inline
++char mask_unsafe_character(char in,
++			   bool is_last,
++			   bool allow_trailing_dollar,
++			   const char *unsafe_characters,
++			   char safe_out)
++{
++	const char *unsafe = NULL;
++
++	if (unsafe_characters == NULL) {
++		return in;
++	}
++
++	/* allow a trailing $ (as in machine accounts) */
++	if (allow_trailing_dollar && is_last && in == '$') {
++		return in;
++	}
++
++	unsafe = strchr(unsafe_characters, in);
++	if (unsafe != NULL) {
++		return safe_out;
++	}
++
++	/* ok */
++	return in;
++}
++
+ /**
+  Substitute a string for a pattern in another string. Make sure there is
+  enough room!
+@@ -42,14 +69,16 @@
+  This routine looks for pattern in s and replaces it with
+  insert. It may do multiple replacements or just one.
+ 
+- Any of " ; ' $ or ` in the insert string are replaced with _
++ Any of STRING_SUB_UNSAFE_CHARACTERS in the insert string are replaced with _
++
+  if len==0 then the string cannot be extended. This is different from the old
+  use of len==0 which was for no length checks to be done.
+ **/
+ 
+ void string_sub(char *s, const char *pattern, const char *insert, size_t len)
+ {
+-	bool remove_unsafe_characters = true;
++	const char *unsafe_characters = STRING_SUB_UNSAFE_CHARACTERS;
++	char safe_character = '_';
+ 	char *p;
+ 	size_t ls, lp, li, i;
+ 
+@@ -76,26 +105,18 @@ void string_sub(char *s, const char *pattern, const char *insert, size_t len)
+ 			memmove(p+li,p+lp,strlen(p+lp)+1);
+ 		}
+ 		for (i=0;i<li;i++) {
+-			switch (insert[i]) {
+-			case '$':
+-			case '`':
+-			case '"':
+-			case '\'':
+-			case ';':
+-			case '%':
+-			case '\r':
+-			case '\n':
+-				if ( remove_unsafe_characters ) {
+-					p[i] = '_';
+-					/* yes this break should be here
+-					 * since we want to fall throw if
+-					 * not replacing unsafe chars */
+-					break;
+-				}
+-				FALL_THROUGH;
+-			default:
+-				p[i] = insert[i];
+-			}
++			/*
++			 * Without allow_trailing_dollar we don't
++			 * need to calculate is_last...
++			 */
++			const bool is_last = false;
++			const bool allow_trailing_dollar = false;
++
++			p[i] = mask_unsafe_character(insert[i],
++						     is_last,
++						     allow_trailing_dollar,
++						     unsafe_characters,
++						     safe_character);
+ 		}
+ 		s = p + li;
+ 		ls = ls + li - lp;
+@@ -157,9 +178,11 @@ char *talloc_string_sub2(TALLOC_CTX *mem_ctx, const char *src,
+ 			bool replace_once,
+ 			bool allow_trailing_dollar)
+ {
+-	char *p;
+-	char *s;
+-	char *string;
++	const char *unsafe_characters = STRING_SUB_UNSAFE_CHARACTERS;
++	const char safe_character = '_';
++	char *p = NULL,
++	char *s = NULL;
++	char *string = NULL;
+ 	ssize_t ls,lp,li,ld, i;
+ 
+ 	if (!insert || !pattern || !*pattern || !src) {
+@@ -195,36 +218,14 @@ char *talloc_string_sub2(TALLOC_CTX *mem_ctx, const char *src,
+ 		if (li != lp) {
+ 			memmove(p+li,p+lp,strlen(p+lp)+1);
+ 		}
+-		for (i=0; i<li; i++) {
+-			switch (insert[i]) {
+-			case '$':
+-				/*
+-				 * allow a trailing $ (as in machine accounts)
+-				 */
+-				if (allow_trailing_dollar && (i == li - 1 )) {
+-					break;
+-				}
++		for (i=0; i < li; i++) {
++			bool is_last = (i == li - 1);
+ 
+-				FALL_THROUGH;
+-			case '`':
+-			case '"':
+-			case '\'':
+-			case ';':
+-			case '%':
+-			case '\r':
+-			case '\n':
+-				if (remove_unsafe_characters) {
+-					p[i] = '_';
+-					continue;
+-				}
+-
+-				FALL_THROUGH;
+-			default:
+-				/* ok */
+-				break;
+-			}
+-
+-			p[i] = insert[i];
++			p[i] = mask_unsafe_character(insert[i],
++						     is_last,
++						     allow_trailing_dollar,
++						     unsafe_characters,
++						     safe_character);
+ 		}
+ 		s = p + li;
+ 		ls += ld;
+diff --git a/lib/util/substitute.h b/lib/util/substitute.h
+index 3134cfcdea5..e1a82859dac 100644
+--- a/lib/util/substitute.h
++++ b/lib/util/substitute.h
+@@ -26,6 +26,8 @@
+ 
+ #include <talloc.h>
+ 
++#define STRING_SUB_UNSAFE_CHARACTERS "$`\"';%\r\n"
++
+ /**
+  Substitute a string for a pattern in another string. Make sure there is
+  enough room!
+@@ -33,7 +35,9 @@
+  This routine looks for pattern in s and replaces it with
+  insert. It may do multiple replacements.
+ 
+- Any of " ; ' $ or ` in the insert string are replaced with _
++ Any of STRING_SUB_UNSAFE_CHARACTERS (see above) in the
++ insert string are replaced with _
++
+  if len==0 then the string cannot be extended. This is different from the old
+  use of len==0 which was for no length checks to be done.
+ **/
+-- 
+2.43.0
+
+
+From 7720cccc6f93cb9e89a75654bed1bdd9a89d0b27 Mon Sep 17 00:00:00 2001
+From: Stefan Metzmacher <metze@samba.org>
+Date: Thu, 30 Apr 2026 14:48:26 +0200
+Subject: [PATCH 14/31] CVE-2026-4480/CVE-2026-4408: lib/util: split out
+ realloc_string_sub_raw()
+
+This will allow realloc_string_sub2() to use it in order
+to have the logic in one place only.
+
+And it will also allow adjacted callers to be
+more flexible.
+
+BUG: https://bugzilla.samba.org/show_bug.cgi?id=16033
+BUG: https://bugzilla.samba.org/show_bug.cgi?id=16034
+
+Signed-off-by: Stefan Metzmacher <metze@samba.org>
+Reviewed-by: Douglas Bagnall <douglas.bagnall@catalyst.net.nz>
+---
+ lib/util/substitute.c | 85 ++++++++++++++++++++++++++++++-------------
+ lib/util/substitute.h | 18 +++++++++
+ 2 files changed, 78 insertions(+), 25 deletions(-)
+
+diff --git a/lib/util/substitute.c b/lib/util/substitute.c
+index b9fe32e993e..465aea86605 100644
+--- a/lib/util/substitute.c
++++ b/lib/util/substitute.c
+@@ -171,32 +171,24 @@ _PUBLIC_ void all_string_sub(char *s,const char *pattern,const char *insert, siz
+  * talloc version of string_sub2.
+  */
+ 
+-char *talloc_string_sub2(TALLOC_CTX *mem_ctx, const char *src,
+-			const char *pattern,
+-			const char *insert,
+-			bool remove_unsafe_characters,
+-			bool replace_once,
+-			bool allow_trailing_dollar)
++bool realloc_string_sub_raw(char **_string,
++			    const char *pattern,
++			    const char *insert,
++			    bool replace_once,
++			    bool allow_trailing_dollar,
++			    const char *unsafe_characters,
++			    char safe_character)
+ {
+-	const char *unsafe_characters = STRING_SUB_UNSAFE_CHARACTERS;
+-	const char safe_character = '_';
+-	char *p = NULL,
++	char *p = NULL;
+ 	char *s = NULL;
+ 	char *string = NULL;
+ 	ssize_t ls,lp,li,ld, i;
+ 
+-	if (!insert || !pattern || !*pattern || !src) {
+-		return NULL;
++	if (!insert || !pattern || !*pattern || !_string|| !*_string) {
++		return false;
+ 	}
+ 
+-	string = talloc_strdup(mem_ctx, src);
+-	if (string == NULL) {
+-		DEBUG(0, ("talloc_string_sub2: "
+-			"talloc_strdup failed\n"));
+-		return NULL;
+-	}
+-
+-	s = string;
++	s = string = *_string;
+ 
+ 	ls = (ssize_t)strlen(s);
+ 	lp = (ssize_t)strlen(pattern);
+@@ -205,14 +197,13 @@ char *talloc_string_sub2(TALLOC_CTX *mem_ctx, const char *src,
+ 
+ 	while ((p = strstr_m(s,pattern))) {
+ 		if (ld > 0) {
+-			int offset = PTR_DIFF(s,string);
+-			string = (char *)talloc_realloc_size(mem_ctx, string,
+-							ls + ld + 1);
++			ptrdiff_t offset = PTR_DIFF(s,string);
++			string = talloc_realloc(NULL, string, char, ls + ld + 1);
+ 			if (!string) {
+-				DEBUG(0, ("talloc_string_sub: out of "
+-					  "memory!\n"));
+-				return NULL;
++				DBG_ERR("out of memory(realloc)!\n");
++				return false;
+ 			}
++			*_string = string;
+ 			p = string + offset + (p - s);
+ 		}
+ 		if (li != lp) {
+@@ -234,6 +225,50 @@ char *talloc_string_sub2(TALLOC_CTX *mem_ctx, const char *src,
+ 			break;
+ 		}
+ 	}
++	return true;
++}
++
++char *talloc_string_sub2(TALLOC_CTX *mem_ctx,
++			 const char *src,
++			 const char *pattern,
++			 const char *insert,
++			 bool remove_unsafe_characters,
++			 bool replace_once,
++			 bool allow_trailing_dollar)
++{
++	const char *unsafe_characters = NULL;
++	char safe_character = '\0';
++	char *string = NULL;
++	bool ok;
++
++	if (!insert || !pattern || !*pattern || !src) {
++		return NULL;
++	}
++
++	if (remove_unsafe_characters) {
++		unsafe_characters = STRING_SUB_UNSAFE_CHARACTERS;
++		safe_character = '_';
++	}
++
++	string = talloc_strdup(mem_ctx, src);
++	if (string == NULL) {
++		DBG_ERR("out of memory, talloc_strdup(src)!\n");
++		return NULL;
++	}
++
++	ok = realloc_string_sub_raw(&string,
++				    pattern,
++				    insert,
++				    replace_once,
++				    allow_trailing_dollar,
++				    unsafe_characters,
++				    safe_character);
++	if (!ok) {
++		TALLOC_FREE(string);
++		DBG_ERR("out of memory, realloc_string_sub_raw()!\n");
++		return NULL;
++	}
++
+ 	return string;
+ }
+ 
+diff --git a/lib/util/substitute.h b/lib/util/substitute.h
+index e1a82859dac..041a649fd18 100644
+--- a/lib/util/substitute.h
++++ b/lib/util/substitute.h
+@@ -51,6 +51,24 @@ void string_sub(char *s,const char *pattern, const char *insert, size_t len);
+ **/
+ void all_string_sub(char *s,const char *pattern,const char *insert, size_t len);
+ 
++/*
++ * If unsafe_characters is NULL all characters are allowed,
++ * if unsafe_characters is not NULL all characters caught
++ * by iscntrl() are also replaced by safe_character.
++ *
++ * *_string might be reallocated!
++ *
++ * On error *_string may still be reallocated and
++ * may contain partial replacements.
++ */
++bool realloc_string_sub_raw(char **_string,
++			    const char *pattern,
++			    const char *insert,
++			    bool replace_once,
++			    bool allow_trailing_dollar,
++			    const char *unsafe_characters,
++			    char safe_character);
++
+ char *talloc_string_sub2(TALLOC_CTX *mem_ctx, const char *src,
+ 			const char *pattern,
+ 			const char *insert,
+-- 
+2.43.0
+
+
+From 84dc87eb46eb399b34b24bcde18651bcb028513a Mon Sep 17 00:00:00 2001
+From: Stefan Metzmacher <metze@samba.org>
+Date: Wed, 6 May 2026 17:23:39 +0200
+Subject: [PATCH 15/31] CVE-2026-4480/CVE-2026-4408: s3:lib: fix potential
+ memory leak in talloc_sub_basic()
+
+This makes the code easier to understand...
+
+BUG: https://bugzilla.samba.org/show_bug.cgi?id=16033
+BUG: https://bugzilla.samba.org/show_bug.cgi?id=16034
+
+Signed-off-by: Stefan Metzmacher <metze@samba.org>
+Reviewed-by: Douglas Bagnall <douglas.bagnall@catalyst.net.nz>
+---
+ source3/lib/substitute.c | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/source3/lib/substitute.c b/source3/lib/substitute.c
+index 40eb15aee04..5121fcaac1c 100644
+--- a/source3/lib/substitute.c
++++ b/source3/lib/substitute.c
+@@ -317,6 +317,7 @@ char *talloc_sub_basic(TALLOC_CTX *mem_ctx,
+ 	}
+ 
+ 	tmp_ctx = talloc_stackframe();
++	a_string = talloc_steal(tmp_ctx, a_string);
+ 
+ 	for (s = a_string; (p = strchr_m(s, '%')); s = a_string + (p - b)) {
+ 
+@@ -478,6 +479,7 @@ error:
+ 	TALLOC_FREE(a_string);
+ 
+ done:
++	a_string = talloc_steal(mem_ctx, a_string);
+ 	TALLOC_FREE(tmp_ctx);
+ 	return a_string;
+ }
+-- 
+2.43.0
+
+
+From 3d99a571b8893caf9879d85253489a0393901faa Mon Sep 17 00:00:00 2001
+From: Stefan Metzmacher <metze@samba.org>
+Date: Thu, 23 Apr 2026 21:11:27 +0200
+Subject: [PATCH 16/31] CVE-2026-4480/CVE-2026-4408: s3:lib: let
+ realloc_string_sub2() use realloc_string_sub_raw()
+
+We don't need this logic more than once!
+
+But we leave the strange calling convention of
+realloc_string_sub2(), where the caller it
+not allowed to use the passed pointer when
+NULL is returned...
+
+BUG: https://bugzilla.samba.org/show_bug.cgi?id=16033
+BUG: https://bugzilla.samba.org/show_bug.cgi?id=16034
+
+Signed-off-by: Stefan Metzmacher <metze@samba.org>
+Reviewed-by: Douglas Bagnall <douglas.bagnall@catalyst.net.nz>
+---
+ source3/lib/substitute_generic.c | 81 ++++++++++----------------------
+ 1 file changed, 24 insertions(+), 57 deletions(-)
+
+diff --git a/source3/lib/substitute_generic.c b/source3/lib/substitute_generic.c
+index 26c5ee761f8..e0639f04eb8 100644
+--- a/source3/lib/substitute_generic.c
++++ b/source3/lib/substitute_generic.c
+@@ -37,71 +37,38 @@ char *realloc_string_sub2(char *string,
+ 			bool remove_unsafe_characters,
+ 			bool allow_trailing_dollar)
+ {
+-	char *p, *in;
+-	char *s;
+-	ssize_t ls,lp,li,ld, i;
++	const char *unsafe_characters = NULL;
++	char safe_character = '\0';
++	bool ok;
+ 
+ 	if (!insert || !pattern || !*pattern || !string || !*string)
+ 		return NULL;
+ 
+-	s = string;
++	if (remove_unsafe_characters) {
++		unsafe_characters = STRING_SUB_UNSAFE_CHARACTERS;
++		safe_character = '_';
++	}
+ 
+-	in = talloc_strdup(talloc_tos(), insert);
+-	if (!in) {
+-		DEBUG(0, ("realloc_string_sub: out of memory!\n"));
++	ok = realloc_string_sub_raw(&string,
++				    pattern,
++				    insert,
++				    false,  /* replace_once */
++				    allow_trailing_dollar,
++				    unsafe_characters,
++				    safe_character);
++	if (!ok) {
++		DBG_ERR("out of memory, realloc_string_sub_raw()!\n");
++		/*
++		 * The calling convention of realloc_string_sub2()
++		 * is very strange regarding stale string pointers.
++		 *
++		 * It is assumed the given string was allocated
++		 * on talloc_tos(), so we just don't touch
++		 * it at all here...
++		 */
+ 		return NULL;
+ 	}
+-	ls = (ssize_t)strlen(s);
+-	lp = (ssize_t)strlen(pattern);
+-	li = (ssize_t)strlen(insert);
+-	ld = li - lp;
+-	for (i=0;i<li;i++) {
+-		switch (in[i]) {
+-			case '$':
+-				/* allow a trailing $
+-				 * (as in machine accounts) */
+-				if (allow_trailing_dollar && (i == li - 1 )) {
+-					break;
+-				}
+-				FALL_THROUGH;
+-			case '`':
+-			case '"':
+-			case '\'':
+-			case ';':
+-			case '%':
+-			case '\r':
+-			case '\n':
+-				if ( remove_unsafe_characters ) {
+-					in[i] = '_';
+-					break;
+-				}
+-				FALL_THROUGH;
+-			default:
+-				/* ok */
+-				break;
+-		}
+-	}
+ 
+-	while ((p = strstr_m(s,pattern))) {
+-		if (ld > 0) {
+-			int offset = PTR_DIFF(s,string);
+-			string = talloc_realloc(NULL, string, char, ls + ld + 1);
+-			if (!string) {
+-				DEBUG(0, ("realloc_string_sub: "
+-					"out of memory!\n"));
+-				talloc_free(in);
+-				return NULL;
+-			}
+-			p = string + offset + (p - s);
+-		}
+-		if (li != lp) {
+-			memmove(p+li,p+lp,strlen(p+lp)+1);
+-		}
+-		memcpy(p, in, li);
+-		s = p + li;
+-		ls += ld;
+-	}
+-	talloc_free(in);
+ 	return string;
+ }
+ 
+-- 
+2.43.0
+
+
+From 24ccf867e26056007a606c2afb7e6dc2aee6d03c Mon Sep 17 00:00:00 2001
+From: Stefan Metzmacher <metze@samba.org>
+Date: Thu, 23 Apr 2026 18:21:08 +0200
+Subject: [PATCH 17/31] CVE-2026-4480/CVE-2026-4408: lib/util: let
+ mask_unsafe_character() check all control characters
+
+There's no reason to mask only \r and \n.
+
+BUG: https://bugzilla.samba.org/show_bug.cgi?id=16033
+BUG: https://bugzilla.samba.org/show_bug.cgi?id=16034
+
+Signed-off-by: Stefan Metzmacher <metze@samba.org>
+Reviewed-by: Douglas Bagnall <douglas.bagnall@catalyst.net.nz>
+---
+ lib/util/substitute.c | 8 +++++++-
+ lib/util/substitute.h | 6 +++---
+ 2 files changed, 10 insertions(+), 4 deletions(-)
+
+diff --git a/lib/util/substitute.c b/lib/util/substitute.c
+index 465aea86605..30989927da7 100644
+--- a/lib/util/substitute.c
++++ b/lib/util/substitute.c
+@@ -22,6 +22,7 @@
+ */
+ 
+ #include "replace.h"
++#include "system/locale.h"
+ #include "debug.h"
+ #ifndef SAMBA_UTIL_CORE_ONLY
+ #include "charset/charset.h"
+@@ -53,6 +54,10 @@ char mask_unsafe_character(char in,
+ 		return in;
+ 	}
+ 
++	if (iscntrl(in)) {
++		return safe_out;
++	}
++
+ 	unsafe = strchr(unsafe_characters, in);
+ 	if (unsafe != NULL) {
+ 		return safe_out;
+@@ -69,7 +74,8 @@ char mask_unsafe_character(char in,
+  This routine looks for pattern in s and replaces it with
+  insert. It may do multiple replacements or just one.
+ 
+- Any of STRING_SUB_UNSAFE_CHARACTERS in the insert string are replaced with _
++ Any of STRING_SUB_UNSAFE_CHARACTERS and any character
++ caught by calling iscntrl() in the insert string are replaced with _
+ 
+  if len==0 then the string cannot be extended. This is different from the old
+  use of len==0 which was for no length checks to be done.
+diff --git a/lib/util/substitute.h b/lib/util/substitute.h
+index 041a649fd18..b183d864671 100644
+--- a/lib/util/substitute.h
++++ b/lib/util/substitute.h
+@@ -26,7 +26,7 @@
+ 
+ #include <talloc.h>
+ 
+-#define STRING_SUB_UNSAFE_CHARACTERS "$`\"';%\r\n"
++#define STRING_SUB_UNSAFE_CHARACTERS "$`\"';%"
+ 
+ /**
+  Substitute a string for a pattern in another string. Make sure there is
+@@ -35,8 +35,8 @@
+  This routine looks for pattern in s and replaces it with
+  insert. It may do multiple replacements.
+ 
+- Any of STRING_SUB_UNSAFE_CHARACTERS (see above) in the
+- insert string are replaced with _
++ Any of STRING_SUB_UNSAFE_CHARACTERS (see above) and any character
++ caught by calling iscntrl() in the insert string are replaced with _
+ 
+  if len==0 then the string cannot be extended. This is different from the old
+  use of len==0 which was for no length checks to be done.
+-- 
+2.43.0
+
+
+From 270899563e7fdac2f9e3bd085f4f57ef62449995 Mon Sep 17 00:00:00 2001
+From: Stefan Metzmacher <metze@samba.org>
+Date: Thu, 23 Apr 2026 18:21:08 +0200
+Subject: [PATCH 18/31] CVE-2026-4480/CVE-2026-4408: lib/util: add more unsafe
+ characters to STRING_SUB_UNSAFE_CHARACTERS
+
+|&<> are unsafe characters for shell processing.
+
+BUG: https://bugzilla.samba.org/show_bug.cgi?id=16033
+BUG: https://bugzilla.samba.org/show_bug.cgi?id=16034
+
+Signed-off-by: Stefan Metzmacher <metze@samba.org>
+Reviewed-by: Douglas Bagnall <douglas.bagnall@catalyst.net.nz>
+---
+ lib/util/substitute.h | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/lib/util/substitute.h b/lib/util/substitute.h
+index b183d864671..41f56c73ba2 100644
+--- a/lib/util/substitute.h
++++ b/lib/util/substitute.h
+@@ -26,7 +26,7 @@
+ 
+ #include <talloc.h>
+ 
+-#define STRING_SUB_UNSAFE_CHARACTERS "$`\"';%"
++#define STRING_SUB_UNSAFE_CHARACTERS "$`\"';%|&<>"
+ 
+ /**
+  Substitute a string for a pattern in another string. Make sure there is
+-- 
+2.43.0
+
+
+From fb40382b1c56f90a5a5dedea8223edbd3857c13f Mon Sep 17 00:00:00 2001
+From: Stefan Metzmacher <metze@samba.org>
+Date: Fri, 8 May 2026 22:33:32 +0200
+Subject: [PATCH 19/31] CVE-2026-4480/CVE-2026-4408: lib/util: let log_escape()
+ make use of iscntrl()
+
+using iscntrl() also handles 0x7F (DEL).
+
+BUG: https://bugzilla.samba.org/show_bug.cgi?id=16033
+BUG: https://bugzilla.samba.org/show_bug.cgi?id=16034
+
+Signed-off-by: Stefan Metzmacher <metze@samba.org>
+Reviewed-by: Douglas Bagnall <douglas.bagnall@catalyst.net.nz>
+---
+ lib/util/util_str_escape.c | 5 +++--
+ 1 file changed, 3 insertions(+), 2 deletions(-)
+
+diff --git a/lib/util/util_str_escape.c b/lib/util/util_str_escape.c
+index 8f1f34912ee..c6d7a0c9e77 100644
+--- a/lib/util/util_str_escape.c
++++ b/lib/util/util_str_escape.c
+@@ -18,6 +18,7 @@
+ */
+ 
+ #include "replace.h"
++#include "system/locale.h"
+ #include "lib/util/debug.h"
+ #include "lib/util/util_str_escape.h"
+ 
+@@ -28,7 +29,7 @@
+  */
+ static size_t encoded_length(unsigned char c)
+ {
+-	if (c != '\\' &&  c > 0x1F) {
++	if (c != '\\' && !iscntrl(c)) {
+ 		return 1;
+ 	} else {
+ 		switch (c) {
+@@ -79,7 +80,7 @@ char *log_escape(TALLOC_CTX *frame, const char *in)
+ 	c = in;
+ 	e = encoded;
+ 	while (*c) {
+-		if (*c != '\\' && (unsigned char)(*c) > 0x1F) {
++		if (*c != '\\' && !iscntrl((unsigned char)(*c))) {
+ 			*e++ = *c++;
+ 		} else {
+ 			switch (*c) {
+-- 
+2.43.0
+
+
+From 87d0c672fe0506333e1a8927c65d00c4c5538451 Mon Sep 17 00:00:00 2001
+From: Stefan Metzmacher <metze@samba.org>
+Date: Thu, 7 May 2026 18:10:50 +0200
+Subject: [PATCH 20/31] CVE-2026-4480/CVE-2026-4408: lib/util: add
+ talloc_string_sub_{mixed_quoting,unsafe}() helpers
+
+This is the basic helper function for the security problems.
+
+talloc_string_sub_mixed_quoting() checks for strange quoting
+in smb.conf options.
+
+And talloc_string_sub_unsafe() tries to autodetect how the unsafe
+(client controlled value) and masked and single quote it,
+as a fallback for strange quoting a fixed fallback string
+is used and the caller should warn the admin and give
+hints how to fix the configuration.
+
+BUG: https://bugzilla.samba.org/show_bug.cgi?id=16033
+BUG: https://bugzilla.samba.org/show_bug.cgi?id=16034
+
+Pair-Programmed-With: Douglas Bagnall <douglas.bagnall@catalyst.net.nz>
+
+Signed-off-by: Stefan Metzmacher <metze@samba.org>
+Signed-off-by: Douglas Bagnall <douglas.bagnall@catalyst.net.nz>
+---
+ lib/util/substitute.c | 260 ++++++++++++++++++++++++++++++++++++++++++
+ lib/util/substitute.h |  17 +++
+ 2 files changed, 277 insertions(+)
+
+diff --git a/lib/util/substitute.c b/lib/util/substitute.c
+index 30989927da7..406d8424be1 100644
+--- a/lib/util/substitute.c
++++ b/lib/util/substitute.c
+@@ -25,6 +25,8 @@
+ #include "system/locale.h"
+ #include "debug.h"
+ #ifndef SAMBA_UTIL_CORE_ONLY
++#include "lib/util/fault.h"
++#include "lib/util/talloc_stack.h"
+ #include "charset/charset.h"
+ #else
+ #include "charset_compat.h"
+@@ -297,3 +299,261 @@ char *talloc_all_string_sub(TALLOC_CTX *ctx,
+ 	return talloc_string_sub2(ctx, src, pattern, insert,
+ 			false, false, false);
+ }
++
++#ifndef SAMBA_UTIL_CORE_ONLY
++
++bool talloc_string_sub_mixed_quoting(const char *full_cmd, char variable_char)
++{
++	/*
++	 * Try to make sure talloc_string_sub_unsafe()
++	 * won't return NULL, instead talloc_stackframe_pool()
++	 * would panic
++	 */
++	size_t cmd_len = full_cmd != NULL ? strlen(full_cmd) : 0;
++	size_t pool_size = 512 + cmd_len;
++	TALLOC_CTX *frame = talloc_stackframe_pool(pool_size);
++	char *cmd = NULL;
++	bool modified = false;
++	bool masked = false;
++	bool mixed_fallback = false;
++
++	cmd = talloc_string_sub_unsafe(frame,
++				       full_cmd,
++				       variable_char,
++				       "U",  /* unsafe_value */
++				       "'\"%", /* unsafe_characters */
++				       '_',    /* safe_character */
++				       "F",  /* fallback_value */
++				       &modified,
++				       &masked,
++				       &mixed_fallback);
++	if (cmd == NULL) {
++		mixed_fallback = false;
++	}
++	TALLOC_FREE(frame);
++	return mixed_fallback;
++}
++
++char *talloc_string_sub_unsafe(TALLOC_CTX *mem_ctx,
++			       const char *orig_cmd,
++			       char variable_char,
++			       const char *unsafe_value,
++			       const char *unsafe_characters,
++			       char safe_character,
++			       const char *fallback_value,
++			       bool *_modified,
++			       bool *_masked,
++			       bool *_mixed_fallback)
++{
++	TALLOC_CTX *frame = talloc_stackframe();
++	const char variable[3] =
++		{ '%', variable_char, '\0' };
++	const char variable_s_quoted[5] =
++		{ '\'', '%', variable_char, '\'', '\0' };
++	const char variable_d_quoted[5] =
++		{ '"', '%', variable_char, '"', '\0' };
++	char *cmd = NULL;
++	char *masked_value = NULL;
++	char *quoted_value = NULL;
++	bool has_s_quotes;
++	bool has_d_quotes;
++	bool has_variable;
++	bool has_variable_s_quoted;
++	bool has_variable_d_quoted;
++	bool modified = false;
++	bool masked = false;
++	bool mixed_fallback = false;
++	bool ok;
++
++	/*
++	 * The unsafe_characters argument should contain
++	 * single and double quotes.
++	 * Otherwise We can't safely handle this.
++	 */
++	SMB_ASSERT(unsafe_characters != NULL);
++	SMB_ASSERT(strchr(unsafe_characters, '\'') != NULL);
++	SMB_ASSERT(strchr(unsafe_characters, '"') != NULL);
++	SMB_ASSERT(strchr(unsafe_characters, '%') != NULL);
++
++	cmd = talloc_strdup(mem_ctx, orig_cmd);
++	if (cmd == NULL) {
++		TALLOC_FREE(frame);
++		return NULL;
++	}
++	cmd = talloc_steal(frame, cmd);
++
++	has_variable = strstr(orig_cmd, variable) != NULL;
++	if (!has_variable) {
++		/*
++		 * Nothing to do...
++		 */
++		goto done;
++	}
++	modified = true;
++
++	/*
++	 * Replace all unsafe characters as well as control
++	 * characters.
++	 *
++	 * Note that we start with masked_value = "%u"
++	 * and then replace "%u" with unsafe_value,
++	 * as a result we have a masked version of
++	 * unsafe_value.
++	 *
++	 * And don't allow option injected like
++	 *
++	 * '-h value'
++	 * '--help value'
++	 *
++	 */
++	masked_value = talloc_strdup(frame, variable);
++	if (masked_value == NULL) {
++		goto nomem;
++	}
++	ok = realloc_string_sub_raw(&masked_value,
++				    variable,
++				    unsafe_value,
++				    false, /* replace_once */
++				    false, /* allow_trailing_dollar */
++				    unsafe_characters,
++				    safe_character);
++	if (!ok) {
++		goto nomem;
++	}
++	if (masked_value[0] == '-') {
++		masked_value[0] = safe_character;
++	}
++	masked = strcmp(masked_value, unsafe_value) != 0;
++
++retry:
++
++	has_s_quotes = strchr(cmd, '\'') != NULL;
++	has_d_quotes = strchr(cmd, '"') != NULL;
++	has_variable = strstr(cmd, variable) != NULL;
++	has_variable_s_quoted = strstr(cmd, variable_s_quoted) != NULL;
++	has_variable_d_quoted = strstr(cmd, variable_d_quoted) != NULL;
++
++	if (has_variable_s_quoted) {
++		/*
++		 * In smb.conf we have something like
++		 *
++		 * some script = /usr/bin/script '%u'
++		 *
++		 * It is safe to replace '%u' (or '%J' etc, depending
++		 * on variable_char) with '<masked_value>' if
++		 * masked_value does not contain single quotes. We
++		 * have checked that.
++		 */
++
++		if (quoted_value == NULL) {
++			quoted_value = talloc_asprintf(frame, "'%s'",
++						       masked_value);
++			if (quoted_value == NULL) {
++				goto nomem;
++			}
++		}
++
++		ok = realloc_string_sub_raw(&cmd,
++					    variable_s_quoted,
++					    quoted_value,
++					    false, /* replace_once */
++					    false, /* allow_trailing_dollar */
++					    NULL,  /* unsafe_characters */
++					    '\0'); /* safe_character */
++		if (!ok) {
++			goto nomem;
++		}
++
++		goto retry;
++	}
++
++	if (has_variable_d_quoted && !has_s_quotes) {
++		/*
++		 * replace the "%u"
++		 *
++		 * some script = /usr/bin/script "%u"
++		 *
++		 * with '%u' and try the '%u' -> 'variable' substitution
++		 * again.
++		 */
++
++		ok = realloc_string_sub_raw(&cmd,
++					    variable_d_quoted,
++					    variable_s_quoted,
++					    false, /* replace_once */
++					    false, /* allow_trailing_dollar */
++					    NULL,  /* unsafe_characters */
++					    '\0'); /* safe_character */
++		if (!ok) {
++			goto nomem;
++		}
++
++		goto retry;
++	}
++
++	if (has_variable && !has_s_quotes && !has_d_quotes) {
++		/*
++		 * In this case:
++		 *
++		 * some script = /usr/bin/script %u
++		 *
++		 * we can safely substitute %u -> '%u' and try the
++		 * single quote test again.
++		 */
++
++		ok = realloc_string_sub_raw(&cmd,
++					    variable,
++					    variable_s_quoted,
++					    false, /* replace_once */
++					    false, /* allow_trailing_dollar */
++					    NULL,  /* unsafe_characters */
++					    '\0'); /* safe_character */
++		if (!ok) {
++			goto nomem;
++		}
++
++		goto retry;
++	}
++
++	if (has_variable) {
++		/*
++		 * There are single or double quotes, but not tightly
++		 * bound around a %u.
++		 *
++		 * Or there's a mix of single and double quotes.
++		 *
++		 * We just use a generic fallback value.
++		 * and let the caller warn about this
++		 * and give the admin a hind to fix the smb.conf
++		 * option.
++		 */
++		mixed_fallback = true;
++
++		ok = realloc_string_sub_raw(&cmd,
++					    variable,
++					    fallback_value,
++					    false, /* replace_once */
++					    false, /* allow_trailing_dollar */
++					    NULL,  /* unsafe_characters */
++					    '\0'); /* safe_character */
++		if (!ok) {
++			goto nomem;
++		}
++	}
++
++done:
++	*_modified = modified;
++	*_masked = masked;
++	*_mixed_fallback = mixed_fallback;
++	cmd = talloc_steal(mem_ctx, cmd);
++	TALLOC_FREE(frame);
++	return cmd;
++
++nomem:
++	*_modified = false;
++	*_masked = false;
++	*_mixed_fallback = false;
++	TALLOC_FREE(frame);
++	return NULL;
++}
++#endif /* ! SAMBA_UTIL_CORE_ONLY */
+diff --git a/lib/util/substitute.h b/lib/util/substitute.h
+index 41f56c73ba2..b8205055da1 100644
+--- a/lib/util/substitute.h
++++ b/lib/util/substitute.h
+@@ -83,4 +83,21 @@ char *talloc_all_string_sub(TALLOC_CTX *ctx,
+ 				const char *src,
+ 				const char *pattern,
+ 				const char *insert);
++
++#ifndef SAMBA_UTIL_CORE_ONLY
++bool talloc_string_sub_mixed_quoting(const char *full_cmd, char variable_char);
++
++char *talloc_string_sub_unsafe(TALLOC_CTX *mem_ctx,
++			       const char *orig_cmd,
++			       char variable_char,
++			       const char *unsafe_value,
++			       const char *unsafe_characters,
++			       char safe_character,
++			       const char *fallback_value,
++			       bool *_modified,
++			       bool *_masked,
++			       bool *_mixed_fallback);
++
++#endif /* ! SAMBA_UTIL_CORE_ONLY */
++
+ #endif /* _SAMBA_SUBSTITUTE_H_ */
+-- 
+2.43.0
+
+
+From bc331a1f483cf1de8ee157a0a02ad6b17dfbb473 Mon Sep 17 00:00:00 2001
+From: Douglas Bagnall <douglas.bagnall@catalyst.net.nz>
+Date: Sat, 9 May 2026 22:02:47 +1200
+Subject: [PATCH 21/31] CVE-2026-4480/CVE-2026-4408: lib/util: add
+ test_string_sub unittests
+
+This demonstrates the logic of talloc_string_sub_{mixed_quoting,unsafe}()
+
+BUG: https://bugzilla.samba.org/show_bug.cgi?id=16033
+BUG: https://bugzilla.samba.org/show_bug.cgi?id=16034
+
+Pair-Programmed-With: Stefan Metzmacher <metze@samba.org>
+
+Signed-off-by: Douglas Bagnall <douglas.bagnall@catalyst.net.nz>
+Signed-off-by: Stefan Metzmacher <metze@samba.org>
+---
+ lib/util/tests/test_string_sub.c | 1044 ++++++++++++++++++++++++++++++
+ lib/util/wscript_build           |    6 +
+ selftest/tests.py                |    2 +
+ 3 files changed, 1052 insertions(+)
+ create mode 100644 lib/util/tests/test_string_sub.c
+
+diff --git a/lib/util/tests/test_string_sub.c b/lib/util/tests/test_string_sub.c
+new file mode 100644
+index 00000000000..da97c1c936c
+--- /dev/null
++++ b/lib/util/tests/test_string_sub.c
+@@ -0,0 +1,1044 @@
++
++#include <stdarg.h>
++#include <stddef.h>
++#include <stdint.h>
++#include <setjmp.h>
++#include <sys/stat.h>
++#include "replace.h"
++#include <cmocka.h>
++#include "talloc.h"
++
++#include "../substitute.h"
++
++/* set _DEBUG_VERBOSE to print more. */
++#define _DEBUG_VERBOSE
++
++#ifdef _DEBUG_VERBOSE
++#define debug_message(...) print_message(__VA_ARGS__)
++#else
++#define debug_message(...) /* debug_message */
++#endif
++
++
++static int setup_talloc_context(void **state)
++{
++	TALLOC_CTX *mem_ctx = talloc_new(NULL);
++	*state = mem_ctx;
++	return 0;
++}
++
++static int teardown_talloc_context(void **state)
++{
++	TALLOC_CTX *mem_ctx = *state;
++	TALLOC_FREE(mem_ctx);
++	return 0;
++}
++
++struct cmd_expansion {
++	const char *lp_cmd;
++	const char *username;
++	const char *result_cmd;
++	bool modified;
++	bool masked;
++	bool mixed_fallback;
++};
++
++static void _test_talloc_string_sub_unsafe(void **state,
++					   struct cmd_expansion expansions[],
++					   size_t n_expansions,
++					   const char *unsafe_characters)
++{
++	TALLOC_CTX *mem_ctx = *state;
++	size_t i;
++
++	for (i = 0; i < n_expansions; i++) {
++		struct cmd_expansion t = expansions[i];
++		char *result_cmd = NULL;
++		bool masked;
++		bool mixed_fallback;
++		bool modified;
++		bool flags_correct;
++		bool mixed;
++		int cmp;
++
++		mixed = talloc_string_sub_mixed_quoting(t.lp_cmd, 'u');
++
++		result_cmd = talloc_string_sub_unsafe(mem_ctx,
++						      t.lp_cmd,
++						      'u',
++						      t.username,
++						      unsafe_characters,
++						      '_',
++						      "FallbackUsername",
++						      &modified,
++						      &masked,
++						      &mixed_fallback);
++		assert_ptr_not_equal(result_cmd, NULL);
++		assert_ptr_not_equal(t.result_cmd, NULL);
++
++		cmp = strcmp(t.result_cmd, result_cmd);
++		flags_correct = (modified == t.modified &&
++				 masked == t.masked &&
++				 mixed_fallback == t.mixed_fallback);
++
++		if (cmp == 0) {
++			debug_message("[%zu] «%s» «%s»   ->   «%s»; AS EXPECTED\n",
++				      i, t.lp_cmd,
++				      t.username,
++				      result_cmd);
++		} else {
++			debug_message("[%zu] «%s» «%s»; "
++				      "expected   [%zu] «%s»   got  [%zu] «%s»\033[1;31m BAD! \033[0m\n",
++				      i, t.lp_cmd,
++				      t.username,
++				      strlen(t.result_cmd), t.result_cmd,
++				      strlen(result_cmd), result_cmd);
++		}
++		assert_int_equal(cmp, 0);
++		if (!flags_correct) {
++			debug_message("[%zu] ", i);
++#define _FLAG(x) debug_message((t. x  == x) ? "%s: %s √; ":		\
++			       "%s \033[1;31m expected %s \033[0m; ",	\
++			       #x, t.x ? "true": "false");
++			_FLAG(modified);
++			_FLAG(masked);
++			_FLAG(mixed_fallback);
++			debug_message("\n");
++		}
++		assert_int_equal(flags_correct, true);
++		if (mixed_fallback != mixed) {
++			debug_message("[%zu] %s mixed \033[1;31m expected %s \033[0m; ",
++				      i, t.lp_cmd,
++				      mixed_fallback ? "true": "false");
++		}
++		assert_int_equal(mixed_fallback, mixed);
++#undef _FLAG
++	}
++	debug_message("ALL correct\n");
++}
++
++static void test_talloc_string_sub_unsafe(void **state)
++{
++	const char *unsafe_characters = STRING_SUB_UNSAFE_CHARACTERS;
++
++	static struct cmd_expansion expansions[] = {
++		{
++			"/bin/echo \"bob'",
++			"bob",
++			"/bin/echo \"bob'",
++			false,
++			false,
++			false,
++		},
++		{
++			"/bin/echo '%u'",
++			"bob",
++			"/bin/echo 'bob'",
++			true,
++			false,
++			false,
++		},
++		{
++			"/bin/echo %u",
++			"bob",
++			"/bin/echo 'bob'",
++			true,
++			false,
++			false,
++		},
++		{
++			"/bin/echo %u",
++			"bob'",
++			"/bin/echo 'bob_'",
++			true,
++			true,
++			false,
++		},
++		{
++			"/bin/echo %u",
++			"bob'''",
++			"/bin/echo 'bob___'",
++			true,
++			true,
++			false,
++		},
++		{
++			"/bin/echo %u",
++			"bob\'",
++			"/bin/echo 'bob_'",
++			true,
++			true,
++			false,
++		},
++		{
++			"/bin/echo '%u",
++			"bob bob bob",
++			"/bin/echo 'FallbackUsername",
++			true,
++			false,
++			true,
++		},
++		{
++			"/bin/echo \"%u\"",
++			" ",
++			"/bin/echo ' '",
++			true,
++			false,
++			false,
++		},
++		{
++			"/bin/echo \"--uu=%u\"",
++			"bob",
++			"/bin/echo \"--uu=FallbackUsername\"",
++			true,
++			false,
++			true,
++		},
++		{
++			"/bin/echo \"--uu=%u\"",
++			"bob !0",
++			"/bin/echo \"--uu=FallbackUsername\"",
++			true,
++			false,
++			true,
++		},
++		{
++			"/bin/echo %u",
++			"!0",
++			"/bin/echo '!0'",
++			true,
++			false,
++			false,
++		},
++		{
++			"/bin/echo \"--uu=%u\"",
++			"bob \\",
++			"/bin/echo \"--uu=FallbackUsername\"",
++			true,
++			false,
++			true,
++		},
++		{
++			"/bin/echo --uu='%u'",
++			"bob >> x",
++			"/bin/echo --uu='bob __ x'",
++			true,
++			true,
++			false,
++		},
++		{
++			"/bin/echo '--uu=%u\"",
++			"bob",
++			"/bin/echo '--uu=FallbackUsername\"",
++			true,
++			false,
++			true,
++		},
++		{
++			"/bin/echo --uu='%u'",
++			"bob",
++			"/bin/echo --uu='bob'",
++			true,
++			false,
++			false,
++		},
++		{
++			"/bin/echo --uu'=%u'",
++			"bob",
++			"/bin/echo --uu'=FallbackUsername'",
++			true,
++			false,
++			true,
++		},
++		{
++			"/bin/echo --uu'=%u'",
++			"`ls`",
++			"/bin/echo --uu'=FallbackUsername'",
++			true,
++			true,
++			true,
++		},
++		{
++			"/bin/echo --uu='%u'",
++			"u%u%u%u%u",
++			"/bin/echo --uu='u_u_u_u_u'",
++			true,
++			true,
++			false,
++		},
++		{
++			"/bin/echo --uu='%u'",
++			"$(ls)",
++			"/bin/echo --uu='_(ls)'",
++			true,
++			true,
++			false,
++		},
++		{
++			"/bin/echo --uu='%u'",
++			"`ls`",
++			"/bin/echo --uu='_ls_'",
++			true,
++			true,
++			false,
++		},
++		{
++			"/bin/echo --uu='1' %u",
++			"`ls`",
++			"/bin/echo --uu='1' FallbackUsername",
++			true,
++			true,
++			true,
++		},
++		{
++			"/bin/echo --uu=\"'%u'\"",
++			"bob",
++			"/bin/echo --uu=\"'bob'\"",
++			true,
++			false,
++			false,
++		},
++		{
++			"/bin/echo --uu='%u' --yy='%u' '%u' %u",
++			"bob",
++			"/bin/echo --uu='bob' --yy='bob' 'bob' FallbackUsername",
++			true,
++			false,
++			true,
++		},
++		{
++			"/bin/echo --uu=%u%u%u'' %user 50%u",
++			"bob",
++			"/bin/echo --uu=FallbackUsernameFallbackUsernameFallbackUsername'' FallbackUsernameser 50FallbackUsername",
++			true,
++			false,
++			true,
++		},
++		{
++			"/bin/echo %u",
++			"!!",
++			"/bin/echo '!!'",
++			true,
++			false,
++			false,
++		},
++		{
++			"/bin/echo %u",
++			">xxx",
++			"/bin/echo '_xxx'",
++			true,
++			true,
++			false,
++		},
++		{
++			"/bin/echo %u",
++			"3",
++			"/bin/echo '3'",
++			true,
++			false,
++			false,
++		},
++		{
++			"/bin/echo '%u'",
++			"3$",
++			"/bin/echo '3_'",
++			true,
++			true,
++			false,
++		},
++		{
++			"/bin/echo '%u'",
++			"comp$",
++			"/bin/echo 'comp_'",
++			true,
++			true,
++			false,
++		},
++		{
++			"/bin/echo '%u'",
++			"3$3",
++			"/bin/echo '3_3'",
++			true,
++			true,
++			false,
++		},
++		{
++			"/bin/echo '%u'",
++			"q $3",
++			"/bin/echo 'q _3'",
++			true,
++			true,
++			false,
++		},
++		{
++			"/bin/echo '%u",
++			"q $3",
++			"/bin/echo 'FallbackUsername",
++			true,
++			true,
++			true,
++		},
++		{
++			"/bin/echo -s '%u' %u",
++			"āāā",
++			"/bin/echo -s 'āāā' FallbackUsername",
++			true,
++			false,
++			true,
++		},
++		{
++			"/bin/echo -s '%u' %u",
++			"-āāā",
++			"/bin/echo -s '_āāā' FallbackUsername",
++			true,
++			true,
++			true,
++		},
++		{
++			"/bin/echo -s %u",
++			"āāā",
++			"/bin/echo -s 'āāā'",
++			true,
++			false,
++			false,
++		},
++		{
++			"/bin/echo -s %u",
++			"a -a",
++			"/bin/echo -s 'a -a'",
++			true,
++			false,
++			false,
++		},
++		{
++			"/bin/echo -s=%u %u",
++			"ā -a",
++			"/bin/echo -s='ā -a' 'ā -a'",
++			true,
++			false,
++			false,
++		},
++		{
++			"/bin/echo -s=\"%u %u\"",
++			"ā -a",
++			"/bin/echo -s=\"FallbackUsername FallbackUsername\"",
++			true,
++			false,
++			true,
++		},
++		{
++			"/bin/echo -m='fridge' %u",
++			"ā  -ß",
++			"/bin/echo -m='fridge' FallbackUsername",
++			true,
++			false,
++			true,
++		},
++		{
++			"/bin/echo -m='fridge' %u",
++			"-ā -a",
++			"/bin/echo -m='fridge' FallbackUsername",
++			true,
++			true,
++			true,
++		},
++		{
++			"/bin/echo %u",
++			"-n",
++			"/bin/echo '_n'",
++			true,
++			true,
++			false,
++		},
++		{
++			"/bin/echo %u",
++			"o'clock",
++			"/bin/echo 'o_clock'",
++			true,
++			true,
++			false,
++		},
++		{
++			"/bin/echo \"bob'",
++			"bob",
++			"/bin/echo \"bob'",
++			false,
++			false,
++			false,
++		},
++		{
++			"/bin/echo \"%u\"",
++			"%u",
++			"/bin/echo '_u'",
++			true,
++			true,
++			false,
++		},
++		{
++			"/bin/echo \"$(ls)\"",
++			"%u",
++			"/bin/echo \"$(ls)\"",
++			false,
++			false,
++			false,
++		},
++		{
++			"/bin/echo %u",
++			"\\",
++			"/bin/echo '\\'",
++			true,
++			false,
++			false,
++		},
++		{
++			"/bin/echo '%u'",
++			"\\",
++			"/bin/echo '\\'",
++			true,
++			false,
++			false,
++		},
++		{
++			"/bin/echo \"%u\"",
++			"\\",
++			"/bin/echo '\\'",
++			true,
++			false,
++			false,
++		},
++		{
++			"/bin/echo \"%u\" %u",
++			"\\",
++			"/bin/echo '\\' FallbackUsername",
++			true,
++			false,
++			true,
++		},
++		{
++			"/bin/echo '%u' \"%u\" %u",
++			"\\",
++			"/bin/echo '\\' \"FallbackUsername\" FallbackUsername",
++			true,
++			false,
++			true,
++		},
++		{
++			"/bin/echo '%u' \"%u\"",
++			"bob",
++			"/bin/echo 'bob' \"FallbackUsername\"",
++			true,
++			false,
++			true,
++		},
++	};
++
++	_test_talloc_string_sub_unsafe(state,
++				       expansions,
++				       ARRAY_SIZE(expansions),
++				       unsafe_characters);
++}
++
++static void test_talloc_string_sub_unsafe_minimal_unsafe_chars(void **state)
++{
++	const char *unsafe_characters = "\"'%";
++
++	static struct cmd_expansion expansions[] = {
++		{
++			"/bin/echo \"bob'",
++			"bob",
++			"/bin/echo \"bob'",
++			false,
++			false,
++			false,
++		},
++		{
++			"/bin/echo '%u'",
++			"bob",
++			"/bin/echo 'bob'",
++			true,
++			false,
++			false,
++		},
++		{
++			"/bin/echo %u",
++			"bob",
++			"/bin/echo 'bob'",
++			true,
++			false,
++			false,
++		},
++		{
++			"/bin/echo %u",
++			"bob'",
++			"/bin/echo 'bob_'",
++			true,
++			true,
++			false,
++		},
++		{
++			"/bin/echo %u",
++			"bob'''",
++			"/bin/echo 'bob___'",
++			true,
++			true,
++			false,
++		},
++		{
++			"/bin/echo %u",
++			"bob\'",
++			"/bin/echo 'bob_'",
++			true,
++			true,
++			false,
++		},
++		{
++			"/bin/echo '%u",
++			"bob bob bob",
++			"/bin/echo 'FallbackUsername",
++			true,
++			false,
++			true,
++		},
++		{
++			"/bin/echo \"%u\"",
++			" ",
++			"/bin/echo ' '",
++			true,
++			false,
++			false,
++		},
++		{
++			"/bin/echo \"--uu=%u\"",
++			"bob",
++			"/bin/echo \"--uu=FallbackUsername\"",
++			true,
++			false,
++			true,
++		},
++		{
++			"/bin/echo \"--uu=%u\"",
++			"bob !0",
++			"/bin/echo \"--uu=FallbackUsername\"",
++			true,
++			false,
++			true,
++		},
++		{
++			"/bin/echo %u",
++			"!0",
++			"/bin/echo '!0'",
++			true,
++			false,
++			false,
++		},
++		{
++			"/bin/echo \"--uu=%u\"",
++			"bob \\",
++			"/bin/echo \"--uu=FallbackUsername\"",
++			true,
++			false,
++			true,
++		},
++		{
++			"/bin/echo --uu='%u'",
++			"bob >> x",
++			"/bin/echo --uu='bob >> x'",
++			true,
++			false,
++			false,
++		},
++		{
++			"/bin/echo '--uu=%u\"",
++			"bob",
++			"/bin/echo '--uu=FallbackUsername\"",
++			true,
++			false,
++			true,
++		},
++		{
++			"/bin/echo --uu='%u'",
++			"bob",
++			"/bin/echo --uu='bob'",
++			true,
++			false,
++			false,
++		},
++		{
++			"/bin/echo --uu'=%u'",
++			"bob",
++			"/bin/echo --uu'=FallbackUsername'",
++			true,
++			false,
++			true,
++		},
++		{
++			"/bin/echo --uu'=%u'",
++			"`ls`",
++			"/bin/echo --uu'=FallbackUsername'",
++			true,
++			false,
++			true,
++		},
++		{
++			"/bin/echo --uu='%u'",
++			"u%u%u%u%u",
++			"/bin/echo --uu='u_u_u_u_u'",
++			true,
++			true,
++			false,
++		},
++		{
++			"/bin/echo --uu='%u'",
++			"$(ls)",
++			"/bin/echo --uu='$(ls)'",
++			true,
++			false,
++			false,
++		},
++		{
++			"/bin/echo --uu='%u'",
++			"`ls`",
++			"/bin/echo --uu='`ls`'",
++			true,
++			false,
++			false,
++		},
++		{
++			"/bin/echo --uu='1' %u",
++			"`ls`",
++			"/bin/echo --uu='1' FallbackUsername",
++			true,
++			false,
++			true,
++		},
++		{
++			"/bin/echo --uu=\"'%u'\"",
++			"bob",
++			"/bin/echo --uu=\"'bob'\"",
++			true,
++			false,
++			false,
++		},
++		{
++			"/bin/echo --uu='%u' --yy='%u' '%u' %u",
++			"bob",
++			"/bin/echo --uu='bob' --yy='bob' 'bob' FallbackUsername",
++			true,
++			false,
++			true,
++		},
++		{
++			"/bin/echo --uu=%u%u%u'' %user 50%u",
++			"bob",
++			"/bin/echo --uu=FallbackUsernameFallbackUsernameFallbackUsername'' FallbackUsernameser 50FallbackUsername",
++			true,
++			false,
++			true,
++		},
++		{
++			"/bin/echo %u",
++			"!!",
++			"/bin/echo '!!'",
++			true,
++			false,
++			false,
++		},
++		{
++			"/bin/echo %u",
++			">xxx",
++			"/bin/echo '>xxx'",
++			true,
++			false,
++			false,
++		},
++		{
++			"/bin/echo %u",
++			"3",
++			"/bin/echo '3'",
++			true,
++			false,
++			false,
++		},
++		{
++			"/bin/echo '%u'",
++			"3$",
++			"/bin/echo '3$'",
++			true,
++			false,
++			false,
++		},
++		{
++			"/bin/echo '%u'",
++			"comp$",
++			"/bin/echo 'comp$'",
++			true,
++			false,
++			false,
++		},
++		{
++			"/bin/echo '%u'",
++			"3$3",
++			"/bin/echo '3$3'",
++			true,
++			false,
++			false,
++		},
++		{
++			"/bin/echo '%u'",
++			"q $3",
++			"/bin/echo 'q $3'",
++			true,
++			false,
++			false,
++		},
++		{
++			"/bin/echo '%u",
++			"q $3",
++			"/bin/echo 'FallbackUsername",
++			true,
++			false,
++			true,
++		},
++		{
++			"/bin/echo -s '%u' %u",
++			"āāā",
++			"/bin/echo -s 'āāā' FallbackUsername",
++			true,
++			false,
++			true,
++		},
++		{
++			"/bin/echo -s '%u' %u",
++			"-āāā",
++			"/bin/echo -s '_āāā' FallbackUsername",
++			true,
++			true,
++			true,
++		},
++		{
++			"/bin/echo -s %u",
++			"āāā",
++			"/bin/echo -s 'āāā'",
++			true,
++			false,
++			false,
++		},
++		{
++			"/bin/echo -s %u",
++			"a -a",
++			"/bin/echo -s 'a -a'",
++			true,
++			false,
++			false,
++		},
++		{
++			"/bin/echo -s=%u %u",
++			"ā -a",
++			"/bin/echo -s='ā -a' 'ā -a'",
++			true,
++			false,
++			false,
++		},
++		{
++			"/bin/echo -s=\"%u %u\"",
++			"ā -a",
++			"/bin/echo -s=\"FallbackUsername FallbackUsername\"",
++			true,
++			false,
++			true,
++		},
++		{
++			"/bin/echo -m='fridge' %u",
++			"ā  -ß",
++			"/bin/echo -m='fridge' FallbackUsername",
++			true,
++			false,
++			true,
++		},
++		{
++			"/bin/echo -m='fridge' %u",
++			"-ā -a",
++			"/bin/echo -m='fridge' FallbackUsername",
++			true,
++			true,
++			true,
++		},
++		{
++			"/bin/echo %u",
++			"-n",
++			"/bin/echo '_n'",
++			true,
++			true,
++			false,
++		},
++		{
++			"/bin/echo %u",
++			"o'clock",
++			"/bin/echo 'o_clock'",
++			true,
++			true,
++			false,
++		},
++		{
++			"/bin/echo \"bob'",
++			"bob",
++			"/bin/echo \"bob'",
++			false,
++			false,
++			false,
++		},
++		{
++			"/bin/echo \"%u\"",
++			"%u",
++			"/bin/echo '_u'",
++			true,
++			true,
++			false,
++		},
++		{
++			"/bin/echo \"$(ls)\"",
++			"%u",
++			"/bin/echo \"$(ls)\"",
++			false,
++			false,
++			false,
++		},
++		{
++			"/bin/echo %u",
++			"\\",
++			"/bin/echo '\\'",
++			true,
++			false,
++			false,
++		},
++		{
++			"/bin/echo '%u'",
++			"\\",
++			"/bin/echo '\\'",
++			true,
++			false,
++			false,
++		},
++		{
++			"/bin/echo \"%u\"",
++			"\\",
++			"/bin/echo '\\'",
++			true,
++			false,
++			false,
++		},
++		{
++			"/bin/echo \"%u\" %u",
++			"\\",
++			"/bin/echo '\\' FallbackUsername",
++			true,
++			false,
++			true,
++		},
++		{
++			"/bin/echo '%u' \"%u\" %u",
++			"\\",
++			"/bin/echo '\\' \"FallbackUsername\" FallbackUsername",
++			true,
++			false,
++			true,
++		},
++		{
++			"/bin/echo '%u' \"%u\"",
++			"bob",
++			"/bin/echo 'bob' \"FallbackUsername\"",
++			true,
++			false,
++			true,
++		},
++	};
++
++	_test_talloc_string_sub_unsafe(state,
++				       expansions,
++				       ARRAY_SIZE(expansions),
++				       unsafe_characters);
++}
++
++static void test_talloc_string_sub_unsafe_all_mixes(void **state)
++{
++	const char *unsafe_characters = STRING_SUB_UNSAFE_CHARACTERS;
++	size_t i;
++
++	for (i = 0; i < 32; i++) {
++		char in[100] = { 0, };
++		char out[100] = { 0, };
++		struct cmd_expansion expansions[] = {
++			{
++				in,
++				"bob",
++				out,
++				true,
++				false,
++				false,
++			},
++		};
++		bool vsq = i & 1;
++		bool vdq = i & 2;
++		bool v = i & 4;
++		bool sq = i & 8;
++		bool dq = i & 16;
++		char *inp = in;
++		char *outp = out;
++		if (vsq) {
++			inp = stpcpy(inp, "'%u' ");
++			outp = stpcpy(outp, "'bob' ");
++			debug_message("vsq ");
++		}
++		if (vdq) {
++			inp = stpcpy(inp, "\"%u\" ");
++			outp = stpcpy(outp, (vsq || sq) ? "\"FallbackUsername\" " : "'bob' ");
++			debug_message("vdq ");
++			if (vsq || sq) {
++				expansions[0].mixed_fallback = true;
++			}
++		}
++		if (v) {
++			inp = stpcpy(inp, "%u ");
++			outp = stpcpy(outp, (vsq || vdq || sq || dq) ? "FallbackUsername " : "'bob' ");
++			debug_message("v ");
++			if (vsq || vdq || sq || dq) {
++				expansions[0].mixed_fallback = true;
++			}
++		}
++		if (sq) {
++			inp = stpcpy(inp, "' ");
++			outp = stpcpy(outp, "' ");
++			debug_message("sq ");
++		}
++		if (dq) {
++			inp = stpcpy(inp, "\" ");
++			outp = stpcpy(outp, "\" ");
++			debug_message("dq ");
++		}
++		debug_message("(i: %zu)\n", i);
++		*inp = '\0';
++		*outp = '\0';
++		expansions[0].modified = strcmp(in, out) != 0;
++
++		_test_talloc_string_sub_unsafe(state,
++					       expansions,
++					       ARRAY_SIZE(expansions),
++					       unsafe_characters);
++	}
++}
++
++
++int main(void)
++{
++	const struct CMUnitTest tests[] = {
++		cmocka_unit_test(test_talloc_string_sub_unsafe),
++		cmocka_unit_test(test_talloc_string_sub_unsafe_minimal_unsafe_chars),
++		cmocka_unit_test(test_talloc_string_sub_unsafe_all_mixes),
++	};
++	if (!isatty(1)) {
++		cmocka_set_message_output(CM_OUTPUT_SUBUNIT);
++	}
++	return cmocka_run_group_tests(tests,
++				      setup_talloc_context,
++				      teardown_talloc_context);
++}
+diff --git a/lib/util/wscript_build b/lib/util/wscript_build
+index 9dff0e8925d..c9c04f1aaed 100644
+--- a/lib/util/wscript_build
++++ b/lib/util/wscript_build
+@@ -420,3 +420,9 @@ else:
+                      deps='cmocka replace talloc stable_sort',
+                      local_include=False,
+                      for_selftest=True)
++
++    bld.SAMBA3_BINARY('test_string_sub',
++                      source='tests/test_string_sub.c',
++                      deps='''cmocka replace talloc samba-util
++                      ''',
++                      for_selftest=True)
+diff --git a/selftest/tests.py b/selftest/tests.py
+index 53461229644..71634191dd1 100644
+--- a/selftest/tests.py
++++ b/selftest/tests.py
+@@ -559,6 +559,8 @@ plantestsuite("samba.unittests.sys_rw", "none",
+               [os.path.join(bindir(), "default/lib/util/test_sys_rw")])
+ plantestsuite("samba.unittests.stable_sort", "none",
+               [os.path.join(bindir(), "default/lib/util/test_stable_sort")])
++plantestsuite("samba.unittests.test_string_sub", "none",
++              [os.path.join(bindir(), "test_string_sub")])
+ plantestsuite("samba.unittests.ntlm_check", "none",
+               [os.path.join(bindir(), "default/libcli/auth/test_ntlm_check")])
+ plantestsuite("samba.unittests.gnutls", "none",
+-- 
+2.43.0
+
+
+From 1fa0de299c3017b15521ee54b8610f4a839441fb Mon Sep 17 00:00:00 2001
+From: Stefan Metzmacher <metze@samba.org>
+Date: Sun, 15 Mar 2026 19:15:14 +0100
+Subject: [PATCH 22/31] CVE-2026-4480: s3:printing: mask and/or single quote
+ jobname passed as %J to "print command"
+
+Fix an unauthenticated remote code execution vulnerability with
+printing set to anything *but* cups and iprint, for example "lprng",
+so that "print command" is executed upon job submission. If the
+client-controlled job name is handed to the "print command" via %J,
+rpcd_spoolssd passes this to the shell without escaping critical
+characters.
+
+Using single quotes (directly) around %J, '%J' would avoid the
+problem, we now try to autodetect if we can use '%J' implicitly
+or we fallback to a fixed "__CVE-2026-4480_FallbackJobname__"
+string instead of the client provided jobname.
+
+BUG: https://bugzilla.samba.org/show_bug.cgi?id=16033
+
+Signed-off-by: Stefan Metzmacher <metze@samba.org>
+Reviewed-by: Douglas Bagnall <douglas.bagnall@catalyst.net.nz>
+---
+ source3/printing/print_generic.c | 107 +++++++++++++++++++++++++++----
+ 1 file changed, 94 insertions(+), 13 deletions(-)
+
+diff --git a/source3/printing/print_generic.c b/source3/printing/print_generic.c
+index a8bf9aff972..f73443e4b6c 100644
+--- a/source3/printing/print_generic.c
++++ b/source3/printing/print_generic.c
+@@ -19,6 +19,7 @@
+ 
+ #include "includes.h"
+ #include "lib/util/util_file.h"
++#include "lib/util/util_str_escape.h"
+ #include "printing.h"
+ #include "smbd/proto.h"
+ #include "source3/lib/substitute.h"
+@@ -207,6 +208,52 @@ static int generic_queue_get(const char *printer_name,
+ 	return qcount;
+ }
+ 
++static const char *replace_print_cmd_J(TALLOC_CTX *mem_ctx,
++				       const char *orig_cmd,
++				       const char *unsafe_jobname,
++				       const char *fallback_jobname)
++{
++	char *cmd = NULL;
++	bool modified = false;
++	bool masked = false;
++	bool mixed_fallback = false;
++
++	/*
++	 * This replaces unsafe characters with '_'.
++	 * We also mask forward and backslash here.
++	 *
++	 * Then it replaces %J with an single quoted
++	 * version of the masked jobname or it falls
++	 * back to fallback_jobname is the print command
++	 * uses strange mixed quoting.
++	 */
++
++#define JOBNAME_UNSAFE_CHARACTERS \
++	STRING_SUB_UNSAFE_CHARACTERS "/\\"
++
++	cmd = talloc_string_sub_unsafe(mem_ctx,
++				       orig_cmd,
++				       'J',
++				       unsafe_jobname,
++				       JOBNAME_UNSAFE_CHARACTERS,
++				       '_',
++				       fallback_jobname,
++				       &modified,
++				       &masked,
++				       &mixed_fallback);
++	if (cmd == NULL) {
++		return NULL;
++	}
++
++	/*
++	 * The caller already checked talloc_string_sub_mixed_quoting()
++	 * and warned the admin, so we don't check mixed_fallback
++	 * here
++	 */
++
++	return cmd;
++}
++
+ /****************************************************************************
+  Submit a file for printing - called from print_job_end()
+ ****************************************************************************/
+@@ -222,11 +269,12 @@ static int generic_job_submit(int snum, struct printjob *pjob,
+ 	char *print_directory = NULL;
+ 	char *wd = NULL;
+ 	char *p = NULL;
+-	char *jobname = NULL;
++	const char *print_cmd = NULL;
+ 	TALLOC_CTX *ctx = talloc_tos();
+ 	fstring job_page_count, job_size;
+ 	print_queue_struct *q;
+ 	print_status_struct status;
++	const char *jobname = "No Document Name";
+ 
+ 	/* we print from the directory path to give the best chance of
+            parsing the lpq output */
+@@ -255,24 +303,48 @@ static int generic_job_submit(int snum, struct printjob *pjob,
+ 		return -1;
+ 	}
+ 
+-	jobname = talloc_strdup(ctx, pjob->jobname);
+-	if (!jobname) {
+-		ret = -1;
+-		goto out;
++	if (pjob->jobname[0] != '\0') {
++		jobname = pjob->jobname;
+ 	}
+-	jobname = talloc_string_sub(ctx, jobname, "'", "_");
+-	if (!jobname) {
+-		ret = -1;
+-		goto out;
++
++	print_cmd = lp_print_command(snum);
++	if (print_cmd != NULL) {
++		const char *invalid_jobname = "__CVE-2026-4480_FallbackJobname__";
++
++		if (talloc_string_sub_mixed_quoting(print_cmd, 'J')) {
++			/*
++			 * The admin used a strange mixture of
++			 * single and double quotes, fallback
++			 * to InvalidDocumentName and warn about
++			 * it, so that the admin can adjust to
++			 * the use single quotes directly around %J,
++			 * e.g. '%J'.
++			 */
++			jobname = invalid_jobname;
++			D_WARNING("CVE-2026-4480: printer %s "
++				  "strange quoting in 'print command', "
++				  "falling back to jobname=%s, "
++				  "use testparm to fix the configuration\n",
++				  lp_printername(talloc_tos(), lp_sub, snum),
++				  invalid_jobname);
++		}
++
++		print_cmd = replace_print_cmd_J(ctx,
++						print_cmd,
++						jobname,
++						invalid_jobname);
++		if (!print_cmd) {
++			ret = -1;
++			goto out;
++		}
+ 	}
+ 	fstr_sprintf(job_page_count, "%d", pjob->page_count);
+ 	fstr_sprintf(job_size, "%zu", pjob->size);
+ 
+ 	/* send it to the system spooler */
+ 	ret = print_run_command(snum, lp_printername(talloc_tos(), lp_sub, snum), True,
+-			lp_print_command(snum), NULL,
++			print_cmd, NULL,
+ 			"%s", p,
+-			"%J", jobname,
+ 			"%f", p,
+ 			"%z", job_size,
+ 			"%c", job_page_count,
+@@ -293,9 +365,14 @@ static int generic_job_submit(int snum, struct printjob *pjob,
+ 		int i;
+ 		for (i = 0; i < ret; i++) {
+ 			if (strcmp(q[i].fs_file, p) == 0) {
++				char *le_jobname =
++					log_escape(talloc_tos(), jobname);
++
+ 				pjob->sysjob = q[i].sysjob;
+ 				DEBUG(5, ("new job %u (%s) matches sysjob %d\n",
+-					  pjob->jobid, jobname, pjob->sysjob));
++					  pjob->jobid, le_jobname, pjob->sysjob));
++
++				TALLOC_FREE(le_jobname);
+ 				break;
+ 			}
+ 		}
+@@ -303,8 +380,12 @@ static int generic_job_submit(int snum, struct printjob *pjob,
+ 		ret = 0;
+ 	}
+ 	if (pjob->sysjob == -1) {
++		char *le_jobname = log_escape(talloc_tos(), jobname);
++
+ 		DEBUG(2, ("failed to get sysjob for job %u (%s), tracking as "
+-			  "Unix job\n", pjob->jobid, jobname));
++			  "Unix job\n", pjob->jobid, le_jobname));
++
++		TALLOC_FREE(le_jobname);
+ 	}
+ 
+ 
+-- 
+2.43.0
+
+
+From ab89c71bf6705dcf45f683e3562fcfed7cb6b7b3 Mon Sep 17 00:00:00 2001
+From: Stefan Metzmacher <metze@samba.org>
+Date: Fri, 8 May 2026 23:27:35 +0200
+Subject: [PATCH 23/31] CVE-2026-4480: s3:testparm: warn about 'print command'
+ %J usage
+
+BUG: https://bugzilla.samba.org/show_bug.cgi?id=16033
+
+Signed-off-by: Stefan Metzmacher <metze@samba.org>
+Reviewed-by: Douglas Bagnall <douglas.bagnall@catalyst.net.nz>
+---
+ source3/utils/testparm.c | 8 ++++++++
+ 1 file changed, 8 insertions(+)
+
+diff --git a/source3/utils/testparm.c b/source3/utils/testparm.c
+index a93bc020607..7406d9fdd6c 100644
+--- a/source3/utils/testparm.c
++++ b/source3/utils/testparm.c
+@@ -918,6 +918,14 @@ static void do_per_share_checks(int s)
+ 			"parameter is ignored when using CUPS libraries.\n\n",
+ 			lp_servicename(talloc_tos(), lp_sub, s));
+ 	}
++	if (talloc_string_sub_mixed_quoting(lp_print_command(s), 'J')) {
++		fprintf(stderr,
++			"WARNING: Service %s defines a 'print command' "
++			"with mixed quoting and %%J.\n"
++			"CVE-2026-4480 changed the way %%J substitution works.\n"
++			"You should use single quotes (directly) around '%%J'.\n\n",
++			lp_servicename(talloc_tos(), lp_sub, s));
++	}
+ 
+ 	vfs_objects = lp_vfs_objects(s);
+ 	if (vfs_objects && str_list_check(vfs_objects, "fruit")) {
+-- 
+2.43.0
+
+
+From a6c06f6fcf50db2297166017261829ab712d3b69 Mon Sep 17 00:00:00 2001
+From: Stefan Metzmacher <metze@samba.org>
+Date: Mon, 11 May 2026 14:11:34 +0200
+Subject: [PATCH 24/31] CVE-2026-4480: docs-xml/smbdotconf: clarify '%J' in
+ 'print command'
+
+Admins should use '%J'.
+
+BUG: https://bugzilla.samba.org/show_bug.cgi?id=16033
+
+Signed-off-by: Stefan Metzmacher <metze@samba.org>
+Reviewed-by: Douglas Bagnall <douglas.bagnall@catalyst.net.nz>
+---
+ docs-xml/smbdotconf/printing/printcommand.xml | 7 +++++--
+ 1 file changed, 5 insertions(+), 2 deletions(-)
+
+diff --git a/docs-xml/smbdotconf/printing/printcommand.xml b/docs-xml/smbdotconf/printing/printcommand.xml
+index c84e45f404d..d708287932a 100644
+--- a/docs-xml/smbdotconf/printing/printcommand.xml
++++ b/docs-xml/smbdotconf/printing/printcommand.xml
+@@ -21,8 +21,11 @@
+     <para>%p - the appropriate printer 
+     name</para>
+ 
+-    <para>%J - the job 
+-    name as transmitted by the client.</para>
++    <para>%J - the job name as transmitted by the client,
++    but with dangerous characters being replaced by _.
++    You should use single quotes (directly) around %J, e.g. '%J',
++    see CVE-2026-4480 for more details.
++    </para>
+ 
+     <para>%c - The number of printed pages
+     of the spooled job (if known).</para>
+-- 
+2.43.0
+
+
+From 0e9e9e80e4fc19765f181d0aab2ff2db717356e5 Mon Sep 17 00:00:00 2001
+From: Stefan Metzmacher <metze@samba.org>
+Date: Thu, 23 Apr 2026 18:56:21 +0200
+Subject: [PATCH 25/31] CVE-2026-4408: lib/util: introduce
+ strstr_for_invalid_account_characters()
+
+This splits out the logic from samaccountname_bad_chars_check()
+in source4/dsdb/samdb/ldb_modules/samldb.c, this will be used
+in other places soon.
+
+BUG: https://bugzilla.samba.org/show_bug.cgi?id=16034
+
+Signed-off-by: Stefan Metzmacher <metze@samba.org>
+Reviewed-by: Douglas Bagnall <douglas.bagnall@catalyst.net.nz>
+---
+ lib/util/samba_util.h |  9 +++++++++
+ lib/util/util_str.c   | 38 ++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 47 insertions(+)
+
+diff --git a/lib/util/samba_util.h b/lib/util/samba_util.h
+index 03dee5c6137..ea741b51c58 100644
+--- a/lib/util/samba_util.h
++++ b/lib/util/samba_util.h
+@@ -303,6 +303,15 @@ _PUBLIC_ bool set_boolean(const char *boolean_string, bool *boolean);
+  */
+ _PUBLIC_ bool conv_str_bool(const char * str, bool * val);
+ 
++/**
++ * Returns a pointer to the first invalid character in name.
++ *
++ * Passing a NULL pointer as name is not allowed!
++ *
++ * This returns NULL for a valid account name.
++ **/
++_PUBLIC_ const char *strstr_for_invalid_account_characters(const char *name);
++
+ /**
+  * Convert a size specification like 16K into an integral number of bytes.
+  **/
+diff --git a/lib/util/util_str.c b/lib/util/util_str.c
+index 7c1d15dbeb0..c4eda4f49f3 100644
+--- a/lib/util/util_str.c
++++ b/lib/util/util_str.c
+@@ -305,3 +305,41 @@ _PUBLIC_ bool set_boolean(const char *boolean_string, bool *boolean)
+ 	}
+ 	return false;
+ }
++
++_PUBLIC_ const char *strstr_for_invalid_account_characters(const char *name)
++{
++	/*
++	 * Return a pointer to the first invalid character in the
++	 * sAMAccountName, or NULL if the whole name is valid.
++	 *
++	 * The rules here are based on
++	 *
++	 * https://social.technet.microsoft.com/wiki/contents/articles/11216.active-directory-requirements-for-creating-objects.aspx
++	 */
++	size_t i;
++
++	for (i = 0; name[i] != '\0'; i++) {
++		uint8_t c = name[i];
++		const char *p = NULL;
++
++		if (iscntrl(c)) {
++			return &name[i];
++		}
++
++		p = strchr("\"[]:;|=+*?<>/\\,", c);
++		if (p != NULL) {
++			return &name[i];
++		}
++	}
++
++	if (i == 0) {
++		return &name[i];
++	}
++
++	if (name[i - 1] == '.') {
++		i -= 1;
++		return &name[i];
++	}
++
++	return NULL;
++}
+-- 
+2.43.0
+
+
+From 13cadd908bde2d4a4713654bf058be75a167a5c0 Mon Sep 17 00:00:00 2001
+From: Stefan Metzmacher <metze@samba.org>
+Date: Mon, 11 May 2026 20:21:36 +0200
+Subject: [PATCH 26/31] CVE-2026-4408: s3:samr-server: only allow
+ _samr_ValidatePassword as DC
+
+This is only supported with 'rpc start on demand helpers = no',
+as it needs ncacn_ip_tcp, but we better also restrict it to DCs.
+
+Maybe only FreeIPA needs it as NT4 didn't support ncacn_ip_tcp.
+
+BUG: https://bugzilla.samba.org/show_bug.cgi?id=16034
+
+Signed-off-by: Stefan Metzmacher <metze@samba.org>
+Reviewed-by: Douglas Bagnall <douglas.bagnall@catalyst.net.nz>
+---
+ source3/rpc_server/samr/srv_samr_nt.c | 8 ++++++++
+ 1 file changed, 8 insertions(+)
+
+diff --git a/source3/rpc_server/samr/srv_samr_nt.c b/source3/rpc_server/samr/srv_samr_nt.c
+index e0d0875bd5d..3937dbe3f32 100644
+--- a/source3/rpc_server/samr/srv_samr_nt.c
++++ b/source3/rpc_server/samr/srv_samr_nt.c
+@@ -7500,6 +7500,14 @@ NTSTATUS _samr_ValidatePassword(struct pipes_struct *p,
+ 		return NT_STATUS_ACCESS_DENIED;
+ 	}
+ 
++	if (lp_server_role() <= ROLE_DOMAIN_MEMBER) {
++		/*
++		 * We only want this on DCs
++		 */
++		p->fault_state = DCERPC_FAULT_ACCESS_DENIED;
++		return NT_STATUS_ACCESS_DENIED;
++	}
++
+ 	if (r->in.level < 1 || r->in.level > 3) {
+ 		return NT_STATUS_INVALID_INFO_CLASS;
+ 	}
+-- 
+2.43.0
+
+
+From 0c59608fbaed35fe2959bf1adcdbde7be255766e Mon Sep 17 00:00:00 2001
+From: Stefan Metzmacher <metze@samba.org>
+Date: Wed, 18 Mar 2026 12:24:47 +0100
+Subject: [PATCH 27/31] CVE-2026-4408: s3:samr-server: deny, mask and/or single
+ quote username to 'check password script'
+
+We pass this on to the check password script, prevent remote command
+execution.
+
+We now try to autodetect if we could implicitly use '%u' for the
+replacement and fallback to a fixed fallback username.
+
+Admins should make use of SAMBA_CPS_ACCOUNT_NAME
+instead of passing '%u' to 'check password script'
+
+BUG: https://bugzilla.samba.org/show_bug.cgi?id=16034
+
+Pair-Programmed-With: Douglas Bagnall <douglas.bagnall@catalyst.net.nz>
+
+Signed-off-by: Stefan Metzmacher <metze@samba.org>
+Signed-off-by: Douglas Bagnall <douglas.bagnall@catalyst.net.nz>
+---
+ source3/rpc_server/samr/srv_samr_chgpasswd.c | 110 +++++++++++++++++--
+ 1 file changed, 101 insertions(+), 9 deletions(-)
+
+diff --git a/source3/rpc_server/samr/srv_samr_chgpasswd.c b/source3/rpc_server/samr/srv_samr_chgpasswd.c
+index 6c0c0da0cfc..9afb8799aea 100644
+--- a/source3/rpc_server/samr/srv_samr_chgpasswd.c
++++ b/source3/rpc_server/samr/srv_samr_chgpasswd.c
+@@ -54,6 +54,7 @@
+ #include "passdb.h"
+ #include "auth.h"
+ #include "lib/util/sys_rw.h"
++#include "lib/util/util_str_escape.h"
+ #include "librpc/rpc/dcerpc_samr.h"
+ 
+ #include "lib/crypto/gnutls_helpers.h"
+@@ -1008,27 +1009,118 @@ static bool check_passwd_history(struct samu *sampass, const char *plaintext)
+ /***********************************************************
+ ************************************************************/
+ 
++static NTSTATUS check_password_complexity_internal(TALLOC_CTX *tosctx,
++						   const char *orig_cmd,
++						   const char *username,
++						   char **cmd_out)
++{
++	const char *fallback_username = "__CVE-2026-4408_FallbackUsername__";
++	const char *inv = NULL;
++	char *cmd = NULL;
++	bool modified = false;
++	bool masked = false;
++	bool mixed_fallback = false;
++
++	*cmd_out = NULL;
++
++	if (username == NULL) {
++		return NT_STATUS_INVALID_USER_PRINCIPAL_NAME;
++	}
++
++	/*
++	 * This catches invalid characters in account names
++	 * which might be problematic passing to a shell script.
++	 */
++	inv = strstr_for_invalid_account_characters(username);
++	if (inv != NULL) {
++		char *le_username = log_escape(tosctx, username);
++
++		DBG_WARNING("username '%s' has invalid or dangerous characters\n",
++			    le_username);
++
++		TALLOC_FREE(le_username);
++
++		return NT_STATUS_INVALID_USER_PRINCIPAL_NAME;
++	}
++
++	/*
++	 * This masks the remaining unsafe characters which
++	 * are not already caught by strstr_for_invalid_account_characters()
++	 * with '_'.
++	 *
++	 * Then it replaces %u with an single quoted
++	 * and/or shell escaped version of the masked username.
++	 */
++	cmd = talloc_string_sub_unsafe(tosctx,
++				       orig_cmd,
++				       'u',
++				       username,
++				       STRING_SUB_UNSAFE_CHARACTERS,
++				       '_',
++				       fallback_username,
++				       &modified,
++				       &masked,
++				       &mixed_fallback);
++	if (cmd == NULL) {
++		return NT_STATUS_NO_MEMORY;
++	}
++
++	/*
++	 * Now warn about unexpected values
++	 */
++
++	if (mixed_fallback) {
++		D_WARNING("CVE-2026-4408: "
++			  "strange quoting in 'check password script', "
++			  "falling back to replace %%u with %s, "
++			  "use testparm to fix the configuration\n",
++			  fallback_username);
++		D_WARNING("CVE-2026-4408: "
++			  "You should use '%%u', or SAMBA_CPS_ACCOUNT_NAME "
++			  "inside of 'check password script'.\n");
++	} else if (masked) {
++		char *le_username = log_escape(tosctx, username);
++
++		D_WARNING("CVE-2026-4408: "
++			  "replaced %%u with masked value instead of: %s\n",
++			  le_username);
++		D_WARNING("CVE-2026-4408: "
++			  "You should use SAMBA_CPS_ACCOUNT_NAME inside "
++			  "'check password script' instead of %%u.\n");
++
++		TALLOC_FREE(le_username);
++	}
++
++	*cmd_out = cmd;
++	return NT_STATUS_OK;
++}
++
++
+ NTSTATUS check_password_complexity(const char *username,
+ 				   const char *fullname,
+ 				   const char *password,
+ 				   enum samPwdChangeReason *samr_reject_reason)
+ {
++	int check_ret;
++	NTSTATUS status;
+ 	TALLOC_CTX *tosctx = talloc_tos();
+ 	const struct loadparm_substitution *lp_sub =
+ 		loadparm_s3_global_substitution();
+-	int check_ret;
+-	char *cmd;
++	const char *orig_cmd = NULL;
++	char *cmd = NULL;
+ 
+-	/* Use external script to check password complexity */
+-	if ((lp_check_password_script(tosctx, lp_sub) == NULL)
+-	    || (*(lp_check_password_script(tosctx, lp_sub)) == '\0')){
++	orig_cmd = lp_check_password_script(tosctx, lp_sub);
++	if (orig_cmd == NULL || orig_cmd[0] == '\0') {
+ 		return NT_STATUS_OK;
+ 	}
+ 
+-	cmd = talloc_string_sub(tosctx, lp_check_password_script(tosctx, lp_sub), "%u",
+-				username);
+-	if (!cmd) {
+-		return NT_STATUS_PASSWORD_RESTRICTION;
++	/* note we don't use 'fullname' or 'password' here */
++	status = check_password_complexity_internal(tosctx,
++						    orig_cmd,
++						    username,
++						    &cmd);
++	if (!NT_STATUS_IS_OK(status)) {
++		return status;
+ 	}
+ 
+ 	check_ret = setenv("SAMBA_CPS_ACCOUNT_NAME", username, 1);
+-- 
+2.43.0
+
+
+From e7cff06d0498a3e798ebf7972adf4cfc78db1970 Mon Sep 17 00:00:00 2001
+From: Douglas Bagnall <douglas.bagnall@catalyst.net.nz>
+Date: Sat, 2 May 2026 22:12:38 +1200
+Subject: [PATCH 28/31] CVE-2026-4408: s3:samr-server: make
+ check_password_complexity_internal() non-static, for easier testing
+
+BUG: https://bugzilla.samba.org/show_bug.cgi?id=16034
+
+Signed-off-by: Stefan Metzmacher <metze@samba.org>
+Reviewed-by: Douglas Bagnall <douglas.bagnall@catalyst.net.nz>
+---
+ source3/rpc_server/samr/srv_samr_chgpasswd.c | 8 ++++----
+ source3/rpc_server/samr/srv_samr_util.h      | 5 +++++
+ 2 files changed, 9 insertions(+), 4 deletions(-)
+
+diff --git a/source3/rpc_server/samr/srv_samr_chgpasswd.c b/source3/rpc_server/samr/srv_samr_chgpasswd.c
+index 9afb8799aea..3f48da47a5b 100644
+--- a/source3/rpc_server/samr/srv_samr_chgpasswd.c
++++ b/source3/rpc_server/samr/srv_samr_chgpasswd.c
+@@ -1009,10 +1009,10 @@ static bool check_passwd_history(struct samu *sampass, const char *plaintext)
+ /***********************************************************
+ ************************************************************/
+ 
+-static NTSTATUS check_password_complexity_internal(TALLOC_CTX *tosctx,
+-						   const char *orig_cmd,
+-						   const char *username,
+-						   char **cmd_out)
++NTSTATUS check_password_complexity_internal(TALLOC_CTX *tosctx,
++					    const char *orig_cmd,
++					    const char *username,
++					    char **cmd_out)
+ {
+ 	const char *fallback_username = "__CVE-2026-4408_FallbackUsername__";
+ 	const char *inv = NULL;
+diff --git a/source3/rpc_server/samr/srv_samr_util.h b/source3/rpc_server/samr/srv_samr_util.h
+index 5e839ac77c0..a3a22012858 100644
+--- a/source3/rpc_server/samr/srv_samr_util.h
++++ b/source3/rpc_server/samr/srv_samr_util.h
+@@ -79,6 +79,11 @@ NTSTATUS pass_oem_change(char *user, const char *rhost,
+ 			 uchar password_encrypted_with_nt_hash[516],
+ 			 const uchar old_nt_hash_encrypted[16],
+ 			 enum samPwdChangeReason *reject_reason);
++
++NTSTATUS check_password_complexity_internal(TALLOC_CTX *mem_ctx,
++					    const char *_orig_cmd,
++					    const char *username,
++					    char **cmd_out);
+ NTSTATUS check_password_complexity(const char *username,
+ 				   const char *fullname,
+ 				   const char *password,
+-- 
+2.43.0
+
+
+From fca72a380dcbe667fdb47d6827293d27733cef6e Mon Sep 17 00:00:00 2001
+From: Douglas Bagnall <douglas.bagnall@catalyst.net.nz>
+Date: Sat, 2 May 2026 22:14:43 +1200
+Subject: [PATCH 29/31] CVE-2026-4408: s3:torture: tests for password
+ complexity scripts
+
+This tries to demonstrate the new logic for %u in
+'check password script'.
+
+BUG: https://bugzilla.samba.org/show_bug.cgi?id=16034
+
+Pair-Programmed-With: Stefan Metzmacher <metze@samba.org>
+
+Signed-off-by: Douglas Bagnall <douglas.bagnall@catalyst.net.nz>
+Signed-off-by: Stefan Metzmacher <metze@samba.org>
+---
+ selftest/tests.py               |   2 +
+ source3/torture/test_rpc_samr.c | 358 ++++++++++++++++++++++++++++++++
+ source3/torture/wscript_build   |   6 +
+ 3 files changed, 366 insertions(+)
+ create mode 100644 source3/torture/test_rpc_samr.c
+
+diff --git a/selftest/tests.py b/selftest/tests.py
+index 71634191dd1..817c19aa124 100644
+--- a/selftest/tests.py
++++ b/selftest/tests.py
+@@ -575,6 +575,8 @@ plantestsuite("samba.unittests.test_oLschema2ldif", "none",
+               [os.path.join(bindir(), "default/source4/utils/oLschema2ldif/test_oLschema2ldif")])
+ plantestsuite("samba.unittests.auth.sam", "none",
+               [os.path.join(bindir(), "test_auth_sam")])
++plantestsuite("samba.unittests.test_rpc_samr", "none",
++              [os.path.join(bindir(), "test_rpc_samr")])
+ if have_heimdal_support and not using_system_gssapi:
+     plantestsuite("samba.unittests.auth.heimdal_gensec_unwrap_des", "none",
+                   [valgrindify(os.path.join(bindir(), "test_heimdal_gensec_unwrap_des"))])
+diff --git a/source3/torture/test_rpc_samr.c b/source3/torture/test_rpc_samr.c
+new file mode 100644
+index 00000000000..8d4f3985246
+--- /dev/null
++++ b/source3/torture/test_rpc_samr.c
+@@ -0,0 +1,358 @@
++
++#include <stdarg.h>
++#include <stddef.h>
++#include <stdint.h>
++#include <setjmp.h>
++#include <sys/stat.h>
++#include <cmocka.h>
++#include "includes.h"
++#include "talloc.h"
++#include "libcli/util/ntstatus.h"
++#include "../librpc/gen_ndr/samr.h"
++#include "rpc_server/samr/srv_samr_util.h"
++
++/* set SAMR_DEBUG_VERBOSE to true to print more. */
++#define SAMR_DEBUG_VERBOSE true
++
++#if SAMR_DEBUG_VERBOSE
++#define debug_message(...) print_message(__VA_ARGS__)
++#else
++#define debug_message(...) /* debug_message */
++#endif
++
++static int setup_talloc_context(void **state)
++{
++	TALLOC_CTX *mem_ctx = talloc_new(NULL);
++	*state = mem_ctx;
++	return 0;
++}
++
++static int teardown_talloc_context(void **state)
++{
++	TALLOC_CTX *mem_ctx = *state;
++	TALLOC_FREE(mem_ctx);
++	return 0;
++}
++
++struct cmd_expansion {
++	const char *lp_cmd;
++	const char *username;
++	const char *result_cmd;
++	NTSTATUS result_code;
++};
++
++static struct cmd_expansion expansions[] = {
++	{
++		"/bin/echo '%u'",
++		"bob",
++		"/bin/echo 'bob'",
++		NT_STATUS_OK
++	},
++	{
++		"/bin/echo %u",
++		"bob",
++		"/bin/echo 'bob'",
++		NT_STATUS_OK
++	},
++	{
++		"/bin/echo %u",
++		"bob'",
++		"/bin/echo 'bob_'",
++		NT_STATUS_OK
++	},
++	{
++		"/bin/echo %u",
++		"bob\'",
++		"/bin/echo 'bob_'",
++		NT_STATUS_OK
++	},
++	{
++		"/bin/echo %u",
++		"bob'''",
++		"/bin/echo 'bob___'",
++		NT_STATUS_OK
++	},
++	{
++		"/bin/echo %u",
++		"bob*",
++		NULL,
++		NT_STATUS_INVALID_USER_PRINCIPAL_NAME
++	},
++	{
++		"/bin/echo %u",
++		"bob\"",
++		NULL,
++		NT_STATUS_INVALID_USER_PRINCIPAL_NAME
++	},
++	{
++		"/bin/echo '%u",
++		"bob bob bob",
++		"/bin/echo '__CVE-2026-4408_FallbackUsername__",
++		NT_STATUS_OK
++	},
++	{
++		"/bin/echo \"%u\"",
++		" ",
++		"/bin/echo ' '",
++		NT_STATUS_OK
++	},
++	{
++		"/bin/echo \"--uu=%u\"",
++		"bob",
++		"/bin/echo \"--uu=__CVE-2026-4408_FallbackUsername__\"",
++		NT_STATUS_OK
++	},
++	{
++		"/bin/echo \"--uu=%u\"",
++		"bob !0",
++		"/bin/echo \"--uu=__CVE-2026-4408_FallbackUsername__\"",
++		NT_STATUS_OK
++	},
++	{
++		"/bin/echo %u",
++		"!0",
++		"/bin/echo '!0'",
++		NT_STATUS_OK
++	},
++	{
++		"/bin/echo \"--uu=%u\"",
++		"bob \\",
++		NULL,
++		NT_STATUS_INVALID_USER_PRINCIPAL_NAME
++	},
++	{
++		"/bin/echo --uu='%u'",
++		"bob >> x",
++		NULL,
++		NT_STATUS_INVALID_USER_PRINCIPAL_NAME
++	},
++	{
++		"/bin/echo '--uu=%u\"",
++		"bob",
++		"/bin/echo '--uu=__CVE-2026-4408_FallbackUsername__\"",
++		NT_STATUS_OK
++	},
++	{
++		"/bin/echo --uu='%u'",
++		"bob",
++		"/bin/echo --uu='bob'",
++		NT_STATUS_OK
++	},
++	{
++		"/bin/echo --uu'=%u'",
++		"bob",
++		"/bin/echo --uu'=__CVE-2026-4408_FallbackUsername__'",
++		NT_STATUS_OK
++	},
++	{
++		"/bin/echo --uu'=%u'",
++		"`ls`",
++		"/bin/echo --uu'=__CVE-2026-4408_FallbackUsername__'",
++		NT_STATUS_OK
++	},
++	{
++		"/bin/echo --uu'=%u'",
++		"$(ls)",
++		"/bin/echo --uu'=__CVE-2026-4408_FallbackUsername__'",
++		NT_STATUS_OK
++	},
++	{
++		"/bin/echo --uu='%u'",
++		"$(ls)",
++		"/bin/echo --uu='_(ls)'",
++		NT_STATUS_OK
++	},
++	{
++		"/bin/echo --uu=\"'%u'\"",
++		"bob",
++		"/bin/echo --uu=\"'bob'\"",
++		NT_STATUS_OK
++	},
++	{
++		"/bin/echo --uu='%u' --yy='%u' '%u' %u",
++		"bob",
++		"/bin/echo --uu='bob' --yy='bob' 'bob' __CVE-2026-4408_FallbackUsername__",
++		NT_STATUS_OK
++	},
++	{
++		"/bin/echo --uu=%u%u'' %user 50%u",
++		"bob",
++		"/bin/echo --uu=__CVE-2026-4408_FallbackUsername____CVE-2026-4408_FallbackUsername__'' __CVE-2026-4408_FallbackUsername__ser 50__CVE-2026-4408_FallbackUsername__",
++		NT_STATUS_OK
++	},
++	{
++		"/bin/echo %u",
++		"!!",
++		"/bin/echo '!!'",
++		NT_STATUS_OK
++	},
++	{
++		"/bin/echo %u",
++		">xxx",
++		NULL,
++		NT_STATUS_INVALID_USER_PRINCIPAL_NAME
++	},
++	{
++		"/bin/echo %u",
++		"\\",
++		NULL,
++		NT_STATUS_INVALID_USER_PRINCIPAL_NAME
++	},
++	{
++		"/bin/echo %u",
++		"3",
++		"/bin/echo '3'",
++		NT_STATUS_OK
++	},
++	{
++		"/bin/echo '%u'",
++		"3$",
++		"/bin/echo '3_'",
++		NT_STATUS_OK
++	},
++	{
++		"/bin/echo '%u'",
++		"comp$",
++		"/bin/echo 'comp_'",
++		NT_STATUS_OK
++	},
++	{
++		"/bin/echo '%u'",
++		"3$3",
++		"/bin/echo '3_3'",
++		NT_STATUS_OK
++	},
++	{
++		"/bin/echo '%u'",
++		"q $3",
++		"/bin/echo 'q _3'",
++		NT_STATUS_OK
++	},
++	{
++		"/bin/echo -s '%u' %u",
++		"āāā",
++		"/bin/echo -s 'āāā' __CVE-2026-4408_FallbackUsername__",
++		NT_STATUS_OK
++	},
++	{
++		"/bin/echo -s '%u' %u",
++		"-āāā",
++		"/bin/echo -s '_āāā' __CVE-2026-4408_FallbackUsername__",
++		NT_STATUS_OK
++	},
++	{
++		"/bin/echo -s %u",
++		"āāā",
++		"/bin/echo -s 'āāā'",
++		NT_STATUS_OK
++	},
++	{
++		"/bin/echo -s %u",
++		"a -a",
++		"/bin/echo -s 'a -a'",
++		NT_STATUS_OK
++	},
++	{
++		"/bin/echo -s=%u %u",
++		"ā -a",
++		"/bin/echo -s='ā -a' 'ā -a'",
++		NT_STATUS_OK
++	},
++	{
++		"/bin/echo -s=\"%u %u\"",
++		"ā -a",
++		"/bin/echo -s=\"__CVE-2026-4408_FallbackUsername__ __CVE-2026-4408_FallbackUsername__\"",
++		NT_STATUS_OK
++	},
++	{
++		"/bin/echo -m='fridge' %u",
++		"ā -x -ß",
++		"/bin/echo -m='fridge' __CVE-2026-4408_FallbackUsername__",
++		NT_STATUS_OK
++	},
++	{
++		"/bin/echo -m='fridge' %u",
++		"-ā -a",
++		"/bin/echo -m='fridge' __CVE-2026-4408_FallbackUsername__",
++		NT_STATUS_OK
++	},
++	{
++		"/bin/echo %u",
++		"-n",
++		"/bin/echo '_n'",
++		NT_STATUS_OK
++	},
++	{
++		"/bin/echo %u",
++		"o'clock",
++		"/bin/echo 'o_clock'",
++		NT_STATUS_OK
++	},
++};
++
++static void test_expansions(void **state)
++{
++	TALLOC_CTX *mem_ctx = *state;
++	size_t i;
++
++	for (i = 0; i < ARRAY_SIZE(expansions); i++) {
++		struct cmd_expansion t = expansions[i];
++		char *result_cmd = NULL;
++		NTSTATUS status;
++
++		status = check_password_complexity_internal(mem_ctx,
++							    t.lp_cmd,
++							    t.username,
++							    &result_cmd);
++		if (NT_STATUS_IS_OK(t.result_code) && NT_STATUS_IS_OK(status)) {
++			int cmp;
++
++			cmp = strcmp(t.result_cmd, result_cmd);
++			if (cmp == 0) {
++				debug_message("[%zu] «%s» «%s»   ->   «%s», nstatus %s; AS EXPECTED\n",
++					      i, t.lp_cmd,
++					      t.username,
++					      result_cmd,
++					      nt_errstr(status));
++			} else {
++				debug_message("[%zu] «%s» «%s», nstatus %s; "
++					      "expected   «%s»   got  «%s»\033[1;31m BAD! \033[0m\n",
++					      i, t.lp_cmd,
++					      t.username,
++					      nt_errstr(status),
++					      t.result_cmd,
++					      result_cmd);
++			}
++			assert_int_equal(cmp, 0);
++		} else if (NT_STATUS_EQUAL(status, t.result_code)) {
++			debug_message("[%zu] «%s» «%s», nstatus %s FAILED AS EXPECTED\n",
++				      i, t.lp_cmd,
++				      t.username,
++				      nt_errstr(status));
++		} else {
++			debug_message("[%zu] «%s» «%s» -> «%s», nstatus %s; "
++				      "EXPECTED result «%s»   ntstatus %s; \033[1;31m BAD! \033[0m\n",
++				      i, t.lp_cmd,
++				      t.username,
++				      result_cmd,
++				      nt_errstr(status),
++				      t.result_cmd,
++				      nt_errstr(t.result_code));
++			assert_int_equal(true, false);
++		}
++	}
++	debug_message("ALL correct\n");
++}
++
++int main(void)
++{
++	const struct CMUnitTest tests[] = {
++		cmocka_unit_test(test_expansions),
++	};
++	if (!isatty(1)) {
++		cmocka_set_message_output(CM_OUTPUT_SUBUNIT);
++	}
++	return cmocka_run_group_tests(tests,
++				      setup_talloc_context,
++				      teardown_talloc_context);
++}
+diff --git a/source3/torture/wscript_build b/source3/torture/wscript_build
+index 1d2520099e3..d04008b3df1 100644
+--- a/source3/torture/wscript_build
++++ b/source3/torture/wscript_build
+@@ -133,3 +133,9 @@ bld.SAMBA3_BINARY('vfstest',
+                       SMBREADLINE
+                       ''',
+                  for_selftest=True)
++
++bld.SAMBA3_BINARY('test_rpc_samr',
++                 source='test_rpc_samr.c',
++                 deps='''RPC_SERVICE cmocka
++                 ''',
++                 for_selftest=True)
+-- 
+2.43.0
+
+
+From fbcb179849ed955b0ede3bb8bb177a21706327c8 Mon Sep 17 00:00:00 2001
+From: Stefan Metzmacher <metze@samba.org>
+Date: Fri, 8 May 2026 23:27:35 +0200
+Subject: [PATCH 30/31] CVE-2026-4408: s3:testparm: warn about 'check password
+ script' %u usage
+
+BUG: https://bugzilla.samba.org/show_bug.cgi?id=16034
+
+Signed-off-by: Stefan Metzmacher <metze@samba.org>
+Reviewed-by: Douglas Bagnall <douglas.bagnall@catalyst.net.nz>
+---
+ source3/utils/testparm.c | 12 ++++++++++++
+ 1 file changed, 12 insertions(+)
+
+diff --git a/source3/utils/testparm.c b/source3/utils/testparm.c
+index 7406d9fdd6c..e84b7edd105 100644
+--- a/source3/utils/testparm.c
++++ b/source3/utils/testparm.c
+@@ -359,6 +359,7 @@ static int do_global_checks(void)
+ 	const char **lp_ptr = NULL;
+ 	const struct loadparm_substitution *lp_sub =
+ 		loadparm_s3_global_substitution();
++	const char *check_pw_script = NULL;
+ 	int ival;
+ 
+ 	fprintf(stderr, "\n");
+@@ -821,6 +822,17 @@ static int do_global_checks(void)
+ 		}
+ 	}
+ 
++	check_pw_script = lp_check_password_script(talloc_tos(), lp_sub);
++	if (talloc_string_sub_mixed_quoting(check_pw_script, 'u')) {
++		fprintf(stderr,
++			"WARNING: You are using 'check password script' "
++			"with mixed quoting and %%u.\n"
++			"CVE-2026-4408 changed the way %%u substitution works. \n"
++			"You should use the SAMBA_CPS_ACCOUNT_NAME "
++			"environment variable exported to the script, or\n"
++			"at least use single quotes (directly) around '%%u'.\n\n");
++	}
++
+ 	return ret;
+ }
+ 
+-- 
+2.43.0
+
+
+From 56219cbc358aff3385fd29ad04487329ca86ea16 Mon Sep 17 00:00:00 2001
+From: Stefan Metzmacher <metze@samba.org>
+Date: Mon, 11 May 2026 13:52:52 +0200
+Subject: [PATCH 31/31] CVE-2026-4408: docs-xml/smbdotconf: clarify '%u' in
+ 'check password script'
+
+Admins should use SAMBA_CPS_ACCOUNT_NAME.
+
+BUG: https://bugzilla.samba.org/show_bug.cgi?id=16034
+
+Signed-off-by: Stefan Metzmacher <metze@samba.org>
+Reviewed-by: Douglas Bagnall <douglas.bagnall@catalyst.net.nz>
+---
+ docs-xml/smbdotconf/security/checkpasswordscript.xml | 10 ++++++++--
+ 1 file changed, 8 insertions(+), 2 deletions(-)
+
+diff --git a/docs-xml/smbdotconf/security/checkpasswordscript.xml b/docs-xml/smbdotconf/security/checkpasswordscript.xml
+index 18aa2c6d290..dd162d89f08 100644
+--- a/docs-xml/smbdotconf/security/checkpasswordscript.xml
++++ b/docs-xml/smbdotconf/security/checkpasswordscript.xml
+@@ -20,8 +20,8 @@
+ 
+     <itemizedlist>
+ 	<listitem><para>
+-	SAMBA_CPS_ACCOUNT_NAME is always present and contains the sAMAccountName of user,
+-	the is the same as the %u substitutions in the none AD DC case.
++	SAMBA_CPS_ACCOUNT_NAME is always present and contains the sAMAccountName of user.
++	It is the same as the '%u' substitutions in the non AD DC case.
+ 	</para></listitem>
+ 
+ 	<listitem><para>
+@@ -33,6 +33,12 @@
+ 	</para></listitem>
+     </itemizedlist>
+ 
++    <para>Even on a non AD DC SAMBA_CPS_ACCOUNT_NAME is the preferred way to access the
++    account name, as it contains the raw value provided by the client. If that's not
++    possible you should use single quotes (directly) around %u, e.g. /path/to/somescript '%u',
++    see CVE-2026-4408 for more details.
++    </para>
++
+     <para>Note: In the example directory is a sample program called <command moreinfo="none">crackcheck</command>
+     that uses cracklib to check the password quality.</para>
+ 
+-- 
+2.43.0
+

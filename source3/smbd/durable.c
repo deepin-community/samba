@@ -133,6 +133,63 @@ NTSTATUS vfs_default_durable_cookie(struct files_struct *fsp,
 	return NT_STATUS_OK;
 }
 
+struct durable_disconnect_state {
+	NTSTATUS status;
+	struct files_struct *fsp;
+};
+
+static void default_durable_disconnect_fn(struct share_mode_lock *lck,
+					  struct byte_range_lock *br_lck,
+					  void *private_data)
+{
+	struct durable_disconnect_state *state = private_data;
+	struct files_struct *fsp = state->fsp;
+	struct smb_file_time ft;
+	bool ok;
+
+	/* Ensure any pending write time updates are done. */
+	if (fsp->update_write_time_event) {
+		fsp_flush_write_time_update(fsp);
+	}
+
+
+	init_smb_file_time(&ft);
+
+	if (fsp->fsp_flags.write_time_forced) {
+		NTTIME mtime = share_mode_changed_write_time(lck);
+		ft.mtime = nt_time_to_full_timespec(mtime);
+	} else if (fsp->fsp_flags.update_write_time_on_close) {
+		if (is_omit_timespec(&fsp->close_write_time)) {
+			ft.mtime = timespec_current();
+		} else {
+			ft.mtime = fsp->close_write_time;
+		}
+	}
+
+	if (!is_omit_timespec(&ft.mtime)) {
+		round_timespec(fsp->conn->ts_res, &ft.mtime);
+		file_ntimes(fsp->conn, fsp, &ft);
+	}
+
+	ok = mark_share_mode_disconnected(lck, fsp);
+	if (!ok) {
+		state->status = NT_STATUS_UNSUCCESSFUL;
+		return;
+	}
+
+	if (br_lck == NULL) {
+		state->status = NT_STATUS_OK;
+		return;
+	}
+
+	ok = brl_mark_disconnected(fsp, br_lck);
+	if (!ok) {
+		state->status = NT_STATUS_UNSUCCESSFUL;
+		return;
+	}
+	state->status = NT_STATUS_OK;
+}
+
 NTSTATUS vfs_default_durable_disconnect(struct files_struct *fsp,
 					const DATA_BLOB old_cookie,
 					TALLOC_CTX *mem_ctx,
@@ -143,8 +200,7 @@ NTSTATUS vfs_default_durable_disconnect(struct files_struct *fsp,
 	enum ndr_err_code ndr_err;
 	struct vfs_default_durable_cookie cookie;
 	DATA_BLOB new_cookie_blob = data_blob_null;
-	struct share_mode_lock *lck;
-	bool ok;
+	struct durable_disconnect_state state;
 
 	*new_cookie = data_blob_null;
 
@@ -173,6 +229,12 @@ NTSTATUS vfs_default_durable_disconnect(struct files_struct *fsp,
 		return NT_STATUS_NOT_SUPPORTED;
 	}
 
+	if (fsp->current_lock_count != 0 &&
+	    (fsp_lease_type(fsp) & SMB2_LEASE_WRITE) == 0)
+	{
+		return NT_STATUS_NOT_SUPPORTED;
+	}
+
 	/*
 	 * For now let it be simple and do not keep
 	 * delete on close files durable open
@@ -192,52 +254,23 @@ NTSTATUS vfs_default_durable_disconnect(struct files_struct *fsp,
 		return NT_STATUS_NOT_SUPPORTED;
 	}
 
-	/* Ensure any pending write time updates are done. */
-	if (fsp->update_write_time_event) {
-		fsp_flush_write_time_update(fsp);
+	state = (struct durable_disconnect_state) {
+		.fsp = fsp,
+	};
+
+	status = share_mode_do_locked_brl(fsp,
+					  default_durable_disconnect_fn,
+					  &state);
+	if (!NT_STATUS_IS_OK(status)) {
+		DBG_ERR("share_mode_do_locked_brl [%s] failed: %s\n",
+			fsp_str_dbg(fsp), nt_errstr(status));
+		return status;
 	}
-
-	/*
-	 * The above checks are done in mark_share_mode_disconnected() too
-	 * but we want to avoid getting the lock if possible
-	 */
-	lck = get_existing_share_mode_lock(talloc_tos(), fsp->file_id);
-	if (lck != NULL) {
-		struct smb_file_time ft;
-
-		init_smb_file_time(&ft);
-
-		if (fsp->fsp_flags.write_time_forced) {
-			NTTIME mtime = share_mode_changed_write_time(lck);
-			ft.mtime = nt_time_to_full_timespec(mtime);
-		} else if (fsp->fsp_flags.update_write_time_on_close) {
-			if (is_omit_timespec(&fsp->close_write_time)) {
-				ft.mtime = timespec_current();
-			} else {
-				ft.mtime = fsp->close_write_time;
-			}
-		}
-
-		if (!is_omit_timespec(&ft.mtime)) {
-			round_timespec(conn->ts_res, &ft.mtime);
-			file_ntimes(conn, fsp, &ft);
-		}
-
-		ok = mark_share_mode_disconnected(lck, fsp);
-		if (!ok) {
-			TALLOC_FREE(lck);
-		}
+	if (!NT_STATUS_IS_OK(state.status)) {
+		DBG_ERR("default_durable_disconnect_fn [%s] failed: %s\n",
+			fsp_str_dbg(fsp), nt_errstr(state.status));
+		return state.status;
 	}
-	if (lck != NULL) {
-		ok = brl_mark_disconnected(fsp);
-		if (!ok) {
-			TALLOC_FREE(lck);
-		}
-	}
-	if (lck == NULL) {
-		return NT_STATUS_NOT_SUPPORTED;
-	}
-	TALLOC_FREE(lck);
 
 	status = vfs_stat_fsp(fsp);
 	if (!NT_STATUS_IS_OK(status)) {
@@ -486,222 +519,125 @@ static bool vfs_default_durable_reconnect_check_stat(
 	}
 
 	if (cookie_st->st_ex_flags != fsp_st->st_ex_flags) {
-		DEBUG(1, ("vfs_default_durable_reconnect (%s): "
-			  "stat_ex.%s differs: "
-			  "cookie:%llu != stat:%llu, "
-			  "denying durable reconnect\n",
-			  name,
-			  "st_ex_flags",
-			  (unsigned long long)cookie_st->st_ex_flags,
-			  (unsigned long long)fsp_st->st_ex_flags));
+		DBG_WARNING(" (%s): "
+			    "stat_ex.%s differs: "
+			    "cookie:%"PRIu32" != stat:%"PRIu32", "
+			    "denying durable reconnect\n",
+			    name,
+			    "st_ex_flags",
+			    cookie_st->st_ex_flags,
+			    fsp_st->st_ex_flags);
 		return false;
 	}
 
 	return true;
 }
 
+struct durable_reconnect_state {
+	struct smbXsrv_open *op;
+	struct share_mode_entry *e;
+};
+
 static bool durable_reconnect_fn(
 	struct share_mode_entry *e,
 	bool *modified,
 	void *private_data)
 {
-	struct share_mode_entry *dst_e = private_data;
+	struct durable_reconnect_state *state = private_data;
+	uint64_t id = state->op->global->open_persistent_id;
 
-	if (dst_e->pid.pid != 0) {
+	if (e->share_file_id != id) {
+		return false; /* Look at potential other entries */
+	}
+
+	if (!server_id_is_disconnected(&e->pid)) {
+		return false; /* Look at potential other entries */
+	}
+
+	if (state->e->share_file_id == id) {
 		DBG_INFO("Found more than one entry, invalidating previous\n");
-		dst_e->pid.pid = 0;
+		*state->e = (struct share_mode_entry) { .pid = { .pid = 0, }};
 		return true;	/* end the loop through share mode entries */
 	}
-	*dst_e = *e;
+	*state->e = *e;
 	return false;		/* Look at potential other entries */
 }
 
-NTSTATUS vfs_default_durable_reconnect(struct connection_struct *conn,
-				       struct smb_request *smb1req,
-				       struct smbXsrv_open *op,
-				       const DATA_BLOB old_cookie,
-				       TALLOC_CTX *mem_ctx,
-				       files_struct **result,
-				       DATA_BLOB *new_cookie)
+struct vfs_default_durable_reconnect_state {
+	NTSTATUS status;
+	TALLOC_CTX *mem_ctx;
+	struct smb_request *smb1req;
+	struct smbXsrv_open *op;
+	struct vfs_default_durable_cookie cookie;
+	struct files_struct *fsp;
+	struct files_struct *dirfsp;
+	struct smb_filename *rel_fname;
+	DATA_BLOB new_cookie_blob;
+};
+
+static void vfs_default_durable_reconnect_fn(struct share_mode_lock *lck,
+					     struct byte_range_lock *br_lck,
+					     void *private_data)
 {
+	struct vfs_default_durable_reconnect_state *state = private_data;
 	const struct loadparm_substitution *lp_sub =
 		loadparm_s3_global_substitution();
-	struct share_mode_lock *lck;
-	struct share_mode_entry e;
-	struct files_struct *fsp = NULL;
-	NTSTATUS status;
-	bool ok;
-	int ret;
+	struct files_struct *fsp = state->fsp;
+	struct share_mode_entry e = { .pid = { .pid = 0, }};
+	struct durable_reconnect_state rstate = { .op = state->op, .e = &e, };
 	struct vfs_open_how how = { .flags = 0, };
 	struct file_id file_id;
-	struct smb_filename *smb_fname = NULL;
-	enum ndr_err_code ndr_err;
-	struct vfs_default_durable_cookie cookie;
-	DATA_BLOB new_cookie_blob = data_blob_null;
+	bool have_share_mode_entry = false;
+	int ret;
+	bool ok;
 
-	*result = NULL;
-	*new_cookie = data_blob_null;
-
-	if (!lp_durable_handles(SNUM(conn))) {
-		return NT_STATUS_NOT_SUPPORTED;
-	}
-
-	/*
-	 * the checks for kernel oplocks
-	 * and similar things are done
-	 * in the vfs_default_durable_cookie()
-	 * call below.
-	 */
-
-	ndr_err = ndr_pull_struct_blob_all(
-		&old_cookie,
-		talloc_tos(),
-		&cookie,
-		(ndr_pull_flags_fn_t)ndr_pull_vfs_default_durable_cookie);
-	if (!NDR_ERR_CODE_IS_SUCCESS(ndr_err)) {
-		status = ndr_map_error2ntstatus(ndr_err);
-		return status;
-	}
-
-	if (strcmp(cookie.magic, VFS_DEFAULT_DURABLE_COOKIE_MAGIC) != 0) {
-		return NT_STATUS_INVALID_PARAMETER;
-	}
-
-	if (cookie.version != VFS_DEFAULT_DURABLE_COOKIE_VERSION) {
-		return NT_STATUS_INVALID_PARAMETER;
-	}
-
-	if (!cookie.allow_reconnect) {
-		return NT_STATUS_OBJECT_NAME_NOT_FOUND;
-	}
-
-	if (strcmp(cookie.servicepath, conn->connectpath) != 0) {
-		return NT_STATUS_OBJECT_NAME_NOT_FOUND;
-	}
-
-	/* Create an smb_filename with stream_name == NULL. */
-	smb_fname = synthetic_smb_fname(talloc_tos(),
-					cookie.base_name,
-					NULL,
-					NULL,
-					0,
-					0);
-	if (smb_fname == NULL) {
-		return NT_STATUS_NO_MEMORY;
-	}
-
-	ret = SMB_VFS_LSTAT(conn, smb_fname);
-	if (ret == -1) {
-		status = map_nt_error_from_unix_common(errno);
-		DEBUG(1, ("Unable to lstat stream: %s => %s\n",
-			  smb_fname_str_dbg(smb_fname),
-			  nt_errstr(status)));
-		return status;
-	}
-
-	if (!S_ISREG(smb_fname->st.st_ex_mode)) {
-		return NT_STATUS_OBJECT_NAME_NOT_FOUND;
-	}
-
-	file_id = vfs_file_id_from_sbuf(conn, &smb_fname->st);
-	if (!file_id_equal(&cookie.id, &file_id)) {
-		return NT_STATUS_OBJECT_NAME_NOT_FOUND;
-	}
-
-	/*
-	 * 1. check entry in locking.tdb
-	 */
-
-	lck = get_existing_share_mode_lock(mem_ctx, file_id);
-	if (lck == NULL) {
-		DEBUG(5, ("vfs_default_durable_reconnect: share-mode lock "
-			   "not obtained from db\n"));
-		return NT_STATUS_OBJECT_NAME_NOT_FOUND;
-	}
-
-	e = (struct share_mode_entry) { .pid.pid = 0 };
-
-	ok = share_mode_forall_entries(lck, durable_reconnect_fn, &e);
+	ok = share_mode_forall_entries(lck, durable_reconnect_fn, &rstate);
 	if (!ok) {
 		DBG_WARNING("share_mode_forall_entries failed\n");
-		TALLOC_FREE(lck);
-		return NT_STATUS_INTERNAL_DB_ERROR;
+		state->status = NT_STATUS_INTERNAL_DB_ERROR;
+		goto fail;
 	}
 
 	if (e.pid.pid == 0) {
 		DBG_WARNING("Did not find a unique valid share mode entry\n");
-		TALLOC_FREE(lck);
-		return NT_STATUS_OBJECT_NAME_NOT_FOUND;
+		state->status = NT_STATUS_OBJECT_NAME_NOT_FOUND;
+		goto fail;
 	}
 
 	if (!server_id_is_disconnected(&e.pid)) {
 		DEBUG(5, ("vfs_default_durable_reconnect: denying durable "
 			  "reconnect for handle that was not marked "
 			  "disconnected (e.g. smbd or cluster node died)\n"));
-		TALLOC_FREE(lck);
-		return NT_STATUS_OBJECT_NAME_NOT_FOUND;
+		state->status = NT_STATUS_OBJECT_NAME_NOT_FOUND;
+		goto fail;
 	}
 
-	if (e.share_file_id != op->global->open_persistent_id) {
+	if (e.share_file_id != state->op->global->open_persistent_id) {
 		DBG_INFO("denying durable "
 			 "share_file_id changed %"PRIu64" != %"PRIu64" "
 			 "(e.g. another client had opened the file)\n",
 			 e.share_file_id,
-			 op->global->open_persistent_id);
-		TALLOC_FREE(lck);
-		return NT_STATUS_OBJECT_NAME_NOT_FOUND;
+			 state->op->global->open_persistent_id);
+		state->status = NT_STATUS_OBJECT_NAME_NOT_FOUND;
+		goto fail;
 	}
 
 	if ((e.access_mask & (FILE_WRITE_DATA|FILE_APPEND_DATA)) &&
-	    !CAN_WRITE(conn))
+	    !CAN_WRITE(fsp->conn))
 	{
 		DEBUG(5, ("vfs_default_durable_reconnect: denying durable "
 			  "share[%s] is not writeable anymore\n",
-			  lp_servicename(talloc_tos(), lp_sub, SNUM(conn))));
-		TALLOC_FREE(lck);
-		return NT_STATUS_OBJECT_NAME_NOT_FOUND;
-	}
-
-	/*
-	 * 2. proceed with opening file
-	 */
-
-	status = fsp_new(conn, conn, &fsp);
-	if (!NT_STATUS_IS_OK(status)) {
-		DEBUG(0, ("vfs_default_durable_reconnect: failed to create "
-			  "new fsp: %s\n", nt_errstr(status)));
-		TALLOC_FREE(lck);
-		return status;
+			  lp_servicename(talloc_tos(), lp_sub, SNUM(fsp->conn))));
+		state->status = NT_STATUS_OBJECT_NAME_NOT_FOUND;
+		goto fail;
 	}
 
 	fh_set_private_options(fsp->fh, e.private_options);
-	fsp->file_id = file_id;
-	fsp->file_pid = smb1req->smbpid;
-	fsp->vuid = smb1req->vuid;
 	fsp->open_time = e.time;
 	fsp->access_mask = e.access_mask;
 	fsp->fsp_flags.can_read = ((fsp->access_mask & FILE_READ_DATA) != 0);
 	fsp->fsp_flags.can_write = ((fsp->access_mask & (FILE_WRITE_DATA|FILE_APPEND_DATA)) != 0);
-	fsp->fnum = op->local_id;
-	fsp_set_gen_id(fsp);
 
-	/*
-	 * TODO:
-	 * Do we need to store the modified flag in the DB?
-	 */
-	fsp->fsp_flags.modified = false;
-	/*
-	 * no durables for directories
-	 */
-	fsp->fsp_flags.is_directory = false;
-	/*
-	 * For normal files, can_lock == !is_directory
-	 */
-	fsp->fsp_flags.can_lock = true;
-	/*
-	 * We do not support aio write behind for smb2
-	 */
-	fsp->fsp_flags.aio_write_behind = false;
 	fsp->oplock_type = e.op_type;
 
 	if (fsp->oplock_type == LEASE_OPLOCK) {
@@ -714,25 +650,22 @@ NTSTATUS vfs_default_durable_reconnect(struct connection_struct *conn,
 		 */
 		if (!GUID_equal(fsp_client_guid(fsp),
 				&e.client_guid)) {
-			TALLOC_FREE(lck);
-			file_free(smb1req, fsp);
-			return NT_STATUS_OBJECT_NAME_NOT_FOUND;
+			state->status = NT_STATUS_OBJECT_NAME_NOT_FOUND;
+			goto fail;
 		}
 
-		status = leases_db_get(
+		state->status = leases_db_get(
 			&e.client_guid,
 			&e.lease_key,
-			&file_id,
+			&fsp->file_id,
 			&current_state, /* current_state */
 			NULL, /* breaking */
 			NULL, /* breaking_to_requested */
 			NULL, /* breaking_to_required */
 			&lease_version, /* lease_version */
 			&epoch); /* epoch */
-		if (!NT_STATUS_IS_OK(status)) {
-			TALLOC_FREE(lck);
-			file_free(smb1req, fsp);
-			return status;
+		if (!NT_STATUS_IS_OK(state->status)) {
+			goto fail;
 		}
 
 		fsp->lease = find_fsp_lease(
@@ -742,62 +675,46 @@ NTSTATUS vfs_default_durable_reconnect(struct connection_struct *conn,
 			lease_version,
 			epoch);
 		if (fsp->lease == NULL) {
-			TALLOC_FREE(lck);
-			file_free(smb1req, fsp);
-			return NT_STATUS_NO_MEMORY;
+			state->status = NT_STATUS_NO_MEMORY;
+			goto fail;
 		}
 	}
 
-	fsp->initial_allocation_size = cookie.initial_allocation_size;
-	fh_set_position_information(fsp->fh, cookie.position_information);
+	fsp->initial_allocation_size = state->cookie.initial_allocation_size;
+	fh_set_position_information(fsp->fh, state->cookie.position_information);
 	fsp->fsp_flags.update_write_time_triggered =
-		cookie.update_write_time_triggered;
+		state->cookie.update_write_time_triggered;
 	fsp->fsp_flags.update_write_time_on_close =
-		cookie.update_write_time_on_close;
-	fsp->fsp_flags.write_time_forced = cookie.write_time_forced;
+		state->cookie.update_write_time_on_close;
+	fsp->fsp_flags.write_time_forced = state->cookie.write_time_forced;
 	fsp->close_write_time = nt_time_to_full_timespec(
-		cookie.close_write_time);
+		state->cookie.close_write_time);
 
-	status = fsp_set_smb_fname(fsp, smb_fname);
-	if (!NT_STATUS_IS_OK(status)) {
-		TALLOC_FREE(lck);
-		file_free(smb1req, fsp);
-		DEBUG(0, ("vfs_default_durable_reconnect: "
-			  "fsp_set_smb_fname failed: %s\n",
-			  nt_errstr(status)));
-		return status;
-	}
-
-	op->compat = fsp;
-	fsp->op = op;
+	state->op->compat = fsp;
+	fsp->op = state->op;
 
 	ok = reset_share_mode_entry(
 		lck,
 		e.pid,
 		e.share_file_id,
-		messaging_server_id(conn->sconn->msg_ctx),
-		smb1req->mid,
+		messaging_server_id(fsp->conn->sconn->msg_ctx),
+		state->smb1req->mid,
 		fh_get_gen_id(fsp->fh));
 	if (!ok) {
 		DBG_DEBUG("Could not set new share_mode_entry values\n");
-		TALLOC_FREE(lck);
-		op->compat = NULL;
-		fsp->op = NULL;
-		file_free(smb1req, fsp);
-		return NT_STATUS_INTERNAL_ERROR;
+		state->status = NT_STATUS_INTERNAL_ERROR;
+		goto fail;
 	}
+	have_share_mode_entry = true;
 
-	ok = brl_reconnect_disconnected(fsp);
-	if (!ok) {
-		status = NT_STATUS_INTERNAL_ERROR;
-		DEBUG(1, ("vfs_default_durable_reconnect: "
-			  "failed to reopen brlocks: %s\n",
-			  nt_errstr(status)));
-		TALLOC_FREE(lck);
-		op->compat = NULL;
-		fsp->op = NULL;
-		file_free(smb1req, fsp);
-		return status;
+	if (br_lck != NULL) {
+		ok = brl_reconnect_disconnected(fsp, br_lck);
+		if (!ok) {
+			state->status = NT_STATUS_INTERNAL_ERROR;
+			DBG_ERR("failed to reopen brlocks: %s\n",
+				nt_errstr(state->status));
+			goto fail;
+		}
 	}
 
 	/*
@@ -811,15 +728,10 @@ NTSTATUS vfs_default_durable_reconnect(struct connection_struct *conn,
 		how.flags = O_RDONLY;
 	}
 
-	status = fd_openat(conn->cwd_fsp, fsp->fsp_name, fsp, &how);
-	if (!NT_STATUS_IS_OK(status)) {
-		TALLOC_FREE(lck);
-		DEBUG(1, ("vfs_default_durable_reconnect: failed to open "
-			  "file: %s\n", nt_errstr(status)));
-		op->compat = NULL;
-		fsp->op = NULL;
-		file_free(smb1req, fsp);
-		return status;
+	state->status = fd_openat(state->dirfsp, state->rel_fname, fsp, &how);
+	if (!NT_STATUS_IS_OK(state->status)) {
+		DBG_ERR("failed to open file: %s\n", nt_errstr(state->status));
+		goto fail;
 	}
 
 	/*
@@ -833,106 +745,218 @@ NTSTATUS vfs_default_durable_reconnect(struct connection_struct *conn,
 
 	ret = SMB_VFS_FSTAT(fsp, &fsp->fsp_name->st);
 	if (ret == -1) {
-		NTSTATUS close_status;
-		status = map_nt_error_from_unix_common(errno);
-		DEBUG(1, ("Unable to fstat stream: %s => %s\n",
-			  smb_fname_str_dbg(smb_fname),
-			  nt_errstr(status)));
-		close_status = fd_close(fsp);
-		if (!NT_STATUS_IS_OK(close_status)) {
-			DBG_ERR("fd_close failed (%s) - leaking file "
-				"descriptor\n", nt_errstr(close_status));
-		}
-		TALLOC_FREE(lck);
-		op->compat = NULL;
-		fsp->op = NULL;
-		file_free(smb1req, fsp);
-		return status;
+		state->status = map_nt_error_from_unix_common(errno);
+		DBG_ERR("Unable to fstat stream: %s => %s\n",
+			fsp_str_dbg(fsp),
+			nt_errstr(state->status));
+		goto fail;
 	}
 
 	if (!S_ISREG(fsp->fsp_name->st.st_ex_mode)) {
-		NTSTATUS close_status = fd_close(fsp);
-		if (!NT_STATUS_IS_OK(close_status)) {
-			DBG_ERR("fd_close failed (%s) - leaking file "
-				"descriptor\n", nt_errstr(close_status));
-		}
-		TALLOC_FREE(lck);
-		op->compat = NULL;
-		fsp->op = NULL;
-		file_free(smb1req, fsp);
-		return NT_STATUS_OBJECT_NAME_NOT_FOUND;
+		state->status = NT_STATUS_OBJECT_NAME_NOT_FOUND;
+		goto fail;
 	}
 
-	file_id = vfs_file_id_from_sbuf(conn, &fsp->fsp_name->st);
-	if (!file_id_equal(&cookie.id, &file_id)) {
-		NTSTATUS close_status = fd_close(fsp);
-		if (!NT_STATUS_IS_OK(close_status)) {
-			DBG_ERR("fd_close failed (%s) - leaking file "
-				"descriptor\n", nt_errstr(close_status));
-		}
-		TALLOC_FREE(lck);
-		op->compat = NULL;
-		fsp->op = NULL;
-		file_free(smb1req, fsp);
-		return NT_STATUS_OBJECT_NAME_NOT_FOUND;
+	file_id = vfs_file_id_from_sbuf(fsp->conn, &fsp->fsp_name->st);
+	if (!file_id_equal(&state->cookie.id, &file_id)) {
+		state->status = NT_STATUS_OBJECT_NAME_NOT_FOUND;
+		goto fail;
 	}
 
 	(void)fdos_mode(fsp);
 
-	ok = vfs_default_durable_reconnect_check_stat(&cookie.stat_info,
+	ok = vfs_default_durable_reconnect_check_stat(&state->cookie.stat_info,
 						      &fsp->fsp_name->st,
 						      fsp_str_dbg(fsp));
 	if (!ok) {
-		NTSTATUS close_status = fd_close(fsp);
-		if (!NT_STATUS_IS_OK(close_status)) {
-			DBG_ERR("fd_close failed (%s) - leaking file "
-				"descriptor\n", nt_errstr(close_status));
-		}
-		TALLOC_FREE(lck);
-		op->compat = NULL;
-		fsp->op = NULL;
-		file_free(smb1req, fsp);
-		return NT_STATUS_OBJECT_NAME_NOT_FOUND;
+		state->status = NT_STATUS_OBJECT_NAME_NOT_FOUND;
+		goto fail;
 	}
 
-	status = set_file_oplock(fsp);
-	if (!NT_STATUS_IS_OK(status)) {
-		NTSTATUS close_status = fd_close(fsp);
-		if (!NT_STATUS_IS_OK(close_status)) {
-			DBG_ERR("fd_close failed (%s) - leaking file "
-				"descriptor\n", nt_errstr(close_status));
-		}
-		TALLOC_FREE(lck);
-		op->compat = NULL;
-		fsp->op = NULL;
-		file_free(smb1req, fsp);
-		return status;
+	state->status = set_file_oplock(fsp);
+	if (!NT_STATUS_IS_OK(state->status)) {
+		goto fail;
 	}
 
-	status = vfs_default_durable_cookie(fsp, mem_ctx, &new_cookie_blob);
-	if (!NT_STATUS_IS_OK(status)) {
-		TALLOC_FREE(lck);
-		DEBUG(1, ("vfs_default_durable_reconnect: "
-			  "vfs_default_durable_cookie - %s\n",
-			  nt_errstr(status)));
-		op->compat = NULL;
-		fsp->op = NULL;
-		file_free(smb1req, fsp);
-		return status;
+	state->status = vfs_default_durable_cookie(fsp,
+						   state->mem_ctx,
+						   &state->new_cookie_blob);
+	if (!NT_STATUS_IS_OK(state->status)) {
+		DBG_ERR("vfs_default_durable_cookie - %s\n",
+			nt_errstr(state->status));
+		goto fail;
 	}
 
-	smb1req->chain_fsp = fsp;
-	smb1req->smb2req->compat_chain_fsp = fsp;
+	state->smb1req->chain_fsp = fsp;
+	state->smb1req->smb2req->compat_chain_fsp = fsp;
 
-	DEBUG(10, ("vfs_default_durable_reconnect: opened file '%s'\n",
-		   fsp_str_dbg(fsp)));
-
-	TALLOC_FREE(lck);
+	DBG_DEBUG("opened file '%s'\n", fsp_str_dbg(fsp));
 
 	fsp->fsp_flags.is_fsa = true;
 
-	*result = fsp;
-	*new_cookie = new_cookie_blob;
+	state->status = NT_STATUS_OK;
+	return;
+
+fail:
+	if (have_share_mode_entry) {
+		/*
+		 * Something is screwed up, delete the sharemode entry.
+		 */
+		del_share_mode(lck, fsp);
+	}
+	if (fsp_get_pathref_fd(fsp) != -1) {
+		NTSTATUS close_status;
+		close_status = fd_close(fsp);
+		if (!NT_STATUS_IS_OK(close_status)) {
+			DBG_ERR("fd_close failed (%s), leaking fd\n",
+				nt_errstr(close_status));
+		}
+	}
+	state->op->compat = NULL;
+	fsp->op = NULL;
+}
+
+NTSTATUS vfs_default_durable_reconnect(struct connection_struct *conn,
+				       struct smb_request *smb1req,
+				       struct smbXsrv_open *op,
+				       const DATA_BLOB old_cookie,
+				       TALLOC_CTX *mem_ctx,
+				       files_struct **result,
+				       DATA_BLOB *new_cookie)
+{
+	struct vfs_default_durable_reconnect_state state;
+	struct smb_filename *smb_fname = NULL;
+	struct file_id file_id;
+	NTSTATUS status;
+	enum ndr_err_code ndr_err;
+
+	*result = NULL;
+	*new_cookie = data_blob_null;
+
+	if (!lp_durable_handles(SNUM(conn))) {
+		return NT_STATUS_NOT_SUPPORTED;
+	}
+
+	state = (struct vfs_default_durable_reconnect_state) {
+		.mem_ctx = mem_ctx,
+		.smb1req = smb1req,
+		.op = op,
+	};
+
+	/*
+	 * the checks for kernel oplocks
+	 * and similar things are done
+	 * in the vfs_default_durable_cookie()
+	 * call below.
+	 */
+
+	ndr_err = ndr_pull_struct_blob_all(
+		&old_cookie,
+		talloc_tos(),
+		&state.cookie,
+		(ndr_pull_flags_fn_t)ndr_pull_vfs_default_durable_cookie);
+	if (!NDR_ERR_CODE_IS_SUCCESS(ndr_err)) {
+		status = ndr_map_error2ntstatus(ndr_err);
+		return status;
+	}
+
+	if (strcmp(state.cookie.magic, VFS_DEFAULT_DURABLE_COOKIE_MAGIC) != 0) {
+		return NT_STATUS_INVALID_PARAMETER;
+	}
+
+	if (state.cookie.version != VFS_DEFAULT_DURABLE_COOKIE_VERSION) {
+		return NT_STATUS_INVALID_PARAMETER;
+	}
+
+	if (!state.cookie.allow_reconnect) {
+		return NT_STATUS_OBJECT_NAME_NOT_FOUND;
+	}
+
+	if (strcmp(state.cookie.servicepath, conn->connectpath) != 0) {
+		return NT_STATUS_OBJECT_NAME_NOT_FOUND;
+	}
+
+	status = filename_convert_dirfsp_rel(talloc_tos(),
+					     conn,
+					     conn->cwd_fsp,
+					     state.cookie.base_name,
+					     UCF_LCOMP_LNK_OK,
+					     0,
+					     &state.dirfsp,
+					     &smb_fname,
+					     &state.rel_fname);
+	if (!NT_STATUS_IS_OK(status)) {
+		return status;
+	}
+	if (!VALID_STAT(smb_fname->st)) {
+		return NT_STATUS_OBJECT_NAME_NOT_FOUND;
+	}
+	if (!S_ISREG(smb_fname->st.st_ex_mode)) {
+		return NT_STATUS_OBJECT_NAME_NOT_FOUND;
+	}
+
+	file_id = vfs_file_id_from_sbuf(conn, &smb_fname->st);
+	if (!file_id_equal(&state.cookie.id, &file_id)) {
+		return NT_STATUS_OBJECT_NAME_NOT_FOUND;
+	}
+
+	status = fsp_new(conn, conn, &state.fsp);
+	if (!NT_STATUS_IS_OK(status)) {
+		DBG_ERR("failed to create new fsp: %s\n",
+			nt_errstr(status));
+		return status;
+	}
+	state.fsp->file_id = file_id;
+	state.fsp->file_pid = smb1req->smbpid;
+	state.fsp->vuid = smb1req->vuid;
+	state.fsp->fnum = op->local_id;
+	fsp_set_gen_id(state.fsp);
+
+	status = fsp_set_smb_fname(state.fsp, smb_fname);
+	if (!NT_STATUS_IS_OK(status)) {
+		DBG_ERR("fsp_set_smb_fname failed: %s\n",
+			  nt_errstr(status));
+		file_free(smb1req, state.fsp);
+		return status;
+	}
+
+	/*
+	 * TODO:
+	 * Do we need to store the modified flag in the DB?
+	 */
+	state.fsp->fsp_flags.modified = false;
+	/*
+	 * no durables for directories
+	 */
+	state.fsp->fsp_flags.is_directory = false;
+	/*
+	 * For normal files, can_lock == !is_directory
+	 */
+	state.fsp->fsp_flags.can_lock = true;
+	/*
+	 * We do not support aio write behind for smb2
+	 */
+	state.fsp->fsp_flags.aio_write_behind = false;
+
+	status = share_mode_do_locked_brl(state.fsp,
+					  vfs_default_durable_reconnect_fn,
+					  &state);
+	if (!NT_STATUS_IS_OK(status)) {
+		DBG_ERR("share_mode_do_locked_brl [%s] failed: %s\n",
+			smb_fname_str_dbg(smb_fname), nt_errstr(status));
+		file_free(smb1req, state.fsp);
+		return status;
+	}
+	if (!NT_STATUS_IS_OK(state.status)) {
+		DBG_ERR("default_durable_reconnect_fn [%s] failed: %s\n",
+			smb_fname_str_dbg(smb_fname),
+			nt_errstr(state.status));
+		file_free(smb1req, state.fsp);
+		return state.status;
+	}
+
+	*result = state.fsp;
+	*new_cookie = state.new_cookie_blob;
 
 	return NT_STATUS_OK;
 }

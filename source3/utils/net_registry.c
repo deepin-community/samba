@@ -616,7 +616,7 @@ static int net_registry_increment(struct net_context *c, int argc,
 	status = g_lock_lock(ctx,
 			     lock_key,
 			     G_LOCK_WRITE,
-			     timeval_set(600, 0),
+			     tevent_timeval_set(600, 0),
 			     NULL,
 			     NULL);
 	if (!NT_STATUS_IS_OK(status)) {
@@ -1146,7 +1146,7 @@ static int registry_value_cmp(
 	if (v1->type == v2->type) {
 		return data_blob_cmp(&v1->data, &v2->data);
 	}
-	return v1->type - v2->type;
+	return NUMERIC_CMP(v1->type, v2->type);
 }
 
 static WERROR precheck_create_val(struct precheck_ctx *ctx,

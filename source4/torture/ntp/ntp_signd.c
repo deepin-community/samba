@@ -119,6 +119,7 @@ static bool test_ntp_signd(struct torture_context *tctx,
 					   a.in.secure_channel_type,
 					   &credentials1, &credentials2, 
 					   pwhash, &credentials3,
+					   negotiate_flags,
 					   negotiate_flags);
 	
 	torture_assert(tctx, creds != NULL, "memory allocation");
@@ -226,7 +227,7 @@ static bool test_ntp_signd(struct torture_context *tctx,
 					 tctx->ev,
 					 signd_client->tstream,
 					 4, /*initial_read_size */
-					 packet_full_request_u32,
+					 tstream_full_request_u32,
 					 NULL);
 	torture_assert(tctx, req != NULL,
 		       "Failed to setup a read for pdu_blob.");

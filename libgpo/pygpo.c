@@ -116,6 +116,11 @@ static PyObject *GPO_marshall_get_sec_desc_buf(PyObject *self, PyObject *args,
 	uint8_t *data = NULL;
 	size_t len = 0;
 
+	if (gpo_ptr->security_descriptor == NULL) {
+		PyErr_SetString(PyExc_RuntimeError, "Uninitialized");
+		return NULL;
+	}
+
 	status = marshall_sec_desc(gpo_ptr, gpo_ptr->security_descriptor,
 				   &data, &len);
 	if (!NT_STATUS_IS_OK(status)) {
@@ -371,7 +376,7 @@ static int py_ads_init(ADS *self, PyObject *args, PyObject *kwds)
 				 workgroup,
 				 ldap_server,
 				 ADS_SASL_PLAIN);
-	
+
 	return 0;
 }
 
@@ -385,77 +390,22 @@ static PyObject* py_ads_connect(ADS *self,
 		PyErr_SetString(PyExc_RuntimeError, "Uninitialized");
 		return NULL;
 	}
-	ADS_TALLOC_CONST_FREE(self->ads_ptr->auth.user_name);
-	ADS_TALLOC_CONST_FREE(self->ads_ptr->auth.password);
-	ADS_TALLOC_CONST_FREE(self->ads_ptr->auth.realm);
 	if (self->cli_creds) {
-		self->ads_ptr->auth.user_name = talloc_strdup(self->ads_ptr,
-			cli_credentials_get_username(self->cli_creds));
-		if (self->ads_ptr->auth.user_name == NULL) {
-			PyErr_NoMemory();
+		status = ads_connect_creds(self->ads_ptr, self->cli_creds);
+		if (!ADS_ERR_OK(status)) {
+			PyErr_Format(PyExc_RuntimeError,
+					"ads_connect_creds() failed: %s",
+					ads_errstr(status));
 			goto err;
 		}
-		self->ads_ptr->auth.password = talloc_strdup(self->ads_ptr,
-			cli_credentials_get_password(self->cli_creds));
-		if (self->ads_ptr->auth.password == NULL) {
-			PyErr_NoMemory();
-			goto err;
-		}
-		self->ads_ptr->auth.realm = talloc_strdup(self->ads_ptr,
-			cli_credentials_get_realm(self->cli_creds));
-		if (self->ads_ptr->auth.realm == NULL) {
-			PyErr_NoMemory();
-			goto err;
-		}
-		self->ads_ptr->auth.flags |= ADS_AUTH_USER_CREDS;
-		status = ads_connect_user_creds(self->ads_ptr);
 	} else {
-		char *passwd = NULL;
-
-		if (!secrets_init()) {
-			PyErr_SetString(PyExc_RuntimeError,
-					"secrets_init() failed");
+		status = ads_connect_machine(self->ads_ptr);
+		if (!ADS_ERR_OK(status)) {
+			PyErr_Format(PyExc_RuntimeError,
+					"ads_connect_machine() failed: %s",
+					ads_errstr(status));
 			goto err;
 		}
-
-		self->ads_ptr->auth.user_name = talloc_asprintf(self->ads_ptr,
-							"%s$",
-							lp_netbios_name());
-		if (self->ads_ptr->auth.user_name == NULL) {
-			PyErr_NoMemory();
-			goto err;
-		}
-
-		passwd = secrets_fetch_machine_password(
-			self->ads_ptr->server.workgroup, NULL, NULL);
-		if (passwd == NULL) {
-			PyErr_SetString(PyExc_RuntimeError,
-					"Failed to fetch the machine account "
-					"password");
-			goto err;
-		}
-
-		self->ads_ptr->auth.password = talloc_strdup(self->ads_ptr,
-							     passwd);
-		SAFE_FREE(passwd);
-		if (self->ads_ptr->auth.password == NULL) {
-			PyErr_NoMemory();
-			goto err;
-		}
-		self->ads_ptr->auth.realm = talloc_asprintf_strupper_m(
-			self->ads_ptr, "%s", self->ads_ptr->server.realm);
-		if (self->ads_ptr->auth.realm == NULL) {
-			PyErr_NoMemory();
-			goto err;
-		}
-		self->ads_ptr->auth.flags |= ADS_AUTH_USER_CREDS;
-		status = ads_connect(self->ads_ptr);
-	}
-	if (!ADS_ERR_OK(status)) {
-		PyErr_Format(PyExc_RuntimeError,
-				"ads_connect() failed: %s",
-				ads_errstr(status));
-		goto err;
 	}
 
 	TALLOC_FREE(frame);

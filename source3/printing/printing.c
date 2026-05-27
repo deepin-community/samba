@@ -897,7 +897,7 @@ static int traverse_fn_delete(TDB_CONTEXT *t, TDB_DATA key, TDB_DATA data, void 
 			return 0;
 		}
 
-		/* need to continue the the bottom of the function to
+		/* need to continue at the bottom of the function to
 		   save the correct attributes */
 	}
 
@@ -967,10 +967,12 @@ static int traverse_fn_delete(TDB_CONTEXT *t, TDB_DATA key, TDB_DATA data, void 
 		   Don't delete the job if it was submitted after the lpq_time. */
 
 		if (pjob.starttime < ts->lpq_time) {
-			DEBUG(10,("traverse_fn_delete: pjob %u deleted due to pjob.starttime (%u) < ts->lpq_time (%u)\n",
-						(unsigned int)jobid,
-						(unsigned int)pjob.starttime,
-						(unsigned int)ts->lpq_time ));
+			DBG_DEBUG("pjob %u deleted due to pjob.starttime "
+				  "(%" PRIu64 ") < ts->lpq_time (%" PRIu64
+				  ")\n",
+				  (unsigned int)jobid,
+				  (uint64_t)pjob.starttime,
+				  (uint64_t)ts->lpq_time);
 			pjob_delete(ts->ev, ts->msg_ctx,
 				    ts->sharename, jobid);
 		} else
@@ -1229,10 +1231,13 @@ static bool print_cache_expired(const char *sharename, bool check_pending)
 		uint32_t u;
 		time_t msg_pending_time;
 
-		DEBUG(4, ("print_cache_expired: cache expired for queue %s "
-			"(last_qscan_time = %d, time now = %d, qcachetime = %d)\n",
-			sharename, (int)last_qscan_time, (int)time_now,
-			(int)lp_lpq_cache_time() ));
+		DBG_INFO("cache expired for queue %s "
+			 "(last_qscan_time = %" PRIu64 ", time now = %" PRIu64
+			 ", qcachetime = %d)\n",
+			 sharename,
+			 (uint64_t)last_qscan_time,
+			 (uint64_t)time_now,
+			 lp_lpq_cache_time());
 
 		/* check if another smbd has already sent a message to update the
 		   queue.  Give the pending message one minute to clear and
@@ -2096,8 +2101,8 @@ WERROR print_job_delete(const struct auth_session_info *server_info,
 	if (!owner &&
 	    !W_ERROR_IS_OK(print_access_check(server_info, msg_ctx, snum,
 					      JOB_ACCESS_ADMINISTER))) {
-		DEBUG(0, ("print job delete denied."
-			  "User name: %s, Printer name: %s.",
+		DEBUG(0, ("print job delete denied. "
+			  "User name: %s, Printer name: %s.\n",
 			  uidtoname(server_info->unix_token->uid),
 			  lp_printername(tmp_ctx, lp_sub, snum)));
 
@@ -2183,8 +2188,8 @@ WERROR print_job_pause(const struct auth_session_info *server_info,
 	if (!is_owner(server_info, lp_const_servicename(snum), jobid) &&
 	    !W_ERROR_IS_OK(print_access_check(server_info, msg_ctx, snum,
 					      JOB_ACCESS_ADMINISTER))) {
-		DEBUG(0, ("print job pause denied."
-			  "User name: %s, Printer name: %s.",
+		DEBUG(0, ("print job pause denied. "
+			  "User name: %s, Printer name: %s.\n",
 			  uidtoname(server_info->unix_token->uid),
 			  lp_printername(tmp_ctx, lp_sub, snum)));
 
@@ -2252,8 +2257,8 @@ WERROR print_job_resume(const struct auth_session_info *server_info,
 	if (!is_owner(server_info, lp_const_servicename(snum), jobid) &&
 	    !W_ERROR_IS_OK(print_access_check(server_info, msg_ctx, snum,
 					      JOB_ACCESS_ADMINISTER))) {
-		DEBUG(0, ("print job resume denied."
-			  "User name: %s, Printer name: %s.",
+		DEBUG(0, ("print job resume denied. "
+			  "User name: %s, Printer name: %s.\n",
 			  uidtoname(server_info->unix_token->uid),
 			  lp_printername(tmp_ctx, lp_sub, snum)));
 
@@ -2831,7 +2836,7 @@ NTSTATUS print_job_end(struct messaging_context *msg_ctx, int snum,
 			pjob->filename, pjob->size ? "deleted" : "zero length" ));
 		unlink(pjob->filename);
 		pjob_delete(global_event_context(), msg_ctx, sharename, jobid);
-		return NT_STATUS_OK;
+		goto out;
 	}
 
 	/* don't strip out characters like '$' from the printername */
@@ -2873,7 +2878,8 @@ NTSTATUS print_job_end(struct messaging_context *msg_ctx, int snum,
 	/* make sure the database is up to date */
 	if (print_cache_expired(lp_const_servicename(snum), True))
 		print_queue_update(msg_ctx, snum, False);
-
+out:
+	talloc_free(tmp_ctx);
 	return NT_STATUS_OK;
 
 fail:

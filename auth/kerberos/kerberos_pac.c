@@ -33,6 +33,7 @@
 #include "librpc/gen_ndr/auth.h"
 #include "auth/common_auth.h"
 #include "auth/kerberos/pac_utils.h"
+#include "lib/krb5_wrap/krb5_samba.h"
 
 krb5_error_code check_pac_checksum(DATA_BLOB pac_data,
 					  struct PAC_SIGNATURE_DATA *sig,
@@ -44,24 +45,32 @@ krb5_error_code check_pac_checksum(DATA_BLOB pac_data,
 	krb5_keyusage usage = 0;
 	krb5_boolean checksum_valid = false;
 	krb5_data input;
+	size_t idx = 0;
+	struct {
+		krb5_cksumtype cksum_type;
+		krb5_enctype enc_type;
+	} supported_types[] = {
+		{CKSUMTYPE_HMAC_SHA1_96_AES_256, ENCTYPE_AES256_CTS_HMAC_SHA1_96},
+		{CKSUMTYPE_HMAC_SHA1_96_AES_128, ENCTYPE_AES128_CTS_HMAC_SHA1_96},
+		/* RFC8009 types. Not supported by AD yet but used by FreeIPA and MIT Kerberos */
+		{CKSUMTYPE_HMAC_SHA256_128_AES128, ENCTYPE_AES128_CTS_HMAC_SHA256_128},
+		{CKSUMTYPE_HMAC_SHA384_192_AES256, ENCTYPE_AES256_CTS_HMAC_SHA384_192},
+		{0, 0},
+	};
 
-	switch (sig->type) {
-	case CKSUMTYPE_HMAC_MD5:
-		/* ignores the key type */
-		break;
-	case CKSUMTYPE_HMAC_SHA1_96_AES_256:
-		if (KRB5_KEY_TYPE(keyblock) != ENCTYPE_AES256_CTS_HMAC_SHA1_96) {
-			return EINVAL;
+	for(idx = 0; supported_types[idx].cksum_type != 0; idx++) {
+		if (sig->type == supported_types[idx].cksum_type) {
+			if (KRB5_KEY_TYPE(keyblock) != supported_types[idx].enc_type) {
+				return EINVAL;
+			}
+			/* ok */
+			break;
 		}
-		/* ok */
-		break;
-	case CKSUMTYPE_HMAC_SHA1_96_AES_128:
-		if (KRB5_KEY_TYPE(keyblock) != ENCTYPE_AES128_CTS_HMAC_SHA1_96) {
-			return EINVAL;
-		}
-		/* ok */
-		break;
-	default:
+	}
+
+	/* do not do key type check for HMAC-MD5 */
+	if ((sig->type != CKSUMTYPE_HMAC_MD5) &&
+	    (supported_types[idx].cksum_type == 0)) {
 		DEBUG(2,("check_pac_checksum: Checksum Type %d is not supported\n",
 			(int)sig->type));
 		return EINVAL;
@@ -128,7 +137,7 @@ NTSTATUS kerberos_decode_pac(TALLOC_CTX *mem_ctx,
 			     time_t tgs_authtime,
 			     struct PAC_DATA **pac_data_out)
 {
-	NTSTATUS status;
+	NTSTATUS status = NT_STATUS_NO_MEMORY;
 	enum ndr_err_code ndr_err;
 	krb5_error_code ret;
 	DATA_BLOB modified_pac_blob;
@@ -164,8 +173,8 @@ NTSTATUS kerberos_decode_pac(TALLOC_CTX *mem_ctx,
 	kdc_sig_wipe = talloc(tmp_ctx, struct PAC_SIGNATURE_DATA);
 	srv_sig_wipe = talloc(tmp_ctx, struct PAC_SIGNATURE_DATA);
 	if (!pac_data_raw || !pac_data || !kdc_sig_wipe || !srv_sig_wipe) {
-		talloc_free(tmp_ctx);
-		return NT_STATUS_NO_MEMORY;
+		status = NT_STATUS_NO_MEMORY;
+		goto out;
 	}
 
 	ndr_err = ndr_pull_struct_blob(&pac_data_blob, pac_data, pac_data,
@@ -174,15 +183,14 @@ NTSTATUS kerberos_decode_pac(TALLOC_CTX *mem_ctx,
 		status = ndr_map_error2ntstatus(ndr_err);
 		DEBUG(0,("can't parse the PAC: %s\n",
 			nt_errstr(status)));
-		talloc_free(tmp_ctx);
-		return status;
+		goto out;
 	}
 
 	if (pac_data->num_buffers < 4) {
-		/* we need logon_ingo, service_key and kdc_key */
+		/* we need logon_info, service_key and kdc_key */
 		DEBUG(0,("less than 4 PAC buffers\n"));
-		talloc_free(tmp_ctx);
-		return NT_STATUS_INVALID_PARAMETER;
+		status = NT_STATUS_INVALID_PARAMETER;
+		goto out;
 	}
 
 	ndr_err = ndr_pull_struct_blob(
@@ -192,24 +200,23 @@ NTSTATUS kerberos_decode_pac(TALLOC_CTX *mem_ctx,
 		status = ndr_map_error2ntstatus(ndr_err);
 		DEBUG(0,("can't parse the PAC: %s\n",
 			nt_errstr(status)));
-		talloc_free(tmp_ctx);
-		return status;
+		goto out;
 	}
 
 	if (pac_data_raw->num_buffers < 4) {
-		/* we need logon_ingo, service_key and kdc_key */
+		/* we need logon_info, service_key and kdc_key */
 		DEBUG(0,("less than 4 PAC buffers\n"));
-		talloc_free(tmp_ctx);
-		return NT_STATUS_INVALID_PARAMETER;
+		status = NT_STATUS_INVALID_PARAMETER;
+		goto out;
 	}
 
 	if (pac_data->num_buffers != pac_data_raw->num_buffers) {
-		/* we need logon_ingo, service_key and kdc_key */
+		/* we need logon_info, service_key and kdc_key */
 		DEBUG(0, ("misparse! PAC_DATA has %d buffers while "
 			  "PAC_DATA_RAW has %d\n", pac_data->num_buffers,
 			  pac_data_raw->num_buffers));
-		talloc_free(tmp_ctx);
-		return NT_STATUS_INVALID_PARAMETER;
+		status = NT_STATUS_INVALID_PARAMETER;
+		goto out;
 	}
 
 	for (i=0; i < pac_data->num_buffers; i++) {
@@ -220,8 +227,8 @@ NTSTATUS kerberos_decode_pac(TALLOC_CTX *mem_ctx,
 			DEBUG(0, ("misparse! PAC_DATA buffer %d has type "
 				  "%d while PAC_DATA_RAW has %d\n", i,
 				  data_buf->type, raw_buf->type));
-			talloc_free(tmp_ctx);
-			return NT_STATUS_INVALID_PARAMETER;
+			status = NT_STATUS_INVALID_PARAMETER;
+			goto out;
 		}
 		switch (data_buf->type) {
 		case PAC_TYPE_LOGON_INFO:
@@ -254,26 +261,26 @@ NTSTATUS kerberos_decode_pac(TALLOC_CTX *mem_ctx,
 
 	if (!logon_info) {
 		DEBUG(0,("PAC no logon_info\n"));
-		talloc_free(tmp_ctx);
-		return NT_STATUS_INVALID_PARAMETER;
+		status = NT_STATUS_INVALID_PARAMETER;
+		goto out;
 	}
 
 	if (!logon_name) {
 		DEBUG(0,("PAC no logon_name\n"));
-		talloc_free(tmp_ctx);
-		return NT_STATUS_INVALID_PARAMETER;
+		status = NT_STATUS_INVALID_PARAMETER;
+		goto out;
 	}
 
 	if (!srv_sig_ptr || !srv_sig_blob) {
 		DEBUG(0,("PAC no srv_key\n"));
-		talloc_free(tmp_ctx);
-		return NT_STATUS_INVALID_PARAMETER;
+		status = NT_STATUS_INVALID_PARAMETER;
+		goto out;
 	}
 
 	if (!kdc_sig_ptr || !kdc_sig_blob) {
 		DEBUG(0,("PAC no kdc_key\n"));
-		talloc_free(tmp_ctx);
-		return NT_STATUS_INVALID_PARAMETER;
+		status = NT_STATUS_INVALID_PARAMETER;
+		goto out;
 	}
 
 	/* Find and zero out the signatures,
@@ -288,8 +295,7 @@ NTSTATUS kerberos_decode_pac(TALLOC_CTX *mem_ctx,
 		status = ndr_map_error2ntstatus(ndr_err);
 		DEBUG(0,("can't parse the KDC signature: %s\n",
 			nt_errstr(status)));
-		talloc_free(tmp_ctx);
-		return status;
+		goto out;
 	}
 
 	ndr_err = ndr_pull_struct_blob(
@@ -299,8 +305,7 @@ NTSTATUS kerberos_decode_pac(TALLOC_CTX *mem_ctx,
 		status = ndr_map_error2ntstatus(ndr_err);
 		DEBUG(0,("can't parse the SRV signature: %s\n",
 			nt_errstr(status)));
-		talloc_free(tmp_ctx);
-		return status;
+		goto out;
 	}
 
 	/* Now zero the decoded structure */
@@ -317,8 +322,7 @@ NTSTATUS kerberos_decode_pac(TALLOC_CTX *mem_ctx,
 		status = ndr_map_error2ntstatus(ndr_err);
 		DEBUG(0,("can't repack the KDC signature: %s\n",
 			nt_errstr(status)));
-		talloc_free(tmp_ctx);
-		return status;
+		goto out;
 	}
 	ndr_err = ndr_push_struct_blob(
 			srv_sig_blob, pac_data_raw, srv_sig_wipe,
@@ -327,8 +331,7 @@ NTSTATUS kerberos_decode_pac(TALLOC_CTX *mem_ctx,
 		status = ndr_map_error2ntstatus(ndr_err);
 		DEBUG(0,("can't repack the SRV signature: %s\n",
 			nt_errstr(status)));
-		talloc_free(tmp_ctx);
-		return status;
+		goto out;
 	}
 
 	/* push out the whole structure, but now with zero'ed signatures */
@@ -339,8 +342,7 @@ NTSTATUS kerberos_decode_pac(TALLOC_CTX *mem_ctx,
 		status = ndr_map_error2ntstatus(ndr_err);
 		DEBUG(0,("can't repack the RAW PAC: %s\n",
 			nt_errstr(status)));
-		talloc_free(tmp_ctx);
-		return status;
+		goto out;
 	}
 
 	if (service_keyblock) {
@@ -351,7 +353,8 @@ NTSTATUS kerberos_decode_pac(TALLOC_CTX *mem_ctx,
 		if (ret) {
 			DEBUG(5, ("PAC Decode: Failed to verify the service "
 				  "signature: %s\n", error_message(ret)));
-			return NT_STATUS_ACCESS_DENIED;
+			status = NT_STATUS_ACCESS_DENIED;
+			goto out;
 		}
 
 		if (krbtgt_keyblock) {
@@ -361,14 +364,14 @@ NTSTATUS kerberos_decode_pac(TALLOC_CTX *mem_ctx,
 			if (ret) {
 				DEBUG(1, ("PAC Decode: Failed to verify the KDC signature: %s\n",
 					  smb_get_krb5_error_message(context, ret, tmp_ctx)));
-				talloc_free(tmp_ctx);
-				return NT_STATUS_ACCESS_DENIED;
+				status = NT_STATUS_ACCESS_DENIED;
+				goto out;
 			}
 		}
 	}
 
 	if (tgs_authtime) {
-		/* Convert to NT time, so as not to loose accuracy in comparison */
+		/* Convert to NT time, so as not to lose accuracy in comparison */
 		unix_to_nt_time(&tgs_authtime_nttime, tgs_authtime);
 
 		if (tgs_authtime_nttime != logon_name->logon_time) {
@@ -378,8 +381,8 @@ NTSTATUS kerberos_decode_pac(TALLOC_CTX *mem_ctx,
 				  nt_time_string(tmp_ctx, logon_name->logon_time)));
 			DEBUG(2, ("PAC Decode: Ticket: %s\n",
 				  nt_time_string(tmp_ctx, tgs_authtime_nttime)));
-			talloc_free(tmp_ctx);
-			return NT_STATUS_ACCESS_DENIED;
+			status = NT_STATUS_ACCESS_DENIED;
+			goto out;
 		}
 	}
 
@@ -391,8 +394,8 @@ NTSTATUS kerberos_decode_pac(TALLOC_CTX *mem_ctx,
 		if (ret) {
 			DEBUG(2, ("Could not unparse name from ticket to match with name from PAC: [%s]:%s\n",
 				  logon_name->account_name, error_message(ret)));
-			talloc_free(tmp_ctx);
-			return NT_STATUS_INVALID_PARAMETER;
+			status = NT_STATUS_INVALID_PARAMETER;
+			goto out;
 		}
 
 		bool_ret = strcmp(client_principal_string, logon_name->account_name) == 0;
@@ -403,8 +406,8 @@ NTSTATUS kerberos_decode_pac(TALLOC_CTX *mem_ctx,
 				  logon_name->account_name,
 				  client_principal_string));
 			SAFE_FREE(client_principal_string);
-			talloc_free(tmp_ctx);
-			return NT_STATUS_ACCESS_DENIED;
+			status = NT_STATUS_ACCESS_DENIED;
+			goto out;
 		}
 		SAFE_FREE(client_principal_string);
 
@@ -425,10 +428,15 @@ NTSTATUS kerberos_decode_pac(TALLOC_CTX *mem_ctx,
 	}
 
 	if (pac_data_out) {
-		*pac_data_out = talloc_steal(mem_ctx, pac_data);
+		*pac_data_out = talloc_move(mem_ctx, &pac_data);
 	}
 
-	return NT_STATUS_OK;
+	status = NT_STATUS_OK;
+
+    out:
+
+	TALLOC_FREE(tmp_ctx);
+	return status;
 }
 
 NTSTATUS kerberos_pac_logon_info(TALLOC_CTX *mem_ctx,

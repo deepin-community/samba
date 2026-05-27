@@ -36,6 +36,7 @@
 #include "system/network.h"
 #include "lib/util/idtree_random.h"
 #include "nsswitch/winbind_client.h"
+#include "libcli/smb/tstream_smbXcli_np.h"
 
 /**
  * @file
@@ -163,6 +164,130 @@ static struct dcesrv_call_state *dcesrv_find_fragmented_call(struct dcesrv_conne
 		}
 	}
 	return NULL;
+}
+
+/*
+  find a pending request
+*/
+static struct dcesrv_call_state *dcesrv_find_pending_call(
+					struct dcesrv_connection *dce_conn,
+					uint32_t call_id)
+{
+	struct dcesrv_call_state *c = NULL;
+
+	for (c = dce_conn->pending_call_list; c != NULL; c = c->next) {
+		if (c->pkt.call_id == call_id) {
+			return c;
+		}
+	}
+
+	return NULL;
+}
+
+/*
+ * register a principal for an auth_type
+ *
+ * In order to get used in dcesrv_mgmt_inq_princ_name()
+ */
+_PUBLIC_ NTSTATUS dcesrv_auth_type_principal_register(struct dcesrv_context *dce_ctx,
+						      enum dcerpc_AuthType auth_type,
+						      const char *principal_name)
+{
+	const char *existing = NULL;
+	struct dcesrv_ctx_principal *p = NULL;
+
+	existing = dcesrv_auth_type_principal_find(dce_ctx, auth_type);
+	if (existing != NULL) {
+		DBG_ERR("auth_type[%u] already registered with principal_name[%s]\n",
+			auth_type, existing);
+		return NT_STATUS_ALREADY_REGISTERED;
+	}
+
+	p = talloc_zero(dce_ctx, struct dcesrv_ctx_principal);
+	if (p == NULL) {
+		return NT_STATUS_NO_MEMORY;
+	}
+	p->auth_type = auth_type;
+	p->principal_name = talloc_strdup(p, principal_name);
+	if (p->principal_name == NULL) {
+		TALLOC_FREE(p);
+		return NT_STATUS_NO_MEMORY;
+	}
+
+	DLIST_ADD_END(dce_ctx->principal_list, p);
+	return NT_STATUS_OK;
+}
+
+_PUBLIC_ const char *dcesrv_auth_type_principal_find(struct dcesrv_context *dce_ctx,
+						     enum dcerpc_AuthType auth_type)
+{
+	struct dcesrv_ctx_principal *p = NULL;
+
+	for (p = dce_ctx->principal_list; p != NULL; p = p->next) {
+		if (p->auth_type == auth_type) {
+			return p->principal_name;
+		}
+	}
+
+	return NULL;
+}
+
+_PUBLIC_ NTSTATUS dcesrv_register_default_auth_types(struct dcesrv_context *dce_ctx,
+						     const char *principal)
+{
+	const char *realm = lpcfg_realm(dce_ctx->lp_ctx);
+	NTSTATUS status;
+
+	status = dcesrv_auth_type_principal_register(dce_ctx,
+						     DCERPC_AUTH_TYPE_NTLMSSP,
+						     principal);
+	if (!NT_STATUS_IS_OK(status)) {
+		return status;
+	}
+	status = dcesrv_auth_type_principal_register(dce_ctx,
+						     DCERPC_AUTH_TYPE_SPNEGO,
+						     principal);
+	if (!NT_STATUS_IS_OK(status)) {
+		return status;
+	}
+
+	if (realm == NULL || realm[0] == '\0') {
+		return NT_STATUS_OK;
+	}
+
+	status = dcesrv_auth_type_principal_register(dce_ctx,
+						     DCERPC_AUTH_TYPE_KRB5,
+						     principal);
+	if (!NT_STATUS_IS_OK(status)) {
+		return status;
+	}
+
+	return NT_STATUS_OK;
+}
+
+_PUBLIC_ NTSTATUS dcesrv_register_default_auth_types_machine_principal(struct dcesrv_context *dce_ctx)
+{
+	const char *realm = lpcfg_realm(dce_ctx->lp_ctx);
+	const char *nb = lpcfg_netbios_name(dce_ctx->lp_ctx);
+	char *principal = NULL;
+	NTSTATUS status;
+
+	if (realm == NULL || realm[0] == '\0') {
+		return dcesrv_register_default_auth_types(dce_ctx, "");
+	}
+
+	principal = talloc_asprintf(talloc_tos(), "%s$@%s", nb, realm);
+	if (principal == NULL) {
+		return NT_STATUS_NO_MEMORY;
+	}
+
+	status = dcesrv_register_default_auth_types(dce_ctx, principal);
+	TALLOC_FREE(principal);
+	if (!NT_STATUS_IS_OK(status)) {
+		return status;
+	}
+
+	return NT_STATUS_OK;
 }
 
 /*
@@ -552,6 +677,8 @@ _PUBLIC_ NTSTATUS dcesrv_endpoint_connect(struct dcesrv_context *dce_ctx,
 {
 	struct dcesrv_auth *auth = NULL;
 	struct dcesrv_connection *p = NULL;
+	enum dcerpc_transport_t transport =
+		dcerpc_binding_get_transport(ep->ep_description);
 
 	if (!session_info) {
 		return NT_STATUS_ACCESS_DENIED;
@@ -571,9 +698,21 @@ _PUBLIC_ NTSTATUS dcesrv_endpoint_connect(struct dcesrv_context *dce_ctx,
 	p->event_ctx = event_ctx;
 	p->state_flags = state_flags;
 	p->allow_bind = true;
-	p->max_recv_frag = 5840;
-	p->max_xmit_frag = 5840;
 	p->max_total_request_size = DCERPC_NCACN_REQUEST_DEFAULT_MAX_SIZE;
+	/*
+	 * SMB uses 4280, while all others use 5480
+	 * note that p->transport_max_recv_frag is fixed
+	 * for the lifetime of the connection, it's not
+	 * negotiated by bind.
+	 */
+	if (transport == NCACN_NP) {
+		p->transport_max_recv_frag = TSTREAM_SMBXCLI_NP_MAX_BUF_SIZE;
+	} else {
+		p->transport_max_recv_frag = DCERPC_FRAG_MAX_SIZE;
+	}
+	/* these might be overwritten by BIND */
+	p->max_recv_frag = p->transport_max_recv_frag;
+	p->max_xmit_frag = p->transport_max_recv_frag;
 
 	p->support_hdr_signing = lpcfg_parm_bool(dce_ctx->lp_ctx,
 						 NULL,
@@ -598,10 +737,7 @@ _PUBLIC_ NTSTATUS dcesrv_endpoint_connect(struct dcesrv_context *dce_ctx,
 
 	p->default_auth_state = auth;
 
-	/*
-	 * For now we only support NDR32.
-	 */
-	p->preferred_transfer = &ndr_transfer_syntax_ndr;
+	p->preferred_transfer = dce_ctx->preferred_transfer;
 
 	*_p = p;
 	return NT_STATUS_OK;
@@ -647,8 +783,8 @@ static void dcesrv_call_set_list(struct dcesrv_call_state *call,
 	}
 }
 
-static void dcesrv_call_disconnect_after(struct dcesrv_call_state *call,
-					 const char *reason)
+void dcesrv_call_disconnect_after(struct dcesrv_call_state *call,
+				  const char *reason)
 {
 	struct dcesrv_auth *a = NULL;
 
@@ -995,12 +1131,20 @@ static NTSTATUS dcesrv_bind(struct dcesrv_call_state *call)
 			DCERPC_BIND_NAK_REASON_PROTOCOL_VERSION_NOT_SUPPORTED);
 	}
 
+	/*
+	 * Note that BIND and ALTER allow frag_len up to UINT16_MAX,
+	 * so we don't check again frag_len against
+	 * call->conn->transport_max_recv_frag
+	 */
+
 	/* max_recv_frag and max_xmit_frag result always in the same value! */
 	max_req = MIN(call->pkt.u.bind.max_xmit_frag,
 		      call->pkt.u.bind.max_recv_frag);
 	/*
 	 * The values are between 2048 and 5840 tested against Windows 2012R2
 	 * via ncacn_ip_tcp on port 135.
+	 *
+	 * call->conn->transport_max_recv_frag stays fixed at 5840 (4280 for SMB)
 	 */
 	max_req = MAX(2048, max_req);
 	max_rep = MIN(max_req, conn->max_recv_frag);
@@ -1014,13 +1158,23 @@ static NTSTATUS dcesrv_bind(struct dcesrv_call_state *call)
 	status = dce_ctx->callbacks->assoc_group.find(
 		call, dce_ctx->callbacks->assoc_group.private_data);
 	if (!NT_STATUS_IS_OK(status)) {
-		DBG_NOTICE("Failed to find assoc_group 0x%08x: %s\n",
-			   call->pkt.u.bind.assoc_group_id, nt_errstr(status));
+		char *raddr = NULL;
+
+		raddr = tsocket_address_string(call->conn->remote_address, call);
+
+		endpoint = dcerpc_binding_get_string_option(
+				call->conn->endpoint->ep_description,
+				"endpoint");
+
+		DBG_WARNING("Failed to find assoc_group 0x%08x on ep[%s] raddr[%s]: %s\n",
+			    call->pkt.u.bind.assoc_group_id,
+			    endpoint, raddr, nt_errstr(status));
 		return dcesrv_bind_nak(call, 0);
 	}
 
 	if (call->pkt.u.bind.num_contexts < 1) {
-		return dcesrv_bind_nak(call, 0);
+		return dcesrv_bind_nak(call,
+			DCERPC_BIND_NAK_REASON_PROTOCOL_VERSION_NOT_SUPPORTED);
 	}
 
 	ack_ctx_list = talloc_zero_array(call, struct dcerpc_ack_ctx,
@@ -1208,7 +1362,7 @@ static void dcesrv_bind_done(struct tevent_req *subreq)
 
 	status = dcesrv_auth_complete(call, status);
 	if (!NT_STATUS_IS_OK(status)) {
-		status = dcesrv_bind_nak(call, 0);
+		status = dcesrv_bind_nak(call, DCERPC_BIND_NAK_REASON_INVALID_CHECKSUM);
 		dcesrv_conn_auth_wait_finished(conn, status);
 		return;
 	}
@@ -1264,14 +1418,6 @@ static NTSTATUS dcesrv_auth3(struct dcesrv_call_state *call)
 	struct dcesrv_context_callbacks *cb = call->conn->dce_ctx->callbacks;
 	struct tevent_req *subreq = NULL;
 	NTSTATUS status;
-
-	if (!auth->auth_started) {
-		return dcesrv_fault_disconnect(call, DCERPC_NCA_S_PROTO_ERROR);
-	}
-
-	if (auth->auth_finished) {
-		return dcesrv_fault_disconnect(call, DCERPC_NCA_S_PROTO_ERROR);
-	}
 
 	status = dcerpc_verify_ncacn_packet_header(&call->pkt,
 			DCERPC_PKT_AUTH3,
@@ -1488,6 +1634,8 @@ static NTSTATUS dcesrv_check_or_create_context(struct dcesrv_call_state *call,
 	context->context_id = ctx->context_id;
 	context->iface = iface;
 	context->transfer_syntax = *selected_transfer;
+	context->ndr64 = ndr_syntax_id_equal(&context->transfer_syntax,
+					     &ndr_transfer_syntax_ndr64);
 	DLIST_ADD(call->conn->contexts, context);
 	call->context = context;
 	talloc_set_destructor(context, dcesrv_connection_context_destructor);
@@ -1626,6 +1774,12 @@ static NTSTATUS dcesrv_alter(struct dcesrv_call_state *call)
 		return dcesrv_fault_disconnect(call, DCERPC_NCA_S_PROTO_ERROR);
 	}
 
+	/*
+	 * Note that BIND and ALTER allow frag_len up to UINT16_MAX,
+	 * so we don't check again frag_len against
+	 * call->conn->transport_max_recv_frag
+	 */
+
 	auth_ok = dcesrv_auth_alter(call);
 	if (!auth_ok) {
 		if (call->fault_code != 0) {
@@ -1743,7 +1897,20 @@ static void dcesrv_alter_done(struct tevent_req *subreq)
 
 	status = dcesrv_auth_complete(call, status);
 	if (!NT_STATUS_IS_OK(status)) {
-		status = dcesrv_fault_disconnect(call, DCERPC_FAULT_SEC_PKG_ERROR);
+		/*
+		 * NT_STATUS_ACCESS_DENIED from gensec means
+		 * a signing check or decryption failure,
+		 * which should result in DCERPC_FAULT_SEC_PKG_ERROR.
+		 *
+		 * Any other status, e.g. NT_STATUS_LOGON_FAILURE or
+		 * NT_STATUS_INVALID_PARAMETER should result in
+		 * DCERPC_FAULT_ACCESS_DENIED.
+		 */
+		if (NT_STATUS_EQUAL(status, NT_STATUS_ACCESS_DENIED)) {
+			status = dcesrv_fault_disconnect(call, DCERPC_FAULT_SEC_PKG_ERROR);
+		} else {
+			status = dcesrv_fault_disconnect(call, DCERPC_FAULT_ACCESS_DENIED);
+		}
 		dcesrv_conn_auth_wait_finished(conn, status);
 		return;
 	}
@@ -1777,7 +1944,7 @@ static void dcesrv_save_call(struct dcesrv_call_state *call, const char *why)
 */
 void _dcesrv_save_ndr_fuzz_seed(DATA_BLOB call_blob,
 				struct dcesrv_call_state *call,
-				int flags)
+				ndr_flags_type flags)
 {
 	const char *dump_dir = lpcfg_parm_string(call->conn->dce_ctx->lp_ctx,
 						 NULL,
@@ -1883,6 +2050,16 @@ static NTSTATUS dcesrv_request(struct dcesrv_call_state *call)
 				  auth->auth_level,
 				  derpc_transport_string_by_transport(transport),
 				  addr));
+			if (!call->conn->got_explicit_auth_level_non_connect) {
+				/*
+				 * If there was is no auth context with
+				 * a level higher than DCERPC_AUTH_LEVEL_CONNECT,
+				 * the connection should be disconnected
+				 * after sending the fault.
+				 */
+				return dcesrv_fault_disconnect0(call,
+						DCERPC_FAULT_ACCESS_DENIED);
+			}
 			return dcesrv_fault(call, DCERPC_FAULT_ACCESS_DENIED);
 		}
 		break;
@@ -1903,6 +2080,16 @@ static NTSTATUS dcesrv_request(struct dcesrv_call_state *call)
 			  auth->auth_level,
 			  derpc_transport_string_by_transport(transport),
 			  addr));
+		if (!call->conn->got_explicit_auth_level_non_connect) {
+			/*
+			 * If there was is no auth context with
+			 * a level higher than DCERPC_AUTH_LEVEL_CONNECT,
+			 * the connection should be disconnected
+			 * after sending the fault.
+			 */
+			return dcesrv_fault_disconnect0(call,
+					DCERPC_FAULT_ACCESS_DENIED);
+		}
 		return dcesrv_fault(call, DCERPC_FAULT_ACCESS_DENIED);
 	}
 
@@ -1928,13 +2115,17 @@ static NTSTATUS dcesrv_request(struct dcesrv_call_state *call)
 		return dcesrv_fault(call, faultcode);
 	}
 
+	if (call->context->ndr64) {
+		call->ndr_pull->flags |= LIBNDR_FLAG_NDR64;
+	}
+
 	/* unravel the NDR for the packet */
 	status = call->context->iface->ndr_pull(call, call, pull, &call->r);
 	if (!NT_STATUS_IS_OK(status)) {
 		uint8_t extra_flags = 0;
 		if (call->fault_code == DCERPC_FAULT_OP_RNG_ERROR) {
 			/* we got an unknown call */
-			DEBUG(3,(__location__ ": Unknown RPC call %u on %s\n",
+			DEBUG(3,(__location__ ": Unknown RPC call %"PRIu16" on %s\n",
 				 call->pkt.u.request.opnum,
 				 call->context->iface->name));
 			dcesrv_save_call(call, "unknown");
@@ -1952,7 +2143,7 @@ static NTSTATUS dcesrv_request(struct dcesrv_call_state *call)
 
 	if (pull->offset != pull->data_size) {
 		dcesrv_save_call(call, "extrabytes");
-		DEBUG(3,("Warning: %d extra bytes in incoming RPC request\n",
+		DEBUG(3,("Warning: %"PRIu32" extra bytes in incoming RPC request\n",
 			 pull->data_size - pull->offset));
 	}
 
@@ -2070,6 +2261,8 @@ static NTSTATUS dcesrv_process_ncacn_packet(struct dcesrv_connection *dce_conn,
 			dce_conn->default_auth_level_connect = NULL;
 			if (auth_level == DCERPC_AUTH_LEVEL_CONNECT) {
 				dce_conn->got_explicit_auth_level_connect = true;
+			} else if (auth_level >= DCERPC_AUTH_LEVEL_PACKET) {
+				dce_conn->got_explicit_auth_level_non_connect = true;
 			}
 		}
 
@@ -2137,7 +2330,13 @@ static NTSTATUS dcesrv_process_ncacn_packet(struct dcesrv_connection *dce_conn,
 		dcesrv_default_auth_state_prepare_request(call);
 
 		if (call->auth_state->auth_started &&
+		    !call->auth_state->auth_invalid &&
 		    !call->auth_state->auth_finished) {
+			/*
+			 * We have this check here instead of
+			 * relying on the check in dcesrv_auth_pkt_pull()
+			 * because the fault should have context_id=0
+			 */
 			return dcesrv_fault_disconnect(call,
 					DCERPC_NCA_S_PROTO_ERROR);
 		}
@@ -2159,14 +2358,15 @@ static NTSTATUS dcesrv_process_ncacn_packet(struct dcesrv_connection *dce_conn,
 					DCERPC_NCA_S_PROTO_ERROR);
 		}
 
-		if (call->pkt.frag_length > DCERPC_FRAG_MAX_SIZE) {
+		if (call->pkt.frag_length > call->conn->transport_max_recv_frag) {
 			/*
 			 * We don't use dcesrv_fault_disconnect()
 			 * here, because we don't want to set
 			 * DCERPC_PFC_FLAG_DID_NOT_EXECUTE
 			 *
 			 * Note that we don't check against the negotiated
-			 * max_recv_frag, but a hard coded value.
+			 * max_recv_frag, but a hard coded value from
+			 * the transport.
 			 */
 			return dcesrv_fault_disconnect0(call, DCERPC_NCA_S_PROTO_ERROR);
 		}
@@ -2399,11 +2599,68 @@ static NTSTATUS dcesrv_process_ncacn_packet(struct dcesrv_connection *dce_conn,
 		status = dcesrv_request(call);
 		break;
 	case DCERPC_PKT_CO_CANCEL:
+		existing = dcesrv_find_fragmented_call(dce_conn,
+						       call->pkt.call_id);
+		if (existing != NULL) {
+			/*
+			 * If the call is still waiting for
+			 * more fragments, it's not pending yet,
+			 * for now we just remember we got CO_CANCEL,
+			 * but ignore it otherwise.
+			 *
+			 * This matches what windows is doing...
+			 */
+			existing->got_co_cancel = true;
+			SMB_ASSERT(existing->subreq == NULL);
+			existing = NULL;
+		}
+		existing = dcesrv_find_pending_call(dce_conn,
+						    call->pkt.call_id);
+		if (existing != NULL) {
+			/*
+			 * Give the backend a chance to react
+			 * on CO_CANCEL, but note it's ignored
+			 * by default.
+			 */
+			existing->got_co_cancel = true;
+			if (existing->subreq != NULL) {
+				tevent_req_cancel(existing->subreq);
+			}
+			existing = NULL;
+		}
+		status = NT_STATUS_OK;
+		TALLOC_FREE(call);
+		break;
 	case DCERPC_PKT_ORPHANED:
-		/*
-		 * Window just ignores CO_CANCEL and ORPHANED,
-		 * so we do...
-		 */
+		existing = dcesrv_find_fragmented_call(dce_conn,
+						       call->pkt.call_id);
+		if (existing != NULL) {
+			/*
+			 * If the call is still waiting for
+			 * more fragments, it's not pending yet,
+			 * for now we just remember we got ORPHANED,
+			 * but ignore it otherwise.
+			 *
+			 * This matches what windows is doing...
+			 */
+			existing->got_orphaned = true;
+			SMB_ASSERT(existing->subreq == NULL);
+			existing = NULL;
+		}
+		existing = dcesrv_find_pending_call(dce_conn,
+						    call->pkt.call_id);
+		if (existing != NULL) {
+			/*
+			 * Give the backend a chance to react
+			 * on ORPHANED, but note it's ignored
+			 * by default.
+			 */
+			existing->got_orphaned = true;
+			if (existing->subreq != NULL) {
+				tevent_req_cancel(existing->subreq);
+			}
+			existing = NULL;
+		}
 		status = NT_STATUS_OK;
 		TALLOC_FREE(call);
 		break;
@@ -2459,6 +2716,11 @@ _PUBLIC_ NTSTATUS dcesrv_init_context(TALLOC_CTX *mem_ctx,
 	}
 	dce_ctx->broken_connections = NULL;
 	dce_ctx->callbacks = cb;
+
+	/*
+	 * For now we only support NDR32.
+	 */
+	dce_ctx->preferred_transfer = &ndr_transfer_syntax_ndr;
 
 	*_dce_ctx = dce_ctx;
 	return NT_STATUS_OK;
@@ -2682,6 +2944,7 @@ const struct dcesrv_critical_sizes *dcerpc_module_version(void)
 _PUBLIC_ void dcesrv_terminate_connection(struct dcesrv_connection *dce_conn, const char *reason)
 {
 	struct dcesrv_context *dce_ctx = dce_conn->dce_ctx;
+	struct dcesrv_call_state *c = NULL, *n = NULL;
 	struct dcesrv_auth *a = NULL;
 
 	dce_conn->wait_send = NULL;
@@ -2697,6 +2960,7 @@ _PUBLIC_ void dcesrv_terminate_connection(struct dcesrv_connection *dce_conn, co
 		a->auth_invalid = true;
 	}
 
+no_pending:
 	if (dce_conn->pending_call_list == NULL) {
 		char *full_reason = talloc_asprintf(dce_conn, "dcesrv: %s", reason);
 
@@ -2717,6 +2981,23 @@ _PUBLIC_ void dcesrv_terminate_connection(struct dcesrv_connection *dce_conn, co
 		dce_conn->terminate = "dcesrv: deferred terminating connection - no memory";
 	}
 	DLIST_ADD_END(dce_ctx->broken_connections, dce_conn);
+
+	for (c = dce_conn->pending_call_list; c != NULL; c = n) {
+		n = c->next;
+
+		c->got_disconnect = true;
+		if (c->subreq != NULL) {
+			tevent_req_cancel(c->subreq);
+		}
+	}
+
+	if (dce_conn->pending_call_list == NULL) {
+		/*
+		 * tevent_req_cancel() was able to made progress
+		 * and we don't have pending calls anymore.
+		 */
+		goto no_pending;
+	}
 }
 
 _PUBLIC_ void dcesrv_cleanup_broken_connections(struct dcesrv_context *dce_ctx)

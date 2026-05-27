@@ -234,6 +234,8 @@ static bool _test_GetKeySecurity(struct dcerpc_pipe *p,
 	uint32_t sec_info;
 	DATA_BLOB sdblob;
 	struct dcerpc_binding_handle *b = p->binding_handle;
+	const struct dcerpc_binding *binding = dcerpc_binding_handle_get_binding(b);
+	uint16_t flags = dcerpc_binding_get_flags(binding);
 
 	if (sec_info_ptr) {
 		sec_info = *sec_info_ptr;
@@ -265,7 +267,7 @@ static bool _test_GetKeySecurity(struct dcerpc_pipe *p,
 				     (ndr_pull_flags_fn_t)ndr_pull_security_descriptor),
 				     "pull_security_descriptor failed");
 
-	if (p->conn->flags & DCERPC_DEBUG_PRINT_OUT) {
+	if (flags & DCERPC_DEBUG_PRINT_OUT) {
 		NDR_PRINT_DEBUG(security_descriptor, sd);
 	}
 
@@ -298,10 +300,12 @@ static bool _test_SetKeySecurity(struct dcerpc_pipe *p,
 	DATA_BLOB sdblob;
 	uint32_t sec_info;
 	struct dcerpc_binding_handle *b = p->binding_handle;
+	const struct dcerpc_binding *binding = dcerpc_binding_handle_get_binding(b);
+	uint16_t flags = dcerpc_binding_get_flags(binding);
 
 	ZERO_STRUCT(r);
 
-	if (sd && (p->conn->flags & DCERPC_DEBUG_PRINT_OUT)) {
+	if (sd && (flags & DCERPC_DEBUG_PRINT_OUT)) {
 		NDR_PRINT_DEBUG(security_descriptor, sd);
 	}
 
@@ -2068,6 +2072,90 @@ static bool test_QueryValue_full(struct dcerpc_binding_handle *b,
 	return true;
 }
 
+static bool test_EnumValue_one(struct dcerpc_binding_handle *b,
+			       struct torture_context *tctx,
+			       struct policy_handle *handle,
+			       int max_valnamelen)
+{
+	struct winreg_EnumValue r;
+	bool ret = true;
+	DATA_BLOB blob;
+
+	blob = data_blob_string_const("data_1");
+	torture_assert_goto(tctx,
+		test_SetValue(b, tctx, handle, "v1", REG_BINARY, blob.data, blob.length),
+		ret, done,
+		"test_SetValue failed");
+
+	blob = data_blob_string_const("data_2");
+	torture_assert_goto(tctx,
+		test_SetValue(b, tctx, handle, "v2", REG_BINARY, blob.data, blob.length),
+		ret, done,
+		"test_SetValue failed");
+
+	ZERO_STRUCT(r);
+
+	r.in.handle = handle;
+	r.in.enum_index = 0;
+
+	do {
+		enum winreg_Type type = REG_NONE;
+		uint32_t size = 0, zero = 0;
+		struct winreg_ValNameBuf name;
+		char n = '\0';
+
+		r.in.name = &name;
+		r.in.type = &type;
+		r.in.length = &zero;
+		r.in.size = &size;
+		r.out.name = &name;
+		r.out.size = &size;
+
+		name.name = &n;
+		name.size = max_valnamelen + 2;
+		name.length = 0;
+
+		r.in.value = talloc_array(tctx, uint8_t, 0);
+		torture_assert(tctx, r.in.value, "nomem");
+
+		torture_assert_ntstatus_ok_goto(tctx,
+			dcerpc_winreg_EnumValue_r(b, tctx, &r),
+			ret, done,
+			"EnumValue failed");
+		if (W_ERROR_EQUAL(r.out.result, WERR_NO_MORE_ITEMS)) {
+			break;
+		}
+		torture_assert_werr_equal_goto(tctx,
+			r.out.result, WERR_MORE_DATA,
+			ret, done,
+			"unexpected return code");
+
+		*r.in.size = *r.out.size;
+		r.in.value = talloc_zero_array(tctx, uint8_t, *r.in.size);
+		torture_assert(tctx, r.in.value, "nomem");
+
+		torture_assert_ntstatus_ok_goto(tctx,
+			dcerpc_winreg_EnumValue_r(b, tctx, &r),
+			ret, done,
+			"EnumValue failed");
+		torture_assert_werr_ok_goto(tctx, r.out.result,
+			ret, done,
+			"unexpected return code");
+
+		r.in.enum_index++;
+
+	} while (W_ERROR_IS_OK(r.out.result));
+
+	torture_assert_werr_equal_goto(tctx, r.out.result, WERR_NO_MORE_ITEMS,
+		ret, done,
+		"EnumValue failed");
+ done:
+	test_DeleteValue(b, tctx, handle, "v1");
+	test_DeleteValue(b, tctx, handle, "v2");
+
+	return ret;
+}
+
 static bool test_EnumValue(struct dcerpc_binding_handle *b,
 			   struct torture_context *tctx,
 			   struct policy_handle *handle, int max_valnamelen,
@@ -2225,6 +2313,10 @@ static bool test_key(struct dcerpc_pipe *p, struct torture_context *tctx,
 	}
 
 	if (!test_EnumValue(b, tctx, handle, max_valnamelen, 0xFFFF)) {
+	}
+
+	if (!test_EnumValue_one(b, tctx, handle, 0xff)) {
+		return false;
 	}
 
 	test_CloseKey(b, tctx, handle);
@@ -3009,6 +3101,8 @@ static bool test_key_base(struct torture_context *tctx,
 		} else {
 			torture_assert(tctx, test_CreateKey_keytypes(tctx, b, &newhandle, test_key1, hkey),
 				"keytype test failed");
+			torture_assert(tctx, test_EnumValue_one(b, tctx, &newhandle, 0xff),
+				"simple EnumValue test failed");
 		}
 
 		if (!test_CloseKey(b, tctx, &newhandle)) {

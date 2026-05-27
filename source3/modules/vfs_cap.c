@@ -192,7 +192,8 @@ static int cap_renameat(vfs_handle_struct *handle,
 			files_struct *srcfsp,
 			const struct smb_filename *smb_fname_src,
 			files_struct *dstfsp,
-			const struct smb_filename *smb_fname_dst)
+			const struct smb_filename *smb_fname_dst,
+			const struct vfs_rename_how *how)
 {
 	char *capold = NULL;
 	char *capnew = NULL;
@@ -245,7 +246,8 @@ static int cap_renameat(vfs_handle_struct *handle,
 				srcfsp->conn->cwd_fsp,
 				smb_fname_src_tmp,
 				dstfsp->conn->cwd_fsp,
-				smb_fname_dst_tmp);
+				smb_fname_dst_tmp,
+				how);
 
  out:
 
@@ -899,31 +901,7 @@ NTSTATUS vfs_cap_init(TALLOC_CTX *ctx)
 
 /* For CAP functions */
 #define hex_tag ':'
-#define hex2bin(c)		hex2bin_table[(unsigned char)(c)]
-#define bin2hex(c)		bin2hex_table[(unsigned char)(c)]
 #define is_hex(s)		((s)[0] == hex_tag)
-
-static unsigned char hex2bin_table[256] = {
-0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, /* 0x00 */
-0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, /* 0x10 */
-0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, /* 0x20 */
-0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 0, 0, 0, 0, 0, 0, /* 0x30 */
-0000, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0000, /* 0x40 */
-0000, 0000, 0000, 0000, 0000, 0000, 0000, 0000,
-0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, /* 0x50 */
-0000, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0000, /* 0x60 */
-0000, 0000, 0000, 0000, 0000, 0000, 0000, 0000,
-0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, /* 0x70 */
-0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, /* 0x80 */
-0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, /* 0x90 */
-0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, /* 0xa0 */
-0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, /* 0xb0 */
-0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, /* 0xc0 */
-0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, /* 0xd0 */
-0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, /* 0xe0 */
-0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0  /* 0xf0 */
-};
-static unsigned char bin2hex_table[256] = "0123456789abcdef";
 
 /*******************************************************************
   original code -> ":xx"  - CAP format
@@ -954,8 +932,8 @@ static char *capencode(TALLOC_CTX *ctx, const char *from)
 		/* buffer husoku error */
 		if ((unsigned char)*from >= 0x80) {
 			*out++ = hex_tag;
-			*out++ = bin2hex (((*from)>>4)&0x0f);
-			*out++ = bin2hex ((*from)&0x0f);
+			*out++ = nybble_to_hex_lower(((*from) >> 4));
+			*out++ = nybble_to_hex_lower(*from);
 			from++;
 		} else {
 			*out++ = *from++;
@@ -993,7 +971,7 @@ static char *capdecode(TALLOC_CTX *ctx, const char *from)
 
 	for (out = to; *from;) {
 		if (is_hex(from)) {
-			*out++ = (hex2bin(from[1])<<4) | (hex2bin(from[2]));
+			(void)hex_byte(&from[1], (uint8_t *)(out++));
 			from += 3;
 		} else {
 			*out++ = *from++;

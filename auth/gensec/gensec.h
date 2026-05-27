@@ -25,6 +25,7 @@
 
 #include "../lib/util/data_blob.h"
 #include "libcli/util/ntstatus.h"
+#include "lib/util/time.h"
 
 #define GENSEC_SASL_NAME_NTLMSSP "NTLM"
 
@@ -70,6 +71,8 @@ struct gensec_target {
 #define GENSEC_FEATURE_NO_AUTHZ_LOG	0x00000800
 #define GENSEC_FEATURE_SMB_TRANSPORT	0x00001000
 #define GENSEC_FEATURE_LDAPS_TRANSPORT	0x00002000
+#define GENSEC_FEATURE_CB_OPTIONAL	0x00004000
+#define GENSEC_FEATURE_NO_DELEGATION	0x00008000
 
 #define GENSEC_EXPIRE_TIME_INFINITY (NTTIME)0x8000000000000000LL
 
@@ -300,8 +303,6 @@ NTSTATUS gensec_wrap(struct gensec_security *gensec_security,
 		     const DATA_BLOB *in,
 		     DATA_BLOB *out);
 
-bool gensec_security_ops_enabled(const struct gensec_security_ops *ops, struct gensec_security *security);
-
 NTSTATUS gensec_start_mech_by_sasl_name(struct gensec_security *gensec_security,
 					const char *sasl_name);
 const char **gensec_security_sasl_names(struct gensec_security *gensec_security,
@@ -312,6 +313,13 @@ bool gensec_setting_bool(struct gensec_settings *settings, const char *mechanism
 
 NTSTATUS gensec_set_target_principal(struct gensec_security *gensec_security, const char *principal);
 const char *gensec_get_target_principal(struct gensec_security *gensec_security);
+
+NTSTATUS gensec_set_channel_bindings(struct gensec_security *gensec_security,
+				     uint32_t initiator_addrtype,
+				     const DATA_BLOB *initiator_address,
+				     uint32_t acceptor_addrtype,
+				     const DATA_BLOB *acceptor_address,
+				     const DATA_BLOB *application_data);
 
 NTSTATUS gensec_generate_session_info_pac(TALLOC_CTX *mem_ctx,
 					  struct gensec_security *gensec_security,

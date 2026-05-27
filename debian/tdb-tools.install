@@ -1,0 +1,8 @@
+usr/bin/tdbbackup.tdbtools
+usr/bin/tdbdump
+usr/bin/tdbrestore
+usr/bin/tdbtool
+usr/share/man/man8/tdbbackup.tdbtools.8
+usr/share/man/man8/tdbdump.8
+usr/share/man/man8/tdbrestore.8
+usr/share/man/man8/tdbtool.8

@@ -23,7 +23,7 @@
 #include "includes.h"
 #include "librpc/gen_ndr/ndr_orpc.h"
 
-enum ndr_err_code ndr_pull_DUALSTRINGARRAY(struct ndr_pull *ndr, int ndr_flags, struct DUALSTRINGARRAY *ar)
+enum ndr_err_code ndr_pull_DUALSTRINGARRAY(struct ndr_pull *ndr, ndr_flags_type ndr_flags, struct DUALSTRINGARRAY *ar)
 {
 	uint16_t num_entries, security_offset;
 	uint16_t towerid;
@@ -77,7 +77,7 @@ enum ndr_err_code ndr_pull_DUALSTRINGARRAY(struct ndr_pull *ndr, int ndr_flags, 
 	return NDR_ERR_SUCCESS;
 }
 
-enum ndr_err_code ndr_push_DUALSTRINGARRAY(struct ndr_push *ndr, int ndr_flags, const struct DUALSTRINGARRAY *ar)
+enum ndr_err_code ndr_push_DUALSTRINGARRAY(struct ndr_push *ndr, ndr_flags_type ndr_flags, const struct DUALSTRINGARRAY *ar)
 {
 	return ndr_push_error(ndr, NDR_ERR_STRING, "ndr_push_DUALSTRINGARRAY not implemented");
 }
@@ -93,7 +93,7 @@ void ndr_print_DUALSTRINGARRAY(struct ndr_print *ndr, const char *name, const st
 	ndr->print(ndr, "STRING BINDINGS");
 	ndr->depth++;
 	for (i=0;ar->stringbindings[i];i++)	{
-		char idx[13];	/* 2^32 has 10 digits */
+		char idx[14];	/* 2^32 has 10 digits */
 		snprintf(idx, sizeof(idx), "[%d]", i);
 		ndr_print_STRINGBINDING(ndr, idx, ar->stringbindings[i]);
 	}
@@ -101,14 +101,14 @@ void ndr_print_DUALSTRINGARRAY(struct ndr_print *ndr, const char *name, const st
 	ndr->print(ndr, "SECURITY BINDINGS");
 	ndr->depth++;
 	for (i=0;ar->securitybindings[i];i++)	{
-		char idx[13];	/* 2^32 has 10 digits */
+		char idx[14];	/* 2^32 has 10 digits */
 		snprintf(idx, sizeof(idx), "[%d]", i);
 		ndr_print_SECURITYBINDING(ndr, idx, ar->securitybindings[i]);
 	}
 	ndr->depth--;
 }
 
-enum ndr_err_code ndr_pull_STRINGARRAY(struct ndr_pull *ndr, int ndr_flags, struct STRINGARRAY *ar)
+enum ndr_err_code ndr_pull_STRINGARRAY(struct ndr_pull *ndr, ndr_flags_type ndr_flags, struct STRINGARRAY *ar)
 {
 	uint16_t towerid;
 	uint32_t towernum = 0;
@@ -141,7 +141,7 @@ enum ndr_err_code ndr_pull_STRINGARRAY(struct ndr_pull *ndr, int ndr_flags, stru
 	return NDR_ERR_SUCCESS;
 }
 
-enum ndr_err_code ndr_push_STRINGARRAY(struct ndr_push *ndr, int ndr_flags, const struct STRINGARRAY *ar)
+enum ndr_err_code ndr_push_STRINGARRAY(struct ndr_push *ndr, ndr_flags_type ndr_flags, const struct STRINGARRAY *ar)
 {
 	return ndr_push_error(ndr, NDR_ERR_STRING, "ndr_push_STRINGARRAY not implemented");
 }
@@ -155,7 +155,7 @@ void ndr_print_STRINGARRAY(struct ndr_print *ndr, const char *name, const struct
 	ndr->print(ndr, "%-25s: STRINGARRAY", name);
 	ndr->depth++;
 	for (i=0;ar->stringbindings[i];i++)	{
-		char idx[13];	/* 2^32 has 10 digits */
+		char idx[14];	/* 2^32 has 10 digits */
 		snprintf(idx, sizeof(idx), "[%d]", i);
 		ndr_print_STRINGBINDING(ndr, idx, ar->stringbindings[i]);
 	}

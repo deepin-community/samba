@@ -217,6 +217,12 @@ static int virusfilter_vfs_connect(
 	int connect_timeout = 0;
 	int io_timeout = 0;
 	int ret = -1;
+	bool ok;
+
+	ret = SMB_VFS_NEXT_CONNECT(handle, svc, user);
+	if (ret < 0) {
+		return ret;
+	}
 
 	config = talloc_zero(handle, struct virusfilter_config);
 	if (config == NULL) {
@@ -255,13 +261,25 @@ static int virusfilter_vfs_connect(
 	exclude_files = lp_parm_const_string(
 		snum, "virusfilter", "exclude files", NULL);
 	if (exclude_files != NULL) {
-		set_namearray(&config->exclude_files, exclude_files);
+		ok = set_namearray(config,
+				   exclude_files,
+				   &config->exclude_files);
+		if (!ok) {
+			DBG_ERR("set_namearray failed\n");
+			return -1;
+		}
 	}
 
 	infected_files = lp_parm_const_string(
 		snum, "virusfilter", "infected files", NULL);
 	if (infected_files != NULL) {
-		set_namearray(&config->infected_files, infected_files);
+		ok = set_namearray(config,
+				   infected_files,
+				   &config->infected_files);
+		if (!ok) {
+			DBG_ERR("set_namearray failed\n");
+			return -1;
+		}
 	}
 
 	config->cache_entry_limit = lp_parm_int(
@@ -475,7 +493,7 @@ static int virusfilter_vfs_connect(
 
 	config->io_h = virusfilter_io_new(config, connect_timeout, io_timeout);
 	if (config->io_h == NULL) {
-		DBG_ERR("virusfilter_io_new failed");
+		DBG_ERR("virusfilter_io_new failed\n");
 		return -1;
 	}
 
@@ -494,8 +512,8 @@ static int virusfilter_vfs_connect(
 	 * and becoming root over and over.
 	 */
 	if (config->infected_file_action == VIRUSFILTER_ACTION_QUARANTINE) {
-		bool ok = true;
 		bool dir_exists;
+		ok = true;
 
 		/*
 		 * Do SMB_VFS_NEXT_MKDIR(config->quarantine_dir)
@@ -565,7 +583,7 @@ static int virusfilter_vfs_connect(
 		}
 	}
 
-	return SMB_VFS_NEXT_CONNECT(handle, svc, user);
+	return 0;
 }
 
 static void virusfilter_vfs_disconnect(struct vfs_handle_struct *handle)
@@ -579,7 +597,6 @@ static void virusfilter_vfs_disconnect(struct vfs_handle_struct *handle)
 		config->backend->fns->disconnect(handle);
 	}
 
-	free_namearray(config->exclude_files);
 	virusfilter_io_disconnect(config->io_h);
 
 	SMB_VFS_NEXT_DISCONNECT(handle);
@@ -1221,7 +1238,7 @@ virusfilter_scan_result_eval:
 					scan_result, scan_report);
 			if (!ok) {
 				DBG_ERR("Cannot create cache entry: "
-					"virusfilter_cache_entry_new failed");
+					"virusfilter_cache_entry_new failed\n");
 				goto virusfilter_scan_return;
 			}
 		} else if (is_cache) {
@@ -1495,9 +1512,7 @@ static int virusfilter_vfs_close(
 		return close_result;
 	}
 
-	if (config->exclude_files && is_in_path(fname,
-	    config->exclude_files, false))
-	{
+	if (is_in_path(fname, config->exclude_files, false)) {
 		DBG_INFO("Not scanned: exclude files: %s/%s\n",
 			 cwd_fname, fname);
 		return close_result;
@@ -1582,13 +1597,15 @@ static int virusfilter_vfs_renameat(
 	files_struct *srcfsp,
 	const struct smb_filename *smb_fname_src,
 	files_struct *dstfsp,
-	const struct smb_filename *smb_fname_dst)
+	const struct smb_filename *smb_fname_dst,
+	const struct vfs_rename_how *how)
 {
 	int ret = SMB_VFS_NEXT_RENAMEAT(handle,
 			srcfsp,
 			smb_fname_src,
 			dstfsp,
-			smb_fname_dst);
+			smb_fname_dst,
+			how);
 	struct virusfilter_config *config = NULL;
 	char *fname = NULL;
 	char *dst_fname = NULL;

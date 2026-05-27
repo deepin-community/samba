@@ -1,6 +1,4 @@
 etc/apparmor.d/samba
-usr/bin
-usr/sbin
 var/lib/samba/printers/COLOR
 var/lib/samba/printers/IA64
 var/lib/samba/printers/W32ALPHA

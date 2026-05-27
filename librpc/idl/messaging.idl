@@ -117,6 +117,9 @@ interface messaging
 		/* smbd message */
 		MSG_SMB_FORCE_TDIS_DENIED	= 0x0321,
 
+		/* smbd ip dropped message */
+		MSG_SMB_IP_DROPPED		= 0x0322,
+
 		/* winbind messages */
 		MSG_WINBIND_FINISHED		= 0x0401,
 		MSG_WINBIND_FORGET_STATE	= 0x0402,
@@ -140,6 +143,9 @@ interface messaging
 		MSG_SMBXSRV_CONNECTION_PASS	= 0x0601,
 		MSG_SMBXSRV_CONNECTION_PASSED	= 0x0602,
 		MSG_SMBXSRV_CONNECTION_DROP	= 0x0603,
+
+		/* rpcd_witness messages */
+		MSG_RPCD_WITNESS_REGISTRATION_UPDATE = 0x0680,
 
 		/* source4 and NTVFS smb server messages */
 		MSG_BRL_RETRY                   = 0x0700,

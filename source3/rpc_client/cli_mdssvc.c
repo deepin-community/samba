@@ -124,7 +124,9 @@ static void mdscli_connect_open_done(struct tevent_req *subreq)
 	}
 
 	share_path_len = strlen(mdscli_ctx->mdscmd_open.share_path);
-	if (share_path_len < 1 || share_path_len > UINT16_MAX) {
+	if (share_path_len < 1 ||
+	    share_path_len >= sizeof(mdscli_ctx->mdscmd_open.share_path))
+	{
 		tevent_req_nterror(req, NT_STATUS_INTERNAL_ERROR);
 		return;
 	}
@@ -463,7 +465,7 @@ static void mdscli_search_cmd_done(struct tevent_req *subreq)
 	}
 
 	if (*uint64p != 0) {
-		DBG_DEBUG("Unexpected mds result: 0x%" PRIx64, *uint64p);
+		DBG_DEBUG("Unexpected mds result: 0x%" PRIx64 "\n", *uint64p);
 		tevent_req_nterror(req, NT_STATUS_INTERNAL_ERROR);
 		return;
 	}

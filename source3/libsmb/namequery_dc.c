@@ -1,4 +1,4 @@
-/* 
+/*
    Unix SMB/CIFS implementation.
 
    Winbind daemon connection manager
@@ -60,7 +60,7 @@ static bool ads_dc_name(const char *domain,
 	TALLOC_CTX *tmp_ctx = talloc_stackframe();
 	bool ok = false;
 	ADS_STRUCT *ads;
-	char *sitename;
+	const char *sitename;
 	int i;
 	char addr[INET6_ADDRSTRLEN];
 
@@ -82,8 +82,7 @@ static bool ads_dc_name(const char *domain,
 
 #ifdef HAVE_ADS
 		/* we don't need to bind, just connect */
-		ads->auth.flags |= ADS_AUTH_NO_BIND;
-		ads_connect(ads);
+		ads_connect_cldap_only(ads);
 #endif
 
 		if (!ads->config.realm) {
@@ -95,6 +94,11 @@ static bool ads_dc_name(const char *domain,
 		   has changed. If so, we need to re-do the DNS query
 		   to ensure we only find servers in our site. */
 
+#ifdef HAVE_ADS
+		if (ads_closest_dc(ads)) {
+			sitename = ads->config.client_site_name;
+		} else
+#endif
 		if (stored_sitename_changed(realm, sitename)) {
 			sitename = sitename_fetch(tmp_ctx, realm);
 			TALLOC_FREE(ads);
@@ -105,7 +109,9 @@ static bool ads_dc_name(const char *domain,
 		}
 
 #ifdef HAVE_ADS
-		if (is_our_primary_domain(domain) && (ads->config.flags & NBT_SERVER_KDC)) {
+		if (is_our_primary_domain(domain) &&
+		    (ads->config.server_flags & NBT_SERVER_KDC))
+		{
 			if (ads_closest_dc(ads)) {
 				/* We're going to use this KDC for this realm/domain.
 				   If we are using sites, then force the krb5 libs

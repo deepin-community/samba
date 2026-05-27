@@ -338,8 +338,6 @@ static struct winbindd_async_dispatch_table async_nonpriv_table[] = {
 	  winbindd_getuserdomgroups_send, winbindd_getuserdomgroups_recv },
 	{ WINBINDD_GETGROUPS, "GETGROUPS",
 	  winbindd_getgroups_send, winbindd_getgroups_recv },
-	{ WINBINDD_SHOW_SEQUENCE, "SHOW_SEQUENCE",
-	  winbindd_show_sequence_send, winbindd_show_sequence_recv },
 	{ WINBINDD_GETGRGID, "GETGRGID",
 	  winbindd_getgrgid_send, winbindd_getgrgid_recv },
 	{ WINBINDD_GETGRNAM, "GETGRNAM",
@@ -654,18 +652,15 @@ static void winbind_client_processed(struct tevent_req *req);
 
 static void new_connection(int listen_sock, bool privileged)
 {
-	struct sockaddr_un sunaddr;
+	struct samba_sockaddr saddr = { .sa_socklen = 0, };
 	struct winbindd_cli_state *state;
 	struct tevent_req *req;
-	socklen_t len;
 	int sock;
 
 	/* Accept connection */
 
-	len = sizeof(sunaddr);
-
-	sock = accept(listen_sock, (struct sockaddr *)(void *)&sunaddr, &len);
-
+	saddr.sa_socklen = sizeof(saddr.u.un);
+	sock = accept(listen_sock, &saddr.u.sa, &saddr.sa_socklen);
 	if (sock == -1) {
 		if (errno != EINTR) {
 			D_ERR("Failed to accept socket: %s\n", strerror(errno));
@@ -1179,8 +1174,17 @@ static void winbindd_register_handlers(struct messaging_context *msg_ctx,
 		exit(1);
 	}
 
-	init_idmap_child();
-	init_locator_child();
+	status = init_idmap_child(global_event_context());
+	if (NT_STATUS_IS_ERR(status)) {
+		DBG_ERR("Unable to start idmap child: %s\n", nt_errstr(status));
+		exit(1);
+	}
+
+	status = init_locator_child(global_event_context());
+	if (NT_STATUS_IS_ERR(status)) {
+		DBG_ERR("Unable to start locator child: %s\n", nt_errstr(status));
+		exit(1);
+	}
 
 	smb_nscd_flush_user_cache();
 	smb_nscd_flush_group_cache();
@@ -1271,7 +1275,7 @@ static void winbindd_addr_changed(struct tevent_req *req)
 	struct sockaddr_storage addr;
 	NTSTATUS status;
 
-	status = addrchange_recv(req, &type, &addr);
+	status = addrchange_recv(req, &type, &addr, NULL);
 	TALLOC_FREE(req);
 	if (!NT_STATUS_IS_OK(status)) {
 		DEBUG(10, ("addrchange_recv failed: %s, stop listening\n",

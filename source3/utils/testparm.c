@@ -35,6 +35,7 @@
 #include "system/filesys.h"
 #include "lib/cmdline/cmdline.h"
 #include "lib/param/loadparm.h"
+#include "lib/param/param.h"
 #include "lib/crypto/gnutls_helpers.h"
 #include "cmdline_contexts.h"
 
@@ -228,16 +229,21 @@ static bool do_idmap_check(void)
 
 			if ((c->low >= x->low && c->low <= x->high) ||
 			    (c->high >= x->low && c->high <= x->high)) {
-				/* Allow overlapping ranges for idmap_ad */
+				/*
+				 * Allow overlapping ranges for idmap_ad
+				 * and idmap_nss
+				 */
 				ok = strequal(c->backend, x->backend);
 				if (ok) {
-					ok = strequal(c->backend, "ad");
+					ok = strequal(c->backend, "ad") ||
+					     strequal(c->backend, "nss");
 					if (ok) {
 						fprintf(stderr,
-							"NOTE: The idmap_ad "
+							"NOTE: The idmap_%s "
 							"range for the domain "
 							"%s overlaps with the "
 							"range of %s.\n\n",
+							c->backend,
 							c->domain_name,
 							x->domain_name);
 						continue;
@@ -264,6 +270,82 @@ done:
 	return ok;
 }
 
+static int pw2kt_check_line(const char *line)
+{
+	char *keytabname = NULL;
+	char *spn_spec = NULL;
+	char *spn_val = NULL;
+	char *option = NULL;
+	bool machine_password = false;
+
+	keytabname = talloc_strdup(talloc_tos(), line);
+	if (keytabname == NULL) {
+		return 1;
+	}
+
+	spn_spec = strchr_m(keytabname, ':');
+	if (spn_spec == NULL) {
+		fprintf(stderr, "ERROR: ':' is expected in line:\n%s\n\n", line);
+		return 1;
+	}
+	*spn_spec++ = 0;
+
+	/* reverse match with strrchr_m() */
+	while ((option = strrchr_m(spn_spec, ':')) != NULL) {
+		*option++ = 0;
+		if (!strequal(option, "sync_kvno") &&
+		    !strequal(option, "sync_etypes") &&
+		    !strequal(option, "additional_dns_hostnames") &&
+		    !strequal(option, "netbios_aliases") &&
+		    !strequal(option, "machine_password"))
+		{
+			fprintf(stderr,
+				"ERROR: unknown option '%s' in line:\n%s\n\n",
+				option,
+				line);
+			return 1;
+		}
+		if (strequal(option, "machine_password")) {
+			machine_password = true;
+		}
+	}
+	if (!machine_password) {
+		fprintf(stderr,
+			"WARNING: option 'machine_password' is missing in "
+			"line:\n%s\n\n",
+			line);
+	}
+
+	spn_val = strchr_m(spn_spec, '=');
+	if (spn_val != NULL) {
+		*spn_val++ = 0;
+		if (!strequal(spn_spec, "spns") &&
+		    !strequal(spn_spec, "spn_prefixes"))
+		{
+			fprintf(stderr,
+				"ERROR: only SPN specifier 'spns' and "
+				"'spn_prefixes' can contain '=' and comma "
+				"separated list of values in line:\n%s\n\n",
+				line);
+			return 1;
+		}
+	}
+
+	if (!strequal(spn_spec, "account_name") &&
+	    !strequal(spn_spec, "sync_spns") &&
+	    !strequal(spn_spec, "spns") &&
+	    !strequal(spn_spec, "spn_prefixes"))
+	{
+		fprintf(stderr,
+			"ERROR: unknown SPN specifier '%s' in line:\n%s\n\n",
+			spn_spec,
+			line);
+		return 1;
+	}
+
+	return 0;
+}
+
 /***********************************************
  Here we do a set of 'hard coded' checks for bad
  configuration settings.
@@ -274,8 +356,10 @@ static int do_global_checks(void)
 	int ret = 0;
 	SMB_STRUCT_STAT st;
 	const char *socket_options;
+	const char **lp_ptr = NULL;
 	const struct loadparm_substitution *lp_sub =
 		loadparm_s3_global_substitution();
+	int ival;
 
 	fprintf(stderr, "\n");
 
@@ -337,9 +421,8 @@ static int do_global_checks(void)
 	}
 
 	if (!directory_exist_stat(lp_lock_directory(), &st)) {
-		fprintf(stderr, "ERROR: lock directory %s does not exist\n\n",
+		fprintf(stderr, "WARNING: lock directory %s does not exist\n\n",
 		       lp_lock_directory());
-		ret = 1;
 	} else if ((st.st_ex_mode & 0777) != 0755) {
 		fprintf(stderr, "WARNING: lock directory %s should have "
 				"permissions 0755 for browsing to work\n\n",
@@ -367,9 +450,8 @@ static int do_global_checks(void)
 	}
 
 	if (!directory_exist_stat(lp_pid_directory(), &st)) {
-		fprintf(stderr, "ERROR: pid directory %s does not exist\n\n",
+		fprintf(stderr, "WARNING: pid directory %s does not exist\n\n",
 		       lp_pid_directory());
-		ret = 1;
 	}
 
 	if (lp_passdb_expand_explicit()) {
@@ -609,6 +691,18 @@ static int do_global_checks(void)
 		ret = 1;
 	}
 
+	if (lp_ldap_server_require_strong_auth() ==
+	    LDAP_SERVER_REQUIRE_STRONG_AUTH_ALLOW_SASL_OVER_TLS)
+	{
+		fprintf(stderr,
+			"WARNING: You have not configured "
+			"'ldap server require strong auth = "
+			"allow_sasl_over_tls'.\n"
+			"Please change to 'yes' (preferred) or "
+			"'allow_sasl_without_tls_channel_bindings' "
+			"(if really needed)\n\n");
+	}
+
 	if (lp_server_schannel() != true) { /* can be 'auto' */
 		fprintf(stderr,
 			"WARNING: You have not configured "
@@ -691,12 +785,40 @@ static int do_global_checks(void)
 			"options\n\n");
 	}
 
+	ival = lp__client_use_krb5_netlogon();
+	if (ival > 0) {
+		fprintf(stderr,
+			"ERROR: You have configured "
+			"'client use krb5 netlogon = %s'.\n"
+			"This is experimental in Samba %s "
+			"and should not be used in production!\n\n",
+			ival == Auto ? "auto" : "yes",
+			samba_version_string());
+		ret = 1;
+	}
+
 	if (lp_kerberos_encryption_types() == KERBEROS_ETYPES_LEGACY) {
 		fprintf(stderr,
 			"WARNING: You have configured "
 			"'kerberos encryption types = legacy'. "
 			"Your server is vulnerable to "
 			"CVE-2022-37966\n\n");
+	}
+
+	lp_ptr = lp_sync_machine_password_to_keytab();
+
+	if (lp_ptr == NULL && USE_KERBEROS_KEYTAB) {
+		fprintf(stderr,
+			"SUGGESTION: You may want to use "
+			"'sync machine password to keytab' parameter "
+			"instead of 'kerberos method'.\n\n");
+	}
+
+	if (lp_ptr != NULL &&
+	    ((*lp_ptr != NULL) && !strequal_m(*lp_ptr, "disabled"))) {
+		while (*lp_ptr) {
+			ret |= pw2kt_check_line(*lp_ptr++);
+		}
 	}
 
 	return ret;
@@ -889,6 +1011,7 @@ static void do_per_share_checks(int s)
 	};
 
 	TALLOC_CTX *frame = talloc_stackframe();
+	struct loadparm_context *lp_ctx = NULL;
 
 	smb_init_locale();
 
@@ -900,13 +1023,14 @@ static void do_per_share_checks(int s)
 		ret = 1;
 		goto done;
 	}
+	lp_ctx = samba_cmdline_get_lp_ctx();
 
 	/*
 	 * Set the default debug level to 1.
 	 * Allow it to be overridden by the command line,
 	 * not by smb.conf.
 	 */
-	lp_set_cmdline("log level", "1");
+	lpcfg_set_cmdline(lp_ctx, "log level", "1");
 
 	pc = samba_popt_get_context(getprogname(),
 				    argc,

@@ -28,6 +28,7 @@
 #include "smbd/smbd.h"
 #include "lib/util/tevent_ntstatus.h"
 #include "lib/util/smb_strtox.h"
+#include "source3/smbd/dir.h"
 
 #undef DBGC_CLASS
 #define DBGC_CLASS DBGC_VFS
@@ -530,10 +531,13 @@ static int ceph_snap_gmt_convert_dir(struct vfs_handle_struct *handle,
 	 * Temporally use the caller's return buffer for this.
 	 */
 	if (strlen(name) == 0) {
-		ret = strlcpy(_converted_buf, snapdir, buflen);
+		ret = snprintf(_converted_buf, buflen, "%s/%s",
+			       handle->conn->connectpath, snapdir);
 	} else {
-		ret = snprintf(_converted_buf, buflen, "%s/%s", name, snapdir);
+		ret = snprintf(_converted_buf, buflen, "%s/%s/%s",
+			       handle->conn->connectpath, name, snapdir);
 	}
+
 	if (ret >= buflen) {
 		ret = -EINVAL;
 		goto err_out;
@@ -752,7 +756,8 @@ static int ceph_snap_gmt_renameat(vfs_handle_struct *handle,
 			files_struct *srcfsp,
 			const struct smb_filename *smb_fname_src,
 			files_struct *dstfsp,
-			const struct smb_filename *smb_fname_dst)
+			const struct smb_filename *smb_fname_dst,
+			const struct vfs_rename_how *how)
 {
 	int ret;
 	time_t timestamp_src, timestamp_dst;
@@ -783,7 +788,8 @@ static int ceph_snap_gmt_renameat(vfs_handle_struct *handle,
 				srcfsp,
 				smb_fname_src,
 				dstfsp,
-				smb_fname_dst);
+				smb_fname_dst,
+				how);
 }
 
 /* block links from writeable shares to snapshots for now, like other modules */
@@ -937,21 +943,11 @@ static int ceph_snap_gmt_openat(vfs_handle_struct *handle,
 {
 	time_t timestamp = 0;
 	struct smb_filename *smb_fname = NULL;
-	char stripped[PATH_MAX + 1];
 	char conv[PATH_MAX + 1];
 	int ret;
 	int saved_errno = 0;
 
-	ret = ceph_snap_gmt_strip_snapshot(handle,
-					   smb_fname_in,
-					   &timestamp,
-					   stripped,
-					   sizeof(stripped));
-	if (ret < 0) {
-		errno = -ret;
-		return -1;
-	}
-	if (timestamp == 0) {
+	if (smb_fname_in->twrp == 0) {
 		return SMB_VFS_NEXT_OPENAT(handle,
 					   dirfsp,
 					   smb_fname_in,
@@ -959,8 +955,18 @@ static int ceph_snap_gmt_openat(vfs_handle_struct *handle,
 					   how);
 	}
 
+	timestamp = nt_time_to_unix(smb_fname_in->twrp);
+
+	smb_fname = full_path_from_dirfsp_atname(talloc_tos(),
+						 dirfsp,
+						 smb_fname_in);
+	if (smb_fname == NULL) {
+		errno = ENOMEM;
+		return -1;
+	}
+
 	ret = ceph_snap_gmt_convert(handle,
-				    stripped,
+				    smb_fname->base_name,
 				    timestamp,
 				    conv,
 				    sizeof(conv));
@@ -968,10 +974,7 @@ static int ceph_snap_gmt_openat(vfs_handle_struct *handle,
 		errno = -ret;
 		return -1;
 	}
-	smb_fname = cp_smb_filename(talloc_tos(), smb_fname_in);
-	if (smb_fname == NULL) {
-		return -1;
-	}
+
 	smb_fname->base_name = conv;
 
 	ret = SMB_VFS_NEXT_OPENAT(handle,

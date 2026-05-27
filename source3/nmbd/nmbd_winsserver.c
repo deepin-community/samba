@@ -24,6 +24,7 @@
 #include "system/filesys.h"
 #include "nmbd/nmbd.h"
 #include "util_tdb.h"
+#include "lib/util/util_file.h"
 
 #define WINS_LIST "wins.dat"
 #define WINS_VERSION 1
@@ -1665,7 +1666,7 @@ IP %s\n", nmb_namestr(question), inet_ntoa(from_ip) ));
 
 	if(question->name_type == 0x1d) {
 		DEBUG(3,("wins_process_multihomed_name_registration_request: Ignoring request \
-to register name %s from IP %s.", nmb_namestr(question), inet_ntoa(p->ip) ));
+to register name %s from IP %s.\n", nmb_namestr(question), inet_ntoa(p->ip) ));
 		send_wins_name_registration_response(0, ttl, p);  
 		return;
 	}
@@ -2178,7 +2179,7 @@ IP %s\n", releasing_group_name ? "Group" : "Unique", nmb_namestr(question), inet
 
 	if(!releasing_group_name && (question->name_type == 0x1d)) {
 		DEBUG(3,("wins_process_name_release_request: Ignoring request \
-to release name %s from IP %s.", nmb_namestr(question), inet_ntoa(p->ip) ));
+to release name %s from IP %s.\n", nmb_namestr(question), inet_ntoa(p->ip) ));
 		send_wins_name_release_response(0, p);
 		return;
 	}

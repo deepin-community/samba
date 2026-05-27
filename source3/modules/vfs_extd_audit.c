@@ -277,7 +277,8 @@ static int audit_renameat(vfs_handle_struct *handle,
 			files_struct *srcfsp,
 			const struct smb_filename *smb_fname_src,
 			files_struct *dstfsp,
-			const struct smb_filename *smb_fname_dst)
+			const struct smb_filename *smb_fname_dst,
+			const struct vfs_rename_how *how)
 {
 	struct smb_filename *full_fname_src = NULL;
 	struct smb_filename *full_fname_dst = NULL;
@@ -305,7 +306,8 @@ static int audit_renameat(vfs_handle_struct *handle,
 			srcfsp,
 			smb_fname_src,
 			dstfsp,
-			smb_fname_dst);
+			smb_fname_dst,
+			how);
 	if (result == -1) {
 		saved_errno = errno;
 	}
@@ -378,7 +380,7 @@ static int audit_fchmod(vfs_handle_struct *handle, files_struct *fsp, mode_t mod
 		       (result < 0) ? "failed: " : "",
 		       (result < 0) ? strerror(errno) : "");
 	}
-	DEBUG(1, ("vfs_extd_audit: fchmod %s mode 0x%x %s %s",
+	DEBUG(1, ("vfs_extd_audit: fchmod %s mode 0x%x %s %s\n",
 	       fsp_str_dbg(fsp), (unsigned int)mode,
 	       (result < 0) ? "failed: " : "",
 	       (result < 0) ? strerror(errno) : ""));

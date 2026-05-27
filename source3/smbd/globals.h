@@ -144,8 +144,10 @@ NTSTATUS smbd_do_setfilepathinfo(connection_struct *conn,
 				TALLOC_CTX *mem_ctx,
 				uint16_t info_level,
 				files_struct *fsp,
+				struct share_mode_lock **lck,
 				struct smb_filename *smb_fname,
-				char **ppdata, int total_data,
+				char *data,
+				int total_data,
 				int *ret_data_size);
 
 NTSTATUS smbd_do_qfsinfo(struct smbXsrv_connection *xconn,
@@ -155,39 +157,10 @@ NTSTATUS smbd_do_qfsinfo(struct smbXsrv_connection *xconn,
 			 uint16_t flags2,
 			 unsigned int max_data_bytes,
 			 size_t *fixed_portion,
+			 struct files_struct *fsp,
 			 struct smb_filename *smb_fname,
 			 char **ppdata,
 			 int *ret_data_len);
-
-bool smbd_dirptr_get_entry(TALLOC_CTX *ctx,
-			   struct dptr_struct *dirptr,
-			   const char *mask,
-			   uint32_t dirtype,
-			   bool dont_descend,
-			   bool ask_sharemode,
-			   bool get_dosmode,
-			   bool (*match_fn)(TALLOC_CTX *ctx,
-					    void *private_data,
-					    const char *dname,
-					    const char *mask,
-					    char **_fname),
-			   bool (*mode_fn)(TALLOC_CTX *ctx,
-					   void *private_data,
-					   struct files_struct *dirfsp,
-					   struct smb_filename *smb_fname,
-					   bool get_dosmode,
-					   uint32_t *_mode),
-			   void *private_data,
-			   char **_fname,
-			   struct smb_filename **_smb_fname,
-			   uint32_t *_mode);
-void smbd_dirptr_push_overflow(struct dptr_struct *dirptr,
-			       char **_fname,
-			       struct smb_filename **_smb_fname,
-			       uint32_t mode);
-void smbd_dirptr_set_last_name_sent(struct dptr_struct *dirptr,
-				    char **_fname);
-char *smbd_dirptr_get_last_name_sent(struct dptr_struct *dirptr);
 
 NTSTATUS smbd_dirptr_lanman2_entry(TALLOC_CTX *ctx,
 			       connection_struct *conn,
@@ -460,9 +433,11 @@ struct smbXsrv_connection {
 			struct smbd_smb2_request *req;
 			struct {
 				uint8_t nbt[NBT_HDR_SIZE];
-				bool done;
 			} hdr;
-			struct iovec vector;
+			struct iovec _vector[1];
+			struct iovec *vector;
+			int count;
+			struct msghdr msg;
 			bool doing_receivefile;
 			size_t min_recv_size;
 			size_t pktfull;
@@ -549,6 +524,11 @@ struct smbXsrv_connection {
 		} smbtorture;
 
 		bool signing_mandatory;
+		/*
+		 * This is ConstrainedConnection in MS-SMB2,
+		 * but with reversed value...
+		 */
+		bool got_authenticated_session;
 	} smb2;
 };
 
@@ -572,77 +552,6 @@ NTSTATUS smb2srv_client_mc_negprot_recv(struct tevent_req *req);
 
 NTSTATUS smbXsrv_connection_init_tables(struct smbXsrv_connection *conn,
 					enum protocol_types protocol);
-
-NTSTATUS smbXsrv_session_global_init(struct messaging_context *msg_ctx);
-NTSTATUS smbXsrv_session_create(struct smbXsrv_connection *conn,
-				NTTIME now,
-				struct smbXsrv_session **_session);
-NTSTATUS smbXsrv_session_add_channel(struct smbXsrv_session *session,
-				     struct smbXsrv_connection *conn,
-				     NTTIME now,
-				     struct smbXsrv_channel_global0 **_c);
-NTSTATUS smbXsrv_session_remove_channel(struct smbXsrv_session *session,
-					struct smbXsrv_connection *xconn);
-NTSTATUS smbXsrv_session_disconnect_xconn(struct smbXsrv_connection *xconn);
-NTSTATUS smbXsrv_session_update(struct smbXsrv_session *session);
-struct smbXsrv_channel_global0;
-NTSTATUS smbXsrv_session_find_channel(const struct smbXsrv_session *session,
-				      const struct smbXsrv_connection *conn,
-				      struct smbXsrv_channel_global0 **_c);
-NTSTATUS smbXsrv_session_find_auth(const struct smbXsrv_session *session,
-				   const struct smbXsrv_connection *conn,
-				   NTTIME now,
-				   struct smbXsrv_session_auth0 **_a);
-NTSTATUS smbXsrv_session_create_auth(struct smbXsrv_session *session,
-				     struct smbXsrv_connection *conn,
-				     NTTIME now,
-				     uint8_t in_flags,
-				     uint8_t in_security_mode,
-				     struct smbXsrv_session_auth0 **_a);
-struct tevent_req *smb2srv_session_shutdown_send(TALLOC_CTX *mem_ctx,
-					struct tevent_context *ev,
-					struct smbXsrv_session *session,
-					struct smbd_smb2_request *current_req);
-NTSTATUS smb2srv_session_shutdown_recv(struct tevent_req *req);
-NTSTATUS smbXsrv_session_logoff(struct smbXsrv_session *session);
-NTSTATUS smbXsrv_session_logoff_all(struct smbXsrv_client *client);
-NTSTATUS smb1srv_session_table_init(struct smbXsrv_connection *conn);
-NTSTATUS smb1srv_session_lookup(struct smbXsrv_connection *conn,
-				uint16_t vuid, NTTIME now,
-				struct smbXsrv_session **session);
-NTSTATUS smbXsrv_session_info_lookup(struct smbXsrv_client *client,
-				     uint64_t session_wire_id,
-				     struct auth_session_info **si);
-NTSTATUS smb2srv_session_table_init(struct smbXsrv_connection *conn);
-NTSTATUS smb2srv_session_lookup_conn(struct smbXsrv_connection *conn,
-				     uint64_t session_id, NTTIME now,
-				     struct smbXsrv_session **session);
-NTSTATUS smb2srv_session_lookup_client(struct smbXsrv_client *client,
-				       uint64_t session_id, NTTIME now,
-				       struct smbXsrv_session **session);
-NTSTATUS smb2srv_session_lookup_global(struct smbXsrv_client *client,
-				       uint64_t session_wire_id,
-				       TALLOC_CTX *mem_ctx,
-				       struct smbXsrv_session **session);
-NTSTATUS get_valid_smbXsrv_session(struct smbXsrv_client *client,
-				   uint64_t session_wire_id,
-				   struct smbXsrv_session **session);
-NTSTATUS smbXsrv_session_local_traverse(
-	struct smbXsrv_client *client,
-	int (*caller_cb)(struct smbXsrv_session *session,
-			      void *caller_data),
-	void *caller_data);
-struct smbXsrv_session_global0;
-NTSTATUS smbXsrv_session_global_traverse(
-			int (*fn)(struct smbXsrv_session_global0 *, void *),
-			void *private_data);
-struct tevent_req *smb2srv_session_close_previous_send(TALLOC_CTX *mem_ctx,
-					struct tevent_context *ev,
-					struct smbXsrv_connection *conn,
-					struct auth_session_info *session_info,
-					uint64_t previous_session_id,
-					uint64_t current_session_id);
-NTSTATUS smb2srv_session_close_previous_recv(struct tevent_req *req);
 
 NTSTATUS smbXsrv_tcon_global_init(void);
 NTSTATUS smbXsrv_tcon_update(struct smbXsrv_tcon *tcon);
@@ -686,6 +595,8 @@ struct smbd_smb2_send_queue {
 	DATA_BLOB *sendfile_header;
 	uint32_t sendfile_body_size;
 	NTSTATUS *sendfile_status;
+
+	struct msghdr msg;
 	struct iovec *vector;
 	int count;
 
@@ -877,7 +788,6 @@ struct smbd_server_connection {
 	struct messaging_context *msg_ctx;
 	struct dcesrv_context *dce_ctx;
 	struct notify_context *notify_ctx;
-	bool using_smb2;
 	int trans_num;
 
 	size_t num_users;
@@ -933,5 +843,14 @@ struct aio_extra {
 	off_t offset;
 	bool write_through;
 };
+
+#define SMBD_TMPNAME_PREFIX ".::TMPNAME:"
+#define SMBD_TMPDIR_PREFIX  SMBD_TMPNAME_PREFIX "D:"
+#define IS_SMBD_TMPNAME_PREFIX(__n) \
+	unlikely(__n[0] == '.' && __n[1] == ':' && \
+	 strncmp(__n, SMBD_TMPNAME_PREFIX, sizeof(SMBD_TMPNAME_PREFIX) -1) == 0)
+#define IS_SMBD_TMPNAME(__n, __unlink_flags) \
+	(IS_SMBD_TMPNAME_PREFIX(__n) && \
+	 smbd_is_tmpname(__n, __unlink_flags))
 
 #endif /* _SOURCE3_SMBD_GLOBALS_H_ */

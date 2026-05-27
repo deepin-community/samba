@@ -224,26 +224,6 @@ enum ldb_debug_level {LDB_DEBUG_FATAL, LDB_DEBUG_ERROR,
 #define LDB_DEBUG_ALWAYS_LOG  LDB_DEBUG_FATAL
 
 /**
-  the user can optionally supply a debug function. The function
-  is based on the vfprintf() style of interface, but with the addition
-  of a severity level
-*/
-struct ldb_debug_ops {
-	void (*debug)(void *context, enum ldb_debug_level level,
-		      const char *fmt, va_list ap) PRINTF_ATTRIBUTE(3,0);
-	void *context;
-};
-
-/**
-  The user can optionally supply a custom utf8 functions,
-  to handle comparisons and casefolding.
-*/
-struct ldb_utf8_fns {
-	void *context;
-	char *(*casefold)(void *context, TALLOC_CTX *mem_ctx, const char *s, size_t n);
-};
-
-/**
    Flag value for database connection mode.
 
    If LDB_FLG_RDONLY is used in ldb_connect, then the database will be
@@ -292,6 +272,12 @@ struct ldb_utf8_fns {
    wanted read operations, for example in ldbsearch.
 */
 #define LDB_FLG_DONT_CREATE_DB 64
+
+/**
+ * Allow DB create time flags that have meaning only to our
+ * calling application or modules.  These must be in this range:
+ */
+#define LDB_FLG_PRIVATE_MASK 0xff000000
 
 /*
    structures for ldb_parse_tree handling code
@@ -1160,8 +1146,8 @@ struct ldb_dn *ldb_get_default_basedn(struct ldb_context *ldb);
   from the ares reply passed on by the async core so that in the end all the
   messages will be in the context (ldb_result)  memory tree.
   Freeing the passed context (ldb_result tree) will free all the resources
-  (the request need to be freed separately and the result doe not depend on the
-  request that can be freed as sson as the search request is finished)
+  (the request need to be freed separately and the result does not depend on the
+  request that can be freed as soon as the search request is finished)
 */
 
 int ldb_search_default_callback(struct ldb_request *req, struct ldb_reply *ares);
@@ -1344,7 +1330,16 @@ int ldb_request_replace_control(struct ldb_request *req, const char *oid, bool c
 
 /**
    check if a control with the specified "oid" exist and return it
-  \param req the request struct where to add the control
+  \param controls the array of controls
+  \param oid the object identifier of the control as string
+
+  \return the control, NULL if not found
+*/
+struct ldb_control *ldb_controls_get_control(struct ldb_control **controls, const char *oid);
+
+/**
+   check if a control with the specified "oid" exist and return it
+  \param req the request struct to search for the control
   \param oid the object identifier of the control as string
 
   \return the control, NULL if not found
@@ -1353,7 +1348,7 @@ struct ldb_control *ldb_request_get_control(struct ldb_request *req, const char 
 
 /**
    check if a control with the specified "oid" exist and return it
-  \param rep the reply struct where to add the control
+  \param rep the reply struct to search for the control
   \param oid the object identifier of the control as string
 
   \return the control, NULL if not found
@@ -1457,8 +1452,8 @@ int ldb_delete(struct ldb_context *ldb, struct ldb_dn *dn);
   from the ares reply passed on by the async core so that in the end all the
   messages will be in the context (ldb_result)  memory tree.
   Freeing the passed context (ldb_result tree) will free all the resources
-  (the request need to be freed separately and the result doe not depend on the
-  request that can be freed as sson as the search request is finished)
+  (the request need to be freed separately and the result does not depend on the
+  request that can be freed as soon as the search request is finished)
 */
 
 int ldb_extended_default_callback(struct ldb_request *req, struct ldb_reply *ares);
@@ -1471,7 +1466,7 @@ int ldb_extended_default_callback(struct ldb_request *req, struct ldb_reply *are
   \param ldb the context associated with the database (from ldb_init())
   \param mem_ctx a talloc memory context (used as parent of ret_req)
   \param oid the OID of the extended operation.
-  \param data a void pointer a the extended operation specific parameters,
+  \param data a void pointer to the extended operation specific parameters,
   it needs to be NULL or a valid talloc pointer! talloc_get_type() will be used on it
   \param controls an array of controls
   \param context the callback function context
@@ -1495,7 +1490,7 @@ int ldb_build_extended_req(struct ldb_request **ret_req,
 
   \param ldb the context associated with the database (from ldb_init())
   \param oid the OID of the extended operation.
-  \param data a void pointer a the extended operation specific parameters,
+  \param data a void pointer to the extended operation specific parameters,
   it needs to be NULL or a valid talloc pointer! talloc_get_type() will be used on it
   \param res the result of the extended operation
 
@@ -1559,7 +1554,7 @@ void ldb_set_utf8_default(struct ldb_context *ldb);
    \brief Casefold a string
 
    Note that the callback needs to be ASCII compatible. So first ASCII needs
-   to be handle before any UTF-8. This is needed to avoid issues with dottet
+   to be handled before any UTF-8. This is needed to avoid issues with dotted
    languages.
 
    \param ldb the ldb context
@@ -1637,7 +1632,7 @@ void ldb_ldif_read_free(struct ldb_context *ldb, struct ldb_ldif *msg);
    integer corresponding to the next byte read (or EOF if there is no
    more data to be read).
    \param private_data pointer that will be provided back to the read
-   function. This is udeful for maintaining state or context.
+   function. This is useful for maintaining state or context.
 
    \return the LDIF message that has been read in
 
@@ -1776,7 +1771,7 @@ char *ldb_ldif_message_string(struct ldb_context *ldb, TALLOC_CTX *mem_ctx,
          'const char * const *' within the LDB_SECRET_ATTRIBUTE_LIST
          opaque set on the ldb
 
-   \sa ldb_ldif_message_string for an exact representiation of the
+   \sa ldb_ldif_message_string for an exact representation of the
        message as LDIF
 */
 char *ldb_ldif_message_redacted_string(struct ldb_context *ldb,
@@ -1856,7 +1851,7 @@ int ldb_dn_extended_add_syntax(struct ldb_context *ldb,
   \param mem_ctx TALLOC context to return resulting ldb_dn structure on
   \param dn The new DN
 
-  \note The DN will not be parsed at this time.  Use ldb_dn_validate to tell if the DN is syntacticly correct
+  \note The DN will not be parsed at this time.  Use ldb_dn_validate to tell if the DN is syntactically correct
 */
 
 struct ldb_dn *ldb_dn_new(TALLOC_CTX *mem_ctx, struct ldb_context *ldb, const char *dn);
@@ -1864,7 +1859,7 @@ struct ldb_dn *ldb_dn_new(TALLOC_CTX *mem_ctx, struct ldb_context *ldb, const ch
   Allocate a new DN from a printf style format string and arguments
 
   \param mem_ctx TALLOC context to return resulting ldb_dn structure on
-  \param new_fms The new DN as a format string (plus arguments)
+  \param new_fmt The new DN as a format string (plus arguments)
 
   \note The DN will not be parsed at this time.  Use ldb_dn_validate to tell if the DN is syntactically correct
 */
@@ -1876,7 +1871,7 @@ struct ldb_dn *ldb_dn_new_fmt(TALLOC_CTX *mem_ctx, struct ldb_context *ldb, cons
   \param mem_ctx TALLOC context to return resulting ldb_dn structure on
   \param dn The new DN
 
-  \note The DN will not be parsed at this time.  Use ldb_dn_validate to tell if the DN is syntacticly correct
+  \note The DN will not be parsed at this time.  Use ldb_dn_validate to tell if the DN is syntactically correct
 */
 
 struct ldb_dn *ldb_dn_from_ldb_val(TALLOC_CTX *mem_ctx, struct ldb_context *ldb, const struct ldb_val *strdn);
@@ -1907,6 +1902,9 @@ bool ldb_dn_add_child_val(struct ldb_dn *dn,
 			  struct ldb_val value);
 
 struct ldb_dn *ldb_dn_copy(TALLOC_CTX *mem_ctx, struct ldb_dn *dn);
+struct ldb_dn *ldb_dn_copy_with_ldb_context(TALLOC_CTX *mem_ctx,
+					    struct ldb_dn *dn,
+					    struct ldb_context *ldb);
 struct ldb_dn *ldb_dn_get_parent(TALLOC_CTX *mem_ctx, struct ldb_dn *dn);
 char *ldb_dn_canonical_string(TALLOC_CTX *mem_ctx, struct ldb_dn *dn);
 char *ldb_dn_canonical_ex_string(TALLOC_CTX *mem_ctx, struct ldb_dn *dn);
@@ -2054,7 +2052,7 @@ int ldb_msg_element_compare_name(struct ldb_message_element *el1,
    Find elements in a message.
 
    This function finds elements and converts to a specific type, with
-   a give default value if not found. Assumes that elements are
+   a given default value if not found. Assumes that elements are
    single valued.
 */
 const struct ldb_val *ldb_msg_find_ldb_val(const struct ldb_message *msg, const char *attr_name);
@@ -2093,7 +2091,7 @@ struct ldb_message *ldb_msg_copy(TALLOC_CTX *mem_ctx,
 				 const struct ldb_message *msg);
 
 /*
- * ldb_msg_canonicalize() is now depreciated
+ * ldb_msg_canonicalize() is now deprecated
  * Please use ldb_msg_normalize() instead
  *
  * NOTE: Returned ldb_message object is allocated
@@ -2111,7 +2109,7 @@ int ldb_msg_normalize(struct ldb_context *ldb,
 
 
 /*
- * ldb_msg_diff() is now depreciated
+ * ldb_msg_diff() is now deprecated
  * Please use ldb_msg_difference() instead
  *
  * NOTE: Returned ldb_message object is allocated
@@ -2195,13 +2193,37 @@ int ldb_set_debug(struct ldb_context *ldb,
 		  void *context);
 
 /**
-  this allows the user to set custom utf8 function for error reporting. make
-  sure it is able to handle ASCII first, so it prevents issues with dottet
-  languages.
-*/
+ * This allows the user to set custom utf8 functions.
+ *
+ * Be aware that casefold in some locales will break ldb expectations. In
+ * particular, if 'i' is uppercased to 'İ' (a capital I with a dot, used in
+ * some languages), the string '<guid=' will not equal '<GUID='.
+ *
+ * The default functions casefold ASCII only, and those used by Samba use a
+ * version of the NTFS UCS-2 upcase table which is dotted-i safe.
+ *
+ * The context argument will be passed to the casefold() and casecmp()
+ * functions as the first argument. It is unused in the default and Samba
+ * implementations, but could for example be used to hold a libICU context.
+ *
+ * The second argument for the casefold function is a TALLOC context.
+ */
+void ldb_set_utf8_functions(struct ldb_context *ldb,
+			    void *context,
+			    char *(*casefold)(void *, void *, const char *, size_t n),
+			    int (*casecmp)(void *ctx, const struct ldb_val *v1,
+					   const struct ldb_val *v2));
+
+/**
+ * This legacy function is for setting a custom utf8 casefold function. It
+ * cannot set a comparison function, which makes it very difficult for a
+ * comparison to be both efficient and correct.
+ *
+ * Use ldb_set_utf8_functions() instead!
+ */
 void ldb_set_utf8_fns(struct ldb_context *ldb,
 		      void *context,
-		      char *(*casefold)(void *, void *, const char *, size_t n));
+		      char *(*casefold)(void *, void *, const char *, size_t n)) _DEPRECATED_;
 
 /**
    this sets up debug to print messages on stderr
@@ -2324,6 +2346,22 @@ do { \
 		} \
 	} \
 } while (0)
+#endif
+
+#ifndef NUMERIC_CMP
+/*
+ * NUMERIC_CMP is a safe replacement for `a - b` in comparison
+ * functions. It will work on integers, pointers, and floats.
+ *
+ * Rather than
+ *
+ *      return a - b;
+ *
+ * use
+ *
+ *     return NUMERIC_CMP(a, b);
+ */
+#define NUMERIC_CMP(a, b) (((a) > (b)) - ((a) < (b)))
 #endif
 
 

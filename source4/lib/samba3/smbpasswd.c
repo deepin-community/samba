@@ -60,31 +60,27 @@
 
 struct samr_Password *smbpasswd_gethexpwd(TALLOC_CTX *mem_ctx, const char *p)
 {
-	int i;
-	unsigned char   lonybble, hinybble;
-	const char     *hexchars = "0123456789ABCDEF";
-	const char     *p1, *p2;
-        struct samr_Password *pwd = talloc(mem_ctx, struct samr_Password);
+	struct samr_Password *pwd = NULL;
+	size_t len;
 
-	if (!p) return NULL;
-	
-	for (i = 0; i < (sizeof(pwd->hash) * 2); i += 2)
-	{
-		hinybble = toupper(p[i]);
-		lonybble = toupper(p[i + 1]);
-		
-		p1 = strchr_m(hexchars, hinybble);
-		p2 = strchr_m(hexchars, lonybble);
-		
-		if (!p1 || !p2)	{
-                        return NULL;
-		}
-		
-		hinybble = PTR_DIFF(p1, hexchars);
-		lonybble = PTR_DIFF(p2, hexchars);
-		
-		pwd->hash[i / 2] = (hinybble << 4) | lonybble;
+	if (p == NULL) {
+		return NULL;
 	}
+
+	pwd = talloc(mem_ctx, struct samr_Password);
+	if (pwd == NULL) {
+		return NULL;
+	}
+
+	len = strhex_to_str((char *)pwd->hash,
+			    sizeof(pwd->hash),
+			    p,
+			    sizeof(pwd->hash) * 2);
+	if (len != sizeof(pwd->hash)) {
+		TALLOC_FREE(pwd);
+		return NULL;
+	}
+
 	return pwd;
 }
 
@@ -93,14 +89,7 @@ char *smbpasswd_sethexpwd(TALLOC_CTX *mem_ctx, struct samr_Password *pwd, uint16
 {
 	char *p;
 	if (pwd != NULL) {
-		int i;
-		p = talloc_array(mem_ctx, char, 33);
-		if (!p) {
-			return NULL;
-		}
-
-		for (i = 0; i < sizeof(pwd->hash); i++)
-			slprintf(&p[i*2], 3, "%02X", pwd->hash[i]);
+		p = hex_encode_talloc(mem_ctx, pwd->hash, sizeof(pwd->hash));
 	} else {
 		if (acb_info & ACB_PWNOTREQ)
 			p = talloc_strdup(mem_ctx, "NO PASSWORDXXXXXXXXXXXXXXXXXXXXX");

@@ -22,6 +22,7 @@
 */
 
 #include "includes.h"
+#include "lib/util/util_file.h"
 #include "librpc/gen_ndr/samr.h" /* for struct samrPassword */
 #include "auth/credentials/credentials.h"
 #include "auth/credentials/credentials_internal.h"
@@ -146,6 +147,11 @@ _PUBLIC_ enum credentials_use_kerberos cli_credentials_get_kerberos_state(struct
 	return creds->kerberos_state;
 }
 
+_PUBLIC_ enum credentials_obtained cli_credentials_get_kerberos_state_obtained(struct cli_credentials *creds)
+{
+	return creds->kerberos_state_obtained;
+}
+
 _PUBLIC_ const char *cli_credentials_get_forced_sasl_mech(struct cli_credentials *creds)
 {
 	return creds->forced_sasl_mech;
@@ -170,11 +176,32 @@ _PUBLIC_ bool cli_credentials_set_gensec_features(struct cli_credentials *creds,
 	return false;
 }
 
+_PUBLIC_ bool cli_credentials_add_gensec_features(
+	struct cli_credentials *creds,
+	uint32_t gensec_features,
+	enum credentials_obtained obtained)
+{
+	return cli_credentials_set_gensec_features(
+		creds, creds->gensec_features | gensec_features, obtained);
+}
+
 _PUBLIC_ uint32_t cli_credentials_get_gensec_features(struct cli_credentials *creds)
 {
 	return creds->gensec_features;
 }
 
+/**
+ * @brief Find out how the username was obtained.
+ *
+ * @param cred A credentials context.
+ *
+ * @return The obtained information for the username.
+ */
+_PUBLIC_ enum credentials_obtained
+cli_credentials_get_username_obtained(struct cli_credentials *cred)
+{
+	return cred->username_obtained;
+}
 
 /**
  * Obtain the username for this credentials context.
@@ -266,6 +293,64 @@ _PUBLIC_ const char *cli_credentials_get_bind_dn(struct cli_credentials *cred)
 	return cred->bind_dn;
 }
 
+
+/**
+ * @brief Find out how the principal was obtained.
+ *
+ * @param cred A credentials context.
+ *
+ * @return The obtained information for the principal.
+ */
+_PUBLIC_ enum credentials_obtained
+cli_credentials_get_principal_obtained(struct cli_credentials *cred)
+{
+	if (cred->machine_account_pending) {
+		cli_credentials_set_machine_account(cred,
+					cred->machine_account_pending_lp_ctx);
+	}
+
+	if (cred->principal_obtained < cred->username_obtained
+	    || cred->principal_obtained < MAX(cred->domain_obtained, cred->realm_obtained)) {
+		const char *effective_username = NULL;
+		const char *effective_realm = NULL;
+		enum credentials_obtained effective_obtained;
+
+		/*
+		 * We don't want to trigger a callbacks in
+		 * cli_credentials_get_username()
+		 * cli_credentials_get_domain()
+		 * nor
+		 * cli_credentials_get_realm()
+		 */
+
+		effective_username = cred->username;
+		if (effective_username == NULL || strlen(effective_username) == 0) {
+			return cred->username_obtained;
+		}
+
+		if (cred->domain_obtained > cred->realm_obtained) {
+			effective_realm = cred->domain;
+			effective_obtained = MIN(cred->domain_obtained,
+						 cred->username_obtained);
+		} else {
+			effective_realm = cred->realm;
+			effective_obtained = MIN(cred->realm_obtained,
+						 cred->username_obtained);
+		}
+
+		if (effective_realm == NULL || strlen(effective_realm) == 0) {
+			effective_realm = cred->domain;
+			effective_obtained = MIN(cred->domain_obtained,
+						 cred->username_obtained);
+		}
+
+		if (effective_realm != NULL && strlen(effective_realm) != 0) {
+			return effective_obtained;
+		}
+	}
+
+	return cred->principal_obtained;
+}
 
 /**
  * Obtain the client principal for this credentials context.
@@ -453,6 +538,19 @@ _PUBLIC_ const char *cli_credentials_get_password(struct cli_credentials *cred)
 }
 
 /**
+ * @brief Find out how the password was obtained.
+ *
+ * @param cred A credentials context.
+ *
+ * @return The obtained information for the password.
+ */
+_PUBLIC_ enum credentials_obtained
+cli_credentials_get_password_obtained(struct cli_credentials *cred)
+{
+	return cred->password_obtained;
+}
+
+/**
  * @brief Obtain the password for this credentials context.
  *
  * @param[in]  cred  The credential context.
@@ -506,6 +604,7 @@ _PUBLIC_ bool cli_credentials_set_password(struct cli_credentials *cred,
 			if (nt_hash == NULL) {
 				return false;
 			}
+			talloc_keep_secret(nt_hash);
 
 			converted = strhex_to_str((char *)nt_hash->hash,
 						  sizeof(nt_hash->hash),
@@ -641,6 +740,7 @@ _PUBLIC_ struct samr_Password *cli_credentials_get_nt_hash(struct cli_credential
 	if (nt_hash == NULL) {
 		return NULL;
 	}
+	talloc_keep_secret(nt_hash);
 
 	if (password_is_nt_hash) {
 		size_t password_len = strlen(password);
@@ -665,6 +765,7 @@ return_hash:
 	if (nt_hash == NULL) {
 		return NULL;
 	}
+	talloc_keep_secret(nt_hash);
 
 	*nt_hash = *cred->nt_hash;
 
@@ -690,6 +791,7 @@ _PUBLIC_ struct samr_Password *cli_credentials_get_old_nt_hash(struct cli_creden
 		if (!nt_hash) {
 			return NULL;
 		}
+		talloc_keep_secret(nt_hash);
 
 		*nt_hash = *cred->old_nt_hash;
 
@@ -702,6 +804,7 @@ _PUBLIC_ struct samr_Password *cli_credentials_get_old_nt_hash(struct cli_creden
 		if (!nt_hash) {
 			return NULL;
 		}
+		talloc_keep_secret(nt_hash);
 
 		E_md4hash(old_password, nt_hash->hash);
 
@@ -1579,6 +1682,10 @@ _PUBLIC_ bool cli_credentials_parse_password_fd(struct cli_credentials *credenti
 	char *p;
 	char pass[128];
 
+	if (credentials->password_obtained >= obtained) {
+		return false;
+	}
+
 	for(p = pass, *p = '\0'; /* ensure that pass is null-terminated */
 		p && p - pass < sizeof(pass) - 1;) {
 		switch (read(fd, p, 1)) {
@@ -1889,49 +1996,3 @@ cli_credentials_get_smb_encryption(struct cli_credentials *creds)
 {
 	return creds->encryption_state;
 }
-
-/**
- * Encrypt a data blob using the session key and the negotiated encryption
- * algorithm
- *
- * @param state Credential state, contains the session key and algorithm
- * @param data Data blob containing the data to be encrypted.
- *
- */
-_PUBLIC_ NTSTATUS netlogon_creds_session_encrypt(
-	struct netlogon_creds_CredentialState *state,
-	DATA_BLOB data)
-{
-	NTSTATUS status;
-
-	if (data.data == NULL || data.length == 0) {
-		DBG_ERR("Nothing to encrypt "
-			"data.data == NULL or data.length == 0");
-		return NT_STATUS_INVALID_PARAMETER;
-	}
-	/*
-	 * Don't crypt an all-zero password it will give away the
-	 * NETLOGON pipe session key .
-	 */
-	if (all_zero(data.data, data.length)) {
-		DBG_ERR("Supplied data all zeros, could leak session key");
-		return NT_STATUS_INVALID_PARAMETER;
-	}
-	if (state->negotiate_flags & NETLOGON_NEG_SUPPORTS_AES) {
-		status = netlogon_creds_aes_encrypt(state,
-						    data.data,
-						    data.length);
-	} else if (state->negotiate_flags & NETLOGON_NEG_ARCFOUR) {
-		status = netlogon_creds_arcfour_crypt(state,
-						      data.data,
-						      data.length);
-	} else {
-		DBG_ERR("Unsupported encryption option negotiated");
-		status = NT_STATUS_NOT_SUPPORTED;
-	}
-	if (!NT_STATUS_IS_OK(status)) {
-		return status;
-	}
-	return NT_STATUS_OK;
-}
-

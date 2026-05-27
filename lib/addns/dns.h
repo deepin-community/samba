@@ -27,8 +27,6 @@
 
 #include "../replace/replace.h"
 #include "system/network.h"
-#include "system/kerberos.h"
-#include "system/gssapi.h"
 
 /* make sure we have included the correct config.h */
 #ifndef NO_CONFIG_H /* for some tests */
@@ -261,16 +259,6 @@ DNS_ERROR dns_create_tkey_record(TALLOC_CTX *mem_ctx, const char *keyname,
 				 time_t expiration, uint16_t mode, uint16_t error,
 				 uint16_t key_length, const uint8_t *key,
 				 struct dns_rrec **prec);
-DNS_ERROR dns_create_name_in_use_record(TALLOC_CTX *mem_ctx,
-					const char *name,
-					const struct sockaddr_storage *ip,
-					struct dns_rrec **prec);
-DNS_ERROR dns_create_delete_record(TALLOC_CTX *mem_ctx, const char *name,
-				   uint16_t type, uint16_t r_class,
-				   struct dns_rrec **prec);
-DNS_ERROR dns_create_name_not_in_use_record(TALLOC_CTX *mem_ctx,
-					    const char *name, uint32_t type,
-					    struct dns_rrec **prec);
 DNS_ERROR dns_create_a_record(TALLOC_CTX *mem_ctx, const char *host,
 			      uint32_t ttl, const struct sockaddr_storage *pss,
 			      struct dns_rrec **prec);
@@ -347,20 +335,16 @@ const char *dns_errstr(DNS_ERROR err);
 
 /* from dnsgss.c */
 
-#ifdef HAVE_GSSAPI
+struct gensec_security;
 
-void display_status( const char *msg, OM_uint32 maj_stat, OM_uint32 min_stat ); 
-DNS_ERROR dns_negotiate_sec_ctx( const char *target_realm,
-				 const char *servername,
-				 const char *keyname,
-				 gss_ctx_id_t *gss_ctx,
-				 enum dns_ServerType srv_type );
+DNS_ERROR dns_negotiate_sec_ctx(const char *servername,
+				const char *keyname,
+				struct gensec_security *gensec,
+				enum dns_ServerType srv_type);
 DNS_ERROR dns_sign_update(struct dns_update_request *req,
-			  gss_ctx_id_t gss_ctx,
+			  struct gensec_security *gensec,
 			  const char *keyname,
 			  const char *algorithmname,
 			  time_t time_signed, uint16_t fudge);
-
-#endif	/* HAVE_GSSAPI */
 
 #endif	/* _DNS_H */

@@ -970,7 +970,7 @@ int rep_memset_s(void *dest, size_t destsz, int ch, size_t count)
 	}
 
 #if defined(HAVE_MEMSET_EXPLICIT)
-	memset_explicit(dest, destsz, ch, count);
+	memset_explicit(dest, ch, count);
 #else /* HAVE_MEMSET_EXPLICIT */
 	memset(dest, ch, count);
 # if defined(HAVE_GCC_VOLATILE_MEMORY_PROTECTION)
@@ -1083,6 +1083,34 @@ ssize_t rep_copy_file_range(int fd_in,
 }
 #endif /* HAVE_COPY_FILE_RANGE */
 
+#ifdef HAVE_LINUX_IOCTL
+# include <linux/fs.h>
+# include <sys/ioctl.h>
+#endif
+
+ssize_t rep_copy_reflink(int src_fd,
+			 off_t src_off,
+			 int dst_fd,
+			 off_t dst_off,
+			 off_t to_copy)
+{
+#ifdef HAVE_LINUX_IOCTL
+	struct file_clone_range cr;
+
+	cr = (struct file_clone_range) {
+		.src_fd = src_fd,
+		.src_offset = (uint64_t)src_off,
+		.dest_offset = (uint64_t)dst_off,
+		.src_length = (uint64_t)to_copy,
+	};
+
+	return ioctl(dst_fd, FICLONERANGE, &cr);
+#else
+	errno = ENOSYS;
+	return -1;
+#endif
+}
+
 #ifndef HAVE_OPENAT2
 
 /* fallback known wellknown __NR_openat2 values */
@@ -1143,3 +1171,66 @@ long rep_openat2(int dirfd, const char *pathname,
 #endif
 }
 #endif /* !HAVE_OPENAT2 */
+
+#ifndef HAVE_RENAMEAT2
+
+/* fallback to wellknown __NR_renameat2 values */
+#ifndef __NR_renameat2
+# if defined(LINUX) && defined(HAVE_SYS_SYSCALL_H)
+#  if defined(__i386__)
+#   define __NR_renameat2 353
+#  elif defined(__x86_64__) && defined(__LP64__)
+#   define __NR_renameat2 316 /* 316 0x13C */
+#  elif defined(__x86_64__) && defined(__ILP32__)
+#   define __NR_renameat2 1073742140 /* 1073742140 0x4000013C */
+#  elif defined(__aarch64__)
+#   define __NR_renameat2 276
+#  elif defined(__arm__)
+#   define __NR_renameat2 382
+#  elif defined(__sparc__)
+#   define __NR_renameat2 345
+#  endif
+# endif /* defined(LINUX) && defined(HAVE_SYS_SYSCALL_H) */
+#endif /* !__NR_renameat2 */
+
+#ifdef DISABLE_OPATH
+/*
+ * systems without O_PATH also don't have renameat2,
+ * so make sure we at a realistic combination.
+ */
+#undef __NR_renameat2
+#endif /* DISABLE_OPATH */
+
+int rep_renameat2(int __oldfd, const char *__old, int __newfd,
+		  const char *__new, unsigned int __flags)
+{
+	if (__flags != 0) {
+#ifdef __NR_renameat2
+		int ret;
+
+		ret = syscall(__NR_renameat2,
+			      __oldfd,
+			      __old,
+			      __newfd,
+			      __new,
+			      __flags);
+		if (ret != -1 || errno != ENOSYS) {
+			/*
+			 * if it's ENOSYS, we fallback
+			 * to EINVAL below, otherwise
+			 * we return what the kernel
+			 * did.
+			 */
+			return ret;
+		}
+#endif
+		errno = EINVAL;
+		return -1;
+	}
+
+	return renameat(__oldfd, __old, __newfd, __new);
+}
+#endif /* ! HAVE_RENAMEAT2 */
+
+const char hexchars_lower[] = "0123456789abcdef";
+const char hexchars_upper[] = "0123456789ABCDEF";

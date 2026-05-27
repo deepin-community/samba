@@ -323,7 +323,6 @@ NTSTATUS rpc_lookup_useraliases(TALLOC_CTX *mem_ctx,
 				uint32_t **palias_rids)
 {
 #define MAX_SAM_ENTRIES_W2K 0x400 /* 1024 */
-	uint32_t num_query_sids = 0;
 	uint32_t num_queries = 1;
 	uint32_t num_aliases = 0;
 	uint32_t total_sids = 0;
@@ -337,6 +336,7 @@ NTSTATUS rpc_lookup_useraliases(TALLOC_CTX *mem_ctx,
 	do {
 		/* prepare query */
 		struct lsa_SidArray sid_array;
+		uint32_t num_query_sids = 0;
 
 		ZERO_STRUCT(sid_array);
 
@@ -809,6 +809,7 @@ NTSTATUS rpc_lookup_sids(TALLOC_CTX *mem_ctx,
 {
 	struct lsa_TransNameArray *names = *pnames;
 	struct rpc_pipe_client *cli = NULL;
+	struct dcerpc_binding_handle *b = NULL;
 	struct policy_handle lsa_policy;
 	uint32_t count;
 	uint32_t i;
@@ -819,12 +820,14 @@ NTSTATUS rpc_lookup_sids(TALLOC_CTX *mem_ctx,
 		return status;
 	}
 
-	if (cli->transport->transport == NCACN_IP_TCP) {
+	b = cli->binding_handle;
+
+	if (dcerpc_binding_handle_get_transport(b) == NCACN_IP_TCP) {
 		return rpc_try_lookup_sids3(mem_ctx, domain, cli, sids,
 					    pdomains, pnames);
 	}
 
-	status = dcerpc_lsa_LookupSids(cli->binding_handle, mem_ctx,
+	status = dcerpc_lsa_LookupSids(b, mem_ctx,
 				       &lsa_policy, sids, pdomains,
 				       names, LSA_LOOKUP_NAMES_ALL,
 				       &count, &result);

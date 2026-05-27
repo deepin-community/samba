@@ -26,6 +26,7 @@
 #include "winbindd.h"
 #include "auth/gensec/gensec.h"
 #include "auth_generic.h"
+#include "lib/util/string_wrappers.h"
 
 #undef DBGC_CLASS
 #define DBGC_CLASS DBGC_WINBIND
@@ -183,7 +184,10 @@ static bool check_client_uid(struct winbindd_cli_state *state, uid_t uid)
 bool winbindd_ccache_ntlm_auth(struct winbindd_cli_state *state)
 {
 	struct winbindd_domain *domain;
-	fstring name_namespace, name_domain, name_user;
+	char *name_namespace = NULL;
+	char *name_domain = NULL;
+	char *name_user = NULL;
+	char *auth_user = NULL;
 	NTSTATUS result = NT_STATUS_NOT_SUPPORTED;
 	struct WINBINDD_MEMORY_CREDS *entry;
 	DATA_BLOB initial, challenge, auth;
@@ -199,21 +203,25 @@ bool winbindd_ccache_ntlm_auth(struct winbindd_cli_state *state)
 
 	/* Parse domain and username */
 
-	ok = canonicalize_username(state->request->data.ccache_ntlm_auth.user,
-				   name_namespace,
-				   name_domain,
-				   name_user);
+	auth_user = state->request->data.ccache_ntlm_auth.user;
+	ok = canonicalize_username(state,
+				   &auth_user,
+				   &name_namespace,
+				   &name_domain,
+				   &name_user);
 	if (!ok) {
-		DEBUG(5,("winbindd_ccache_ntlm_auth: cannot parse domain and user from name [%s]\n",
-			state->request->data.ccache_ntlm_auth.user));
+		DBG_INFO("cannot parse domain and user from name [%s]\n",
+			 state->request->data.ccache_ntlm_auth.user);
 		return false;
 	}
+
+	fstrcpy(state->request->data.ccache_ntlm_auth.user, auth_user);
+	TALLOC_FREE(auth_user);
 
 	domain = find_auth_domain(state->request->flags, name_domain);
 
 	if (domain == NULL) {
-		DEBUG(5,("winbindd_ccache_ntlm_auth: can't get domain [%s]\n",
-			name_domain));
+		DBG_INFO("can't get domain [%s]\n", name_domain);
 		return false;
 	}
 
@@ -231,35 +239,37 @@ bool winbindd_ccache_ntlm_auth(struct winbindd_cli_state *state)
 		initial_blob_len + challenge_blob_len < initial_blob_len ||
 		initial_blob_len + challenge_blob_len < challenge_blob_len) {
 
-		DEBUG(10,("winbindd_dual_ccache_ntlm_auth: blob lengths overrun "
-			"or wrap. Buffer [%d+%d > %d]\n",
-			initial_blob_len,
-			challenge_blob_len,
-			extra_len));
+		DBG_DEBUG("blob lengths overrun "
+			  "or wrap. Buffer [%d+%d > %d]\n",
+			  initial_blob_len,
+			  challenge_blob_len,
+			  extra_len);
 		goto process_result;
 	}
 
+	TALLOC_FREE(name_namespace);
+	TALLOC_FREE(name_domain);
+	TALLOC_FREE(name_user);
 	/* Parse domain and username */
-	ok = parse_domain_user(state->request->data.ccache_ntlm_auth.user,
-			       name_namespace,
-			       name_domain,
-			       name_user);
+	ok = parse_domain_user(state,
+			       state->request->data.ccache_ntlm_auth.user,
+			       &name_namespace,
+			       &name_domain,
+			       &name_user);
 	if (!ok) {
-		DEBUG(10,("winbindd_dual_ccache_ntlm_auth: cannot parse "
-			"domain and user from name [%s]\n",
-			state->request->data.ccache_ntlm_auth.user));
+		DBG_DEBUG("cannot parse domain and user from name [%s]\n",
+			  state->request->data.ccache_ntlm_auth.user);
 		goto process_result;
 	}
 
 	entry = find_memory_creds_by_name(state->request->data.ccache_ntlm_auth.user);
 	if (entry == NULL || entry->nt_hash == NULL || entry->lm_hash == NULL) {
-		DEBUG(10,("winbindd_dual_ccache_ntlm_auth: could not find "
-			"credentials for user %s\n", 
-			state->request->data.ccache_ntlm_auth.user));
+		DBG_DEBUG("could not find credentials for user %s\n",
+			  state->request->data.ccache_ntlm_auth.user);
 		goto process_result;
 	}
 
-	DEBUG(10,("winbindd_dual_ccache_ntlm_auth: found ccache [%s]\n", entry->username));
+	DBG_DEBUG("found ccache [%s]\n", entry->username);
 
 	if (!client_can_access_ccache_entry(state->request->data.ccache_ntlm_auth.uid, entry)) {
 		goto process_result;
@@ -306,13 +316,19 @@ bool winbindd_ccache_ntlm_auth(struct winbindd_cli_state *state)
 	data_blob_free(&auth);
 
   process_result:
+	TALLOC_FREE(name_namespace);
+	TALLOC_FREE(name_domain);
+	TALLOC_FREE(name_user);
 	return NT_STATUS_IS_OK(result);
 }
 
 bool winbindd_ccache_save(struct winbindd_cli_state *state)
 {
 	struct winbindd_domain *domain;
-	fstring name_namespace, name_domain, name_user;
+	char *name_namespace = NULL;
+	char *name_domain = NULL;
+	char *name_user = NULL;
+	char *save_user = NULL;
 	NTSTATUS status;
 	bool ok;
 
@@ -328,16 +344,21 @@ bool winbindd_ccache_save(struct winbindd_cli_state *state)
 
 	/* Parse domain and username */
 
-	ok = canonicalize_username(state->request->data.ccache_save.user,
-				   name_namespace,
-				   name_domain,
-				   name_user);
+
+	save_user = state->request->data.ccache_save.user;
+	ok = canonicalize_username(state,
+				   &save_user,
+				   &name_namespace,
+				   &name_domain,
+				   &name_user);
 	if (!ok) {
 		DEBUG(5,("winbindd_ccache_save: cannot parse domain and user "
 			 "from name [%s]\n",
 			 state->request->data.ccache_save.user));
 		return false;
 	}
+
+	fstrcpy(state->request->data.ccache_save.user, save_user);
 
 	/*
 	 * The domain is checked here only for compatibility

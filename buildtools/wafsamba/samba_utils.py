@@ -15,38 +15,16 @@ from waflib.Build import CACHE_SUFFIX
 # TODO: make this a --option
 LIB_PATH="shared"
 
-
-PY3 = sys.version_info[0] == 3
-
-if PY3:
-
-    # helper function to get a string from a variable that maybe 'str' or
-    # 'bytes' if 'bytes' then it is decoded using 'utf8'. If 'str' is passed
-    # it is returned unchanged
-    # Using this function is PY2/PY3 code should ensure in most cases
-    # the PY2 code runs unchanged in PY2 whereas the code in PY3 possibly
-    # decodes the variable (see PY2 implementation of this function below)
-    def get_string(bytesorstring):
-        tmp = bytesorstring
-        if isinstance(bytesorstring, bytes):
-            tmp = bytesorstring.decode('utf8')
-        elif not isinstance(bytesorstring, str):
-            raise ValueError('Expected byte of string for %s:%s' % (type(bytesorstring), bytesorstring))
-        return tmp
-
-else:
-
-    # Helper function to return string.
-    # if 'str' or 'unicode' passed in they are returned unchanged
-    # otherwise an exception is generated
-    # Using this function is PY2/PY3 code should ensure in most cases
-    # the PY2 code runs unchanged in PY2 whereas the code in PY3 possibly
-    # decodes the variable (see PY3 implementation of this function above)
-    def get_string(bytesorstring):
-        tmp = bytesorstring
-        if not(isinstance(bytesorstring, str) or isinstance(bytesorstring, unicode)):
-            raise ValueError('Expected str or unicode for %s:%s' % (type(bytesorstring), bytesorstring))
-        return tmp
+# Py3 transition helper function to get a string from a variable that
+# may be 'str' or 'bytes'. If 'bytes' then it is decoded using 'utf8'.
+# If 'str' is passed it is returned unchanged.
+def get_string(bytesorstring):
+    tmp = bytesorstring
+    if isinstance(bytesorstring, bytes):
+        tmp = bytesorstring.decode('utf8')
+    elif not isinstance(bytesorstring, str):
+        raise ValueError('Expected byte of string for %s:%s' % (type(bytesorstring), bytesorstring))
+    return tmp
 
 # sigh, python octal constants are a mess
 MODE_644 = int('644', 8)
@@ -469,8 +447,7 @@ def RECURSE(ctx, directory):
         return ctx.recurse(relpath)
     if 'waflib.extras.compat15' in sys.modules:
         return ctx.recurse(relpath)
-    Logs.error('Unknown RECURSE context class: {}'.format(ctxclass))
-    raise
+    raise Errors.WafError('Unknown RECURSE context class: {}'.format(ctxclass))
 Options.OptionsContext.RECURSE = RECURSE
 Build.BuildContext.RECURSE = RECURSE
 
@@ -710,8 +687,9 @@ def samba_before_apply_obj_vars(self):
     """before apply_obj_vars for uselib, this removes the standard paths"""
 
     def is_standard_libpath(env, path):
+        normalized_path = os.path.normpath(path)
         for _path in env.STANDARD_LIBPATH:
-            if _path == os.path.normpath(path):
+            if _path == normalized_path:
                 return True
         return False
 

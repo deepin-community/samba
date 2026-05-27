@@ -53,6 +53,7 @@
 #include "auth/credentials/credentials.h"
 #include "source3/utils/passwd_proto.h"
 #include "auth/gensec/gensec.h"
+#include "lib/param/param.h"
 
 #ifdef WITH_FAKE_KASERVER
 #include "utils/net_afs.h"
@@ -206,6 +207,14 @@ static int net_changesecretpw(struct net_context *c, int argc,
 		struct timeval tv = timeval_current();
 		NTTIME now = timeval_to_nttime(&tv);
 
+#ifdef HAVE_ADS
+		if (USE_KERBEROS_KEYTAB) {
+		   if (lp_sync_machine_password_to_keytab() == NULL) {
+			lp_do_parameter(-1, "sync machine password to keytab", "disabled");
+		   }
+		}
+#endif
+
 		if (c->opt_stdin) {
 			set_line_buffering(stdin);
 			set_line_buffering(stdout);
@@ -223,7 +232,14 @@ static int net_changesecretpw(struct net_context *c, int argc,
 							 "localhost",
 							 trust_pw,
 							 talloc_tos(),
-							 &info, &prev);
+							 &info,
+							 &prev,
+#ifdef HAVE_ADS
+							 sync_pw2keytabs,
+#else
+							 NULL,
+#endif
+							 c->opt_host);
 		if (!NT_STATUS_IS_OK(status)) {
 			d_fprintf(stderr,
 			        _("Unable to write the machine account password in the secrets database"));
@@ -242,7 +258,15 @@ static int net_changesecretpw(struct net_context *c, int argc,
 			}
 			return 1;
 		}
-		status = secrets_finish_password_change("localhost", now, info);
+		status = secrets_finish_password_change("localhost",
+							now,
+							info,
+#ifdef HAVE_ADS
+							sync_pw2keytabs,
+#else
+							NULL,
+#endif
+							c->opt_host);
 		if (!NT_STATUS_IS_OK(status)) {
 			d_fprintf(stderr,
 			        _("Unable to write the machine account password in the secrets database"));
@@ -294,7 +318,7 @@ static int net_setauthuser(struct net_context *c, int argc, const char **argv)
 		return 0;
 	}
 
-	if (!c->opt_user_specified) {
+	if (!c->explicit_credentials) {
 		d_fprintf(stderr, _("Usage:\n"));
 		d_fprintf(stderr,
 			  _("    net setauthuser -U user[%%password]\n"
@@ -307,7 +331,7 @@ static int net_setauthuser(struct net_context *c, int argc, const char **argv)
 		return 1;
 	}
 
-	password = net_prompt_pass(c, _("the auth user"));
+	password = cli_credentials_get_password(c->creds);
 	if (password == NULL) {
 		d_fprintf(stderr,_("Failed to get the auth users password.\n"));
 		return 1;
@@ -904,6 +928,14 @@ static struct functable net_func[] = {
 		   "'net vfs' commands.")
 	},
 
+	{	"witness",
+		net_witness,
+		NET_TRANSPORT_LOCAL,
+		N_("Manage witness registrations"),
+		N_("  Use 'net help witness' to get more information about "
+		   "'net witness' commands.")
+	},
+
 #ifdef WITH_FAKE_KASERVER
 	{	"afs",
 		net_afs,
@@ -1038,10 +1070,11 @@ static struct functable net_func[] = {
 			.arg        = &c->opt_request_timeout,
 		},
 		{
+			/* legacy for --use-winbind-ccache */
 			.longName   = "use-ccache",
 			.shortName  = 0,
 			.argInfo    = POPT_ARG_NONE,
-			.arg        = &c->opt_ccache,
+			.arg        = &c->legacy_opt_ccache,
 		},
 		{
 			.longName   = "verbose",
@@ -1232,6 +1265,61 @@ static struct functable net_func[] = {
 			.arg        = &c->opt_dns_ttl,
 			.descrip    = "TTL in seconds of DNS records",
 		},
+		/* Options for 'net witness {list,...}' */
+		{
+			.longName   = "witness-registration",
+			.shortName  = 0,
+			.argInfo    = POPT_ARG_STRING,
+			.arg        = &c->opt_witness_registration,
+		},
+		{
+			.longName   = "witness-net-name",
+			.shortName  = 0,
+			.argInfo    = POPT_ARG_STRING,
+			.arg        = &c->opt_witness_net_name,
+		},
+		{
+			.longName   = "witness-share-name",
+			.shortName  = 0,
+			.argInfo    = POPT_ARG_STRING,
+			.arg        = &c->opt_witness_share_name,
+		},
+		{
+			.longName   = "witness-ip-address",
+			.shortName  = 0,
+			.argInfo    = POPT_ARG_STRING,
+			.arg        = &c->opt_witness_ip_address,
+		},
+		{
+			.longName   = "witness-client-computer-name",
+			.shortName  = 0,
+			.argInfo    = POPT_ARG_STRING,
+			.arg        = &c->opt_witness_client_computer_name,
+		},
+		{
+			.longName   = "witness-apply-to-all",
+			.shortName  = 0,
+			.argInfo    = POPT_ARG_NONE,
+			.arg        = &c->opt_witness_apply_to_all,
+		},
+		{
+			.longName   = "witness-new-ip",
+			.shortName  = 0,
+			.argInfo    = POPT_ARG_STRING,
+			.arg        = &c->opt_witness_new_ip,
+		},
+		{
+			.longName   = "witness-new-node",
+			.shortName  = 0,
+			.argInfo    = POPT_ARG_INT,
+			.arg        = &c->opt_witness_new_node,
+		},
+		{
+			.longName   = "witness-forced-response",
+			.shortName  = 0,
+			.argInfo    = POPT_ARG_STRING,
+			.arg        = &c->opt_witness_forced_response,
+		},
 		POPT_COMMON_SAMBA
 		POPT_COMMON_CONNECTION
 		POPT_COMMON_CREDENTIALS
@@ -1244,6 +1332,7 @@ static struct functable net_func[] = {
 	BlockSignals(True, SIGPIPE);
 
 	zero_sockaddr(&c->opt_dest_ip);
+	c->opt_witness_new_node = -2;
 
 	smb_init_locale();
 
@@ -1263,8 +1352,9 @@ static struct functable net_func[] = {
 		TALLOC_FREE(frame);
 		exit(1);
 	}
+	c->lp_ctx = samba_cmdline_get_lp_ctx();
 	/* set default debug level to 0 regardless of what smb.conf sets */
-	lp_set_cmdline("log level", "0");
+	lpcfg_set_cmdline(c->lp_ctx, "log level", "0");
 	c->private_data = net_func;
 
 	pc = samba_popt_get_context(getprogname(),
@@ -1300,30 +1390,43 @@ static struct functable net_func[] = {
 	}
 
 	c->creds = samba_cmdline_get_creds();
-	c->lp_ctx = samba_cmdline_get_lp_ctx();
 
 	{
-		enum credentials_obtained username_obtained =
-			CRED_UNINITIALISED;
-		enum smb_encryption_setting encrypt_state =
-			cli_credentials_get_smb_encryption(c->creds);
-		enum credentials_use_kerberos krb5_state =
-			cli_credentials_get_kerberos_state(c->creds);
-		uint32_t gensec_features;
+		enum credentials_obtained principal_obtained =
+			cli_credentials_get_principal_obtained(c->creds);
+		enum credentials_obtained password_obtained =
+			cli_credentials_get_password_obtained(c->creds);
+		char *krb5ccname = NULL;
 
-		c->opt_user_name = cli_credentials_get_username_and_obtained(
-				c->creds,
-				&username_obtained);
-		c->opt_user_specified = (username_obtained == CRED_SPECIFIED);
+		if (principal_obtained == CRED_SPECIFIED) {
+			c->explicit_credentials = true;
+		}
+		if (password_obtained == CRED_SPECIFIED) {
+			c->explicit_credentials = true;
+		}
 
 		c->opt_workgroup = cli_credentials_get_domain(c->creds);
 
-		c->smb_encrypt = (encrypt_state == SMB_ENCRYPTION_REQUIRED);
+		if (c->legacy_opt_ccache) {
+			cli_credentials_add_gensec_features(
+				c->creds,
+				GENSEC_FEATURE_NTLM_CCACHE,
+				CRED_SPECIFIED);
+		}
 
-		c->opt_kerberos = (krb5_state > CRED_USE_KERBEROS_DESIRED);
+		/* cli_credentials_get_ccache_name_obtained() would not work
+		 * here, we also cannot get the content of --use-krb5-ccache= so
+		 * for now at least honour the KRB5CCNAME environment variable
+		 * to get 'net ads kerberos' functions to work at all - gd */
 
-		gensec_features = cli_credentials_get_gensec_features(c->creds);
-		c->opt_ccache = (gensec_features & GENSEC_FEATURE_NTLM_CCACHE);
+		krb5ccname = getenv("KRB5CCNAME");
+		if (krb5ccname == NULL) {
+			krb5ccname = talloc_strdup(c, "MEMORY:net");
+		}
+		if (krb5ccname == NULL) {
+			exit(1);
+		}
+		c->opt_krb5_ccache = krb5ccname;
 	}
 
 	c->msg_ctx = cmdline_messaging_context(get_dyn_CONFIGFILE());
@@ -1353,7 +1456,7 @@ static struct functable net_func[] = {
 	}
 
 	if (c->opt_requester_name) {
-		lp_set_cmdline("netbios name", c->opt_requester_name);
+		lpcfg_set_cmdline(c->lp_ctx, "netbios name", c->opt_requester_name);
 	}
 
 	if (!c->opt_target_workgroup) {
@@ -1377,6 +1480,9 @@ static struct functable net_func[] = {
 	poptFreeContext(pc);
 
 	cmdline_messaging_context_free();
+
+	gfree_all();
+
 	TALLOC_FREE(frame);
 	return rc;
 }

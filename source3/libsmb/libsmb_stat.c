@@ -58,22 +58,22 @@ void setup_stat(struct stat *st,
 {
 	st->st_mode = 0;
 
-	if (IS_DOS_DIR(attr)) {
-		st->st_mode = SMBC_DIR_MODE;
+	if (attr & FILE_ATTRIBUTE_DIRECTORY) {
+		st->st_mode = (S_IFDIR | 0555);
 	} else {
-		st->st_mode = SMBC_FILE_MODE;
+		st->st_mode = (S_IFREG | 0444);
 	}
 
-	if (IS_DOS_ARCHIVE(attr)) {
+	if (attr & FILE_ATTRIBUTE_ARCHIVE) {
 		st->st_mode |= S_IXUSR;
 	}
-	if (IS_DOS_SYSTEM(attr)) {
+	if (attr & FILE_ATTRIBUTE_SYSTEM) {
 		st->st_mode |= S_IXGRP;
 	}
-	if (IS_DOS_HIDDEN(attr)) {
+	if (attr & FILE_ATTRIBUTE_HIDDEN) {
 		st->st_mode |= S_IXOTH;
 	}
-	if (!IS_DOS_READONLY(attr)) {
+	if (!(attr & FILE_ATTRIBUTE_READONLY)) {
 		st->st_mode |= S_IWUSR;
 	}
 
@@ -90,7 +90,7 @@ void setup_stat(struct stat *st,
 	st->st_uid = getuid();
 	st->st_gid = getgid();
 
-	if (IS_DOS_DIR(attr)) {
+	if (attr & FILE_ATTRIBUTE_DIRECTORY) {
 		st->st_nlink = 2;
 	} else {
 		st->st_nlink = 1;
@@ -112,48 +112,6 @@ void setup_stat(struct stat *st,
 
 	st->st_mtime = write_time_ts.tv_sec;
 	set_mtimensec(st, write_time_ts.tv_nsec);
-}
-
-void setup_stat_from_stat_ex(const struct stat_ex *stex,
-			     const char *fname,
-			     struct stat *st)
-{
-	st->st_atime = stex->st_ex_atime.tv_sec;
-	set_atimensec(st, stex->st_ex_atime.tv_nsec);
-
-	st->st_ctime = stex->st_ex_ctime.tv_sec;
-	set_ctimensec(st, stex->st_ex_ctime.tv_nsec);
-
-	st->st_mtime = stex->st_ex_mtime.tv_sec;
-	set_mtimensec(st, stex->st_ex_mtime.tv_nsec);
-
-	st->st_mode = stex->st_ex_mode;
-	st->st_size = stex->st_ex_size;
-#ifdef HAVE_STAT_ST_BLKSIZE
-	st->st_blksize = 512;
-#endif
-#ifdef HAVE_STAT_ST_BLOCKS
-	st->st_blocks = (st->st_size + 511) / 512;
-#endif
-#ifdef HAVE_STRUCT_STAT_ST_RDEV
-	st->st_rdev = 0;
-#endif
-	st->st_uid = stex->st_ex_uid;
-	st->st_gid = stex->st_ex_gid;
-
-	st->st_nlink = stex->st_ex_nlink;
-
-	if (stex->st_ex_ino == 0) {
-		st->st_ino = 0;
-		if (fname != NULL) {
-			st->st_ino = generate_inode(fname);
-		}
-	} else {
-		st->st_ino = stex->st_ex_ino;
-	}
-
-	st->st_dev = stex->st_ex_dev;
-
 }
 
 /*

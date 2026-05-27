@@ -6,9 +6,10 @@ Auth:
 	[success=end default=ignore]	pam_winbind.so krb5_auth krb5_ccache_type=FILE cached_login try_first_pass
 Auth-Initial:
 	[success=end default=ignore]	pam_winbind.so krb5_auth krb5_ccache_type=FILE cached_login
-Account-Type: Primary
+Account-Type: Additional
 Account:
-	[success=end new_authtok_reqd=done default=ignore]	pam_winbind.so
+	sufficient					pam_localuser.so
+	[default=bad success=ok user_unknown=ignore]	pam_winbind.so
 Password-Type: Primary
 Password:
 	[success=end default=ignore]	pam_winbind.so try_authtok try_first_pass

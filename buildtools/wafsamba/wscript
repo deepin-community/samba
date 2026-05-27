@@ -8,6 +8,13 @@ import wafsamba
 from samba_utils import symlink
 from optparse import SUPPRESS_HELP
 
+def get_libc_version():
+    import ctypes
+    libc = ctypes.CDLL("libc.so.6")
+    gnu_get_libc_version = libc.gnu_get_libc_version
+    gnu_get_libc_version.restype = ctypes.c_char_p
+    return gnu_get_libc_version().decode()
+
 phs = os.environ.get("PYTHONHASHSEED", None)
 if phs != "1":
     raise Errors.WafError('''PYTHONHASHSEED=1 missing! Don't use waf directly, use ./configure and make!''')
@@ -37,7 +44,7 @@ def options(opt):
                    help=(f'''comma separated list of bundled libraries.
 
 {Context.g_module.APPNAME} includes copies of externally maintained
-system libraries (such as popt, cmokca) as well as Samba-maintained
+system libraries (such as popt, cmocka) as well as Samba-maintained
 libraries that can be found on the system already (such as talloc,
 tdb).
 
@@ -63,9 +70,12 @@ This allows that to be disabled, to ensure that other software does
 not use these libraries and they are placed in a private filesystem
 prefix.
 
+Likewise, it allows the value of DEFAULT (currently {','.join(Context.g_module.DEFAULT_PRIVATE_LIBS) if getattr(Context.g_module, 'DEFAULT_PRIVATE_LIBS', False) else "''"})
+to be overridden, allowing a private-by-default library to be exposed.
+
 May include !LIBNAME to disable making a library private in order to
-limit the effect of 'ALL' '''),
-                   action="store", dest='PRIVATE_LIBS', default='')
+limit the effect of 'ALL' and 'DEFAULT'.'''),
+                   action="store", dest='PRIVATE_LIBS', default='DEFAULT')
 
     extension_default = default_value('PRIVATE_EXTENSION_DEFAULT')
     gr.add_option('--private-library-extension',
@@ -99,7 +109,7 @@ versions of libraries that we include match that found on the system,
 before we will select not to 'bundle'.
 
 This option, possibly useful for packagers, allows that specified
-version to be overridden (say, if it is absolutely known that a the
+version to be overridden (say, if it is absolutely known that the
 newer version included in this tarball has no relevant changes).
 
 Use this with extreme care
@@ -285,6 +295,9 @@ Currently the only tested value is 'smbtorture,smbd/smbd' for Samba'''),
     opt.add_option('--disable-python',
                     help='do not generate python modules',
                     action='store_true', dest='disable_python', default=False)
+    opt.add_option('--enable-rust',
+                   help='build rust modules',
+                   action='store_true', dest='enable_rust', default=False)
 
 
 @Utils.run_once
@@ -325,6 +338,10 @@ def configure(conf):
     conf.env.PRIVATELIBDIR = Options.options.PRIVATELIBDIR
     conf.env.BUNDLED_LIBS = Options.options.BUNDLED_LIBS.split(',')
     conf.env.SYSTEM_LIBS = ()
+
+    if getattr(Context.g_module, 'DEFAULT_PRIVATE_LIBS', False):
+        conf.env.DEFAULT_PRIVATE_LIBS = Context.g_module.DEFAULT_PRIVATE_LIBS
+
     conf.env.PRIVATE_LIBS = Options.options.PRIVATE_LIBS.split(',')
     conf.env.BUILTIN_LIBRARIES = Options.options.BUILTIN_LIBRARIES.split(',')
     conf.env.NONSHARED_BINARIES = Options.options.NONSHARED_BINARIES.split(',')
@@ -344,6 +361,13 @@ def configure(conf):
     conf.env.AUTOCONF_PROGRAM_PREFIX = Options.options.AUTOCONF_PROGRAM_PREFIX
 
     conf.env.disable_python = Options.options.disable_python
+    conf.env.enable_rust = Options.options.enable_rust
+    if Options.options.enable_rust:
+        glibc_vers = float('.'.join(get_libc_version().split('.')[:2]))
+        if glibc_vers < 2.32:
+            conf.fatal('--enable-rust cannot be specified with '
+                       'glibc version %s' % glibc_vers)
+        conf.DEFINE('HAVE_RUST', '1')
 
     if (conf.env.AUTOCONF_HOST and
         conf.env.AUTOCONF_BUILD and
@@ -539,7 +563,7 @@ def configure(conf):
         # conf.DEFINE('_XOPEN_SOURCE', 600, add_to_cflags=True)
 
     # we should use the PIC options in waf instead
-    # Some compilo didn't support -fPIC but just print a warning
+    # Some compiler didn't support -fPIC but just print a warning
     if conf.env['COMPILER_CC'] == "suncc":
         conf.ADD_CFLAGS('-KPIC', testflags=True)
         # we really want define here as we need to have this
@@ -552,7 +576,7 @@ def configure(conf):
 
     # On Solaris 8 with suncc (at least) the flags for the linker to define the name of the
     # library are not always working (if the command line is very very long and with a lot
-    # files)
+    # of files)
 
     if conf.env['COMPILER_CC'] == "suncc":
         save = conf.env['SONAME_ST']
@@ -615,7 +639,7 @@ struct foo bar = { .y = 'X', .x = 1 };
 
     # see if we need special largefile flags
     if not conf.CHECK_LARGEFILE():
-        raise Errors.WafError('Samba requires large file support support, but not available on this platform: sizeof(off_t) < 8')
+        raise Errors.WafError('Samba requires large file support, but not available on this platform: sizeof(off_t) < 8')
 
     if conf.env.HAVE_STDDEF_H and conf.env.HAVE_STDLIB_H:
         conf.DEFINE('STDC_HEADERS', 1)
@@ -632,7 +656,7 @@ struct foo bar = { .y = 'X', .x = 1 };
     else:
         conf.define('SHLIBEXT', "so", quote=True)
 
-    # First try a header check for cross-compile friendlyness
+    # First try a header check for cross-compile friendliness
     conf.CHECK_CODE(code = """#ifdef __BYTE_ORDER
                         #define B __BYTE_ORDER
                         #elif defined(BYTE_ORDER)

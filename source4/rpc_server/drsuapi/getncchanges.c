@@ -1,4 +1,4 @@
-/* 
+/*
    Unix SMB/CIFS implementation.
 
    implement the DSGetNCChanges call
@@ -11,12 +11,12 @@
    it under the terms of the GNU General Public License as published by
    the Free Software Foundation; either version 3 of the License, or
    (at your option) any later version.
-   
+
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
    GNU General Public License for more details.
-   
+
    You should have received a copy of the GNU General Public License
    along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
@@ -443,7 +443,7 @@ static WERROR get_nc_changes_filter_attrs(struct drsuapi_DsReplicaObjectListItem
 	return WERR_OK;
 }
 
-/* 
+/*
   drsuapi_DsGetNCChanges for one object
 */
 static WERROR get_nc_changes_build_object(struct drsuapi_DsReplicaObjectListItemEx *obj,
@@ -482,7 +482,7 @@ static WERROR get_nc_changes_build_object(struct drsuapi_DsReplicaObjectListItem
 	bool is_schema_nc = getnc_state->is_schema_nc;
 	uint64_t highest_usn = getnc_state->min_usn;
 
-	/* make dsdb sytanx context for conversions */
+	/* make dsdb syntax context for conversions */
 	dsdb_syntax_ctx_init(&syntax_ctx, sam_ctx, schema);
 	syntax_ctx.is_schema_nc = is_schema_nc;
 
@@ -698,7 +698,7 @@ static WERROR get_nc_changes_build_object(struct drsuapi_DsReplicaObjectListItem
 			}
 			/* some attributes needs to be encrypted
 			   before being sent */
-			werr = drsuapi_encrypt_attribute(obj, session_key, rid, 
+			werr = drsuapi_encrypt_attribute(obj, session_key, rid,
 							 &obj->object.attribute_ctr.attributes[i]);
 			if (!W_ERROR_IS_OK(werr)) {
 				DEBUG(0,("Unable to encrypt %s on %s in DRS object - %s\n",
@@ -761,7 +761,7 @@ static WERROR get_nc_changes_add_la(TALLOC_CTX *mem_ctx,
 		v = ldb_msg_find_attr_as_string(msg, "isDeleted", "FALSE");
 		if (strncmp(v, "TRUE", 4) == 0) {
 			/*
-			  * Note: we skip the transmition of the deleted link even if the other part used to
+			  * Note: we skip the transmission of the deleted link even if the other part used to
 			  * know about it because when we transmit the deletion of the object, the link will
 			  * be deleted too due to deletion of object where link points and Windows do so.
 			  */
@@ -769,7 +769,7 @@ static WERROR get_nc_changes_add_la(TALLOC_CTX *mem_ctx,
 				v = ldb_msg_find_attr_as_string(msg, "isRecycled", "FALSE");
 				/*
 				 * On Windows 2008R2 isRecycled is always present even if FL or DL are < FL 2K8R2
-				 * if it join an existing domain with deleted objets, it firsts impose to have a
+				 * if it join an existing domain with deleted objects, it firsts impose to have a
 				 * schema with the is-Recycled object and for all deleted objects it adds the isRecycled
 				 * either during initial replication or after the getNCChanges.
 				 * Behavior of samba has been changed to always have this attribute if it's present in the schema.
@@ -1026,8 +1026,7 @@ struct drsuapi_changed_objects {
   sort the objects we send by tree order (Samba 4.5 emulation)
  */
 static int site_res_cmp_anc_order(struct drsuapi_changed_objects *m1,
-				  struct drsuapi_changed_objects *m2,
-				  struct drsuapi_getncchanges_state *getnc_state)
+				  struct drsuapi_changed_objects *m2)
 {
 	return ldb_dn_compare(m2->dn, m1->dn);
 }
@@ -1036,8 +1035,7 @@ static int site_res_cmp_anc_order(struct drsuapi_changed_objects *m1,
   sort the objects we send first by uSNChanged
  */
 static int site_res_cmp_usn_order(struct drsuapi_changed_objects *m1,
-				  struct drsuapi_changed_objects *m2,
-				  struct drsuapi_getncchanges_state *getnc_state)
+				  struct drsuapi_changed_objects *m2)
 {
 	if (m1->usn == m2->usn) {
 		return ldb_dn_compare(m2->dn, m1->dn);
@@ -1264,7 +1262,7 @@ static WERROR getncchanges_repl_secret(struct drsuapi_bind_state *b_state,
 							&obj_dn,
 							NULL);
 	if (ret != LDB_SUCCESS) {
-		DBG_ERR("RevealSecretRequest for for invalid DN %s\n",
+		DBG_ERR("RevealSecretRequest for invalid DN %s\n",
 			 drs_ObjectIdentifier_to_debug_string(mem_ctx, ncRoot));
 		goto failed;
 	}
@@ -1794,7 +1792,7 @@ static WERROR getncchanges_collect_objects_exop(struct drsuapi_bind_state *b_sta
 						      collect_objects_attrs,
 						      NULL);
 		if (ret != LDB_SUCCESS) {
-			DEBUG(1, ("DRSUAPI_EXOP_FSMO_RID_ALLOC: Failed to get RID Manager object %s - %s",
+			DEBUG(1, ("DRSUAPI_EXOP_FSMO_RID_ALLOC: Failed to get RID Manager object %s - %s\n",
 				  ldb_dn_get_linearized(search_dn),
 				  ldb_errstring(b_state->sam_ctx)));
 			TALLOC_FREE(frame);
@@ -1802,7 +1800,7 @@ static WERROR getncchanges_collect_objects_exop(struct drsuapi_bind_state *b_sta
 		}
 
 		if ((*search_res)->count != 1) {
-			DEBUG(1, ("DRSUAPI_EXOP_FSMO_RID_ALLOC: Failed to get RID Manager object %s - %u objects returned",
+			DEBUG(1, ("DRSUAPI_EXOP_FSMO_RID_ALLOC: Failed to get RID Manager object %s - %u objects returned\n",
 				  ldb_dn_get_linearized(search_dn),
 				  (*search_res)->count));
 			TALLOC_FREE(frame);
@@ -1835,7 +1833,7 @@ static WERROR getncchanges_collect_objects_exop(struct drsuapi_bind_state *b_sta
 		ret = samdb_reference_dn(b_state->sam_ctx, frame, server_dn,
 					 "serverReference", &machine_dn);
 		if (ret != LDB_SUCCESS) {
-			DEBUG(1, ("DRSUAPI_EXOP_FSMO_RID_ALLOC: Failed to find serverReference in %s - %s",
+			DEBUG(1, ("DRSUAPI_EXOP_FSMO_RID_ALLOC: Failed to find serverReference in %s - %s\n",
 				  ldb_dn_get_linearized(server_dn),
 				  ldb_errstring(b_state->sam_ctx)));
 			TALLOC_FREE(frame);
@@ -1845,7 +1843,7 @@ static WERROR getncchanges_collect_objects_exop(struct drsuapi_bind_state *b_sta
 		ret = samdb_reference_dn(b_state->sam_ctx, frame, machine_dn,
 					 "rIDSetReferences", &rid_set_dn);
 		if (ret != LDB_SUCCESS) {
-			DEBUG(1, ("DRSUAPI_EXOP_FSMO_RID_ALLOC: Failed to find rIDSetReferences in %s - %s",
+			DEBUG(1, ("DRSUAPI_EXOP_FSMO_RID_ALLOC: Failed to find rIDSetReferences in %s - %s\n",
 				  ldb_dn_get_linearized(server_dn),
 				  ldb_errstring(b_state->sam_ctx)));
 			TALLOC_FREE(frame);
@@ -1860,7 +1858,7 @@ static WERROR getncchanges_collect_objects_exop(struct drsuapi_bind_state *b_sta
 						      collect_objects_attrs,
 						      NULL);
 		if (ret != LDB_SUCCESS) {
-			DEBUG(1, ("DRSUAPI_EXOP_FSMO_RID_ALLOC: Failed to get RID Set object %s - %s",
+			DEBUG(1, ("DRSUAPI_EXOP_FSMO_RID_ALLOC: Failed to get RID Set object %s - %s\n",
 				  ldb_dn_get_linearized(rid_set_dn),
 				  ldb_errstring(b_state->sam_ctx)));
 			TALLOC_FREE(frame);
@@ -1868,7 +1866,7 @@ static WERROR getncchanges_collect_objects_exop(struct drsuapi_bind_state *b_sta
 		}
 
 		if (search_res2->count != 1) {
-			DEBUG(1, ("DRSUAPI_EXOP_FSMO_RID_ALLOC: Failed to get RID Set object %s - %u objects returned",
+			DEBUG(1, ("DRSUAPI_EXOP_FSMO_RID_ALLOC: Failed to get RID Set object %s - %u objects returned\n",
 				  ldb_dn_get_linearized(rid_set_dn),
 				  search_res2->count));
 			TALLOC_FREE(frame);
@@ -1882,7 +1880,7 @@ static WERROR getncchanges_collect_objects_exop(struct drsuapi_bind_state *b_sta
 						      collect_objects_attrs,
 						      NULL);
 		if (ret != LDB_SUCCESS) {
-			DEBUG(1, ("DRSUAPI_EXOP_FSMO_RID_ALLOC: Failed to get server object %s - %s",
+			DEBUG(1, ("DRSUAPI_EXOP_FSMO_RID_ALLOC: Failed to get server object %s - %s\n",
 				  ldb_dn_get_linearized(server_dn),
 				  ldb_errstring(b_state->sam_ctx)));
 			TALLOC_FREE(frame);
@@ -1890,7 +1888,7 @@ static WERROR getncchanges_collect_objects_exop(struct drsuapi_bind_state *b_sta
 		}
 
 		if (search_res3->count != 1) {
-			DEBUG(1, ("DRSUAPI_EXOP_FSMO_RID_ALLOC: Failed to get server object %s - %u objects returned",
+			DEBUG(1, ("DRSUAPI_EXOP_FSMO_RID_ALLOC: Failed to get server object %s - %u objects returned\n",
 				  ldb_dn_get_linearized(server_dn),
 				  search_res3->count));
 			TALLOC_FREE(frame);
@@ -1945,7 +1943,7 @@ static void dcesrv_drsuapi_update_highwatermark(const struct ldb_message *msg,
 		 *
 		 * If this object has changed lately we better
 		 * let the destination dsa refetch the change.
-		 * This is better than the risk of loosing some
+		 * This is better than the risk of losing some
 		 * objects or linked attributes.
 		 */
 		return;
@@ -2048,7 +2046,7 @@ static WERROR getncchanges_get_sorted_array(const struct drsuapi_DsReplicaLinked
 	*ret_array = NULL;
 	guid_array = talloc_array(mem_ctx, struct la_for_sorting, link_count);
 	if (guid_array == NULL) {
-		DEBUG(0, ("Out of memory allocating %u linked attributes for sorting", link_count));
+		DEBUG(0, ("Out of memory allocating %u linked attributes for sorting\n", link_count));
 		return WERR_NOT_ENOUGH_MEMORY;
 	}
 
@@ -2599,7 +2597,7 @@ static WERROR getncchanges_chunk_add_la_targets(struct getncchanges_repl_chunk *
 		 * This could happen for a one-way linked attribute, if the
 		 * target is deleted and then later expunged (thus, the source
 		 * object can be left with a hanging link). Continue to send
-		 * the the link (the client-side has already tried once with
+		 * the link (the client-side has already tried once with
 		 * GET_TGT, so it should just end up ignoring it).
 		 */
 		if (ret == LDB_ERR_NO_SUCH_OBJECT) {
@@ -2762,7 +2760,7 @@ WERROR dcesrv_drsuapi_DsGetNCChanges(struct dcesrv_call_state *dce_call, TALLOC_
 	r->out.ctr->ctr6.source_dsa_invocation_id = *(samdb_ntds_invocation_id(sam_ctx));
 	r->out.ctr->ctr6.first_object = NULL;
 
-	/* Check request revision. 
+	/* Check request revision.
 	 */
 	switch (r->in.level) {
 	case 8:
@@ -2955,7 +2953,7 @@ allowed:
 	}
 
 	if (req10->replica_flags & DRSUAPI_DRS_FULL_SYNC_PACKET) {
-		/* Ignore the _in_ uptpdateness vector*/
+		/* Ignore the _in_ uptodateness vector*/
 		req10->uptodateness_vector = NULL;
 	}
 
@@ -3031,13 +3029,67 @@ allowed:
 		ret = drsuapi_DsReplicaHighWaterMark_cmp(&getnc_state->last_hwm,
 							 &req10->highwatermark);
 		if (ret != 0) {
-			DEBUG(0,(__location__ ": DsGetNCChanges 2nd replication "
-				 "on DN %s %s highwatermark (last_dn %s)\n",
-				 ldb_dn_get_linearized(getnc_state->ncRoot_dn),
-				 (ret > 0) ? "older" : "newer",
-				 ldb_dn_get_linearized(getnc_state->last_dn)));
-			TALLOC_FREE(getnc_state);
-			b_state->getncchanges_full_repl_state = NULL;
+			if (req10->highwatermark.reserved_usn == 0) {
+				/*
+				 * Entra ID Connect / Azure AD is known to set
+				 * reserved_usn to zero in replies, when we
+				 * were expecting it to be returned unchanged
+				 * (it is supposed to be an opaque cookie).
+				 *
+				 * If the only difference is in the
+				 * reserved_usn, and it is 0 on the return, we
+				 * assume it is Azure AD and treat the
+				 * highwatermarks as equal.
+				 */
+				req10->highwatermark.reserved_usn =
+					getnc_state->last_hwm.reserved_usn;
+
+				ret = drsuapi_DsReplicaHighWaterMark_cmp(
+					&getnc_state->last_hwm,
+					&req10->highwatermark);
+
+				/* put things as they were */
+				req10->highwatermark.reserved_usn = 0;
+
+				if (ret != 0) {
+					/* we will start again */
+					DBG_ERR("DsGetNCChanges 2nd replication "
+						"on DN %s %s highwatermark "
+						"(last_dn %s) after Azure AD "
+						"reserved_usn adjustment\n",
+						ldb_dn_get_linearized(
+							getnc_state->ncRoot_dn),
+						(ret > 0) ? "older" : "newer",
+						ldb_dn_get_linearized(
+							getnc_state->last_dn));
+					TALLOC_FREE(getnc_state);
+					b_state->getncchanges_full_repl_state =
+						NULL;
+				} else {
+					/* log and continue as normal */
+					DBG_NOTICE(
+						"DsGetNCChanges 2nd replication "
+						"on DN %s: highwatermark "
+						"matches only after Azure AD "
+						"reserved_usn adjustment "
+						"(last_dn %s)\n",
+						ldb_dn_get_linearized(
+							getnc_state->ncRoot_dn),
+						ldb_dn_get_linearized(
+							getnc_state->last_dn));
+				}
+			} else {
+				DBG_ERR("DsGetNCChanges 2nd replication "
+					"on DN %s %s highwatermark "
+					"(last_dn %s)\n",
+					ldb_dn_get_linearized(
+						getnc_state->ncRoot_dn),
+					(ret > 0) ? "older" : "newer",
+					ldb_dn_get_linearized(
+						getnc_state->last_dn));
+				TALLOC_FREE(getnc_state);
+				b_state->getncchanges_full_repl_state = NULL;
+			}
 		}
 	}
 
@@ -3098,7 +3150,7 @@ allowed:
 					= ldb_dn_get_linearized(ncRoot_dn);
 
 				DBG_NOTICE("Rejecting full replication on "
-					   "not NC %s", dn_str);
+					   "not NC %s\n", dn_str);
 
 				return WERR_DS_CANT_FIND_EXPECTED_NC;
 			}
@@ -3203,7 +3255,7 @@ allowed:
 		return WERR_DS_DRA_INTERNAL_ERROR;
 	}
 
-	/* 
+	/*
 	   TODO: MS-DRSR section 4.1.10.1.1
 	   Work out if this is the start of a new cycle */
 
@@ -3322,15 +3374,13 @@ allowed:
 		if (req10->extended_op == DRSUAPI_EXOP_FSMO_RID_ALLOC) {
 			/* Do nothing */
 		} else if (getnc_state->broken_samba_4_5_get_anc_emulation) {
-			LDB_TYPESAFE_QSORT(changes,
-					   getnc_state->num_records,
-					   getnc_state,
-					   site_res_cmp_anc_order);
+			TYPESAFE_QSORT(changes,
+				       getnc_state->num_records,
+				       site_res_cmp_anc_order);
 		} else {
-			LDB_TYPESAFE_QSORT(changes,
-					   getnc_state->num_records,
-					   getnc_state,
-					   site_res_cmp_usn_order);
+			TYPESAFE_QSORT(changes,
+				       getnc_state->num_records,
+				       site_res_cmp_usn_order);
 		}
 
 		for (i=0; i < getnc_state->num_records; i++) {
@@ -3747,7 +3797,7 @@ allowed:
 		r->out.ctr->ctr6.linked_attributes_count = link_count;
 		r->out.ctr->ctr6.linked_attributes = talloc_array(r->out.ctr, struct drsuapi_DsReplicaLinkedAttribute, link_count);
 		if (r->out.ctr->ctr6.linked_attributes == NULL) {
-			DEBUG(0, ("Out of memory allocating %u linked attributes for output", link_count));
+			DEBUG(0, ("Out of memory allocating %u linked attributes for output\n", link_count));
 			return WERR_NOT_ENOUGH_MEMORY;
 		}
 
@@ -3824,7 +3874,7 @@ allowed:
 			 * We need to make sure that we never return the
 			 * same highwatermark within the same replication
 			 * cycle more than once. Otherwise we cannot detect
-			 * when the client uses an unexptected highwatermark.
+			 * when the client uses an unexpected highwatermark.
 			 *
 			 * This is a HACK which is needed because our
 			 * object ordering is wrong and set tmp_highest_usn
@@ -3858,4 +3908,3 @@ allowed:
 
 	return WERR_OK;
 }
-

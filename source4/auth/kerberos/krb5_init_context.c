@@ -305,7 +305,7 @@ static krb5_error_code smb_krb5_send_and_recv_func_int(struct smb_krb5_context *
 		 * from the start (otherwise we may miss a socket
 		 * drop) and mark as AUTOCLOSE along with the fde */
 
-		/* Ths is equivilant to EVENT_FD_READABLE(smb_krb5->fde) */
+		/* This is equivalent to EVENT_FD_READABLE(smb_krb5->fde) */
 		smb_krb5->fde = tevent_add_fd(ev, smb_krb5->sock,
 					      socket_get_fd(smb_krb5->sock),
 					      TEVENT_FD_READ,
@@ -492,16 +492,12 @@ struct smb_krb5_send_to_kdc_state {
 static int smb_krb5_send_to_kdc_state_destructor(struct smb_krb5_send_to_kdc_state *state)
 {
 	TDB_DATA key = make_tdb_data((uint8_t *)&state->key_ptr, sizeof(state->key_ptr));
-	struct db_record *rec = NULL;
 	NTSTATUS status;
 
-	rec = dbwrap_fetch_locked(smb_krb5_plugin_db, state, key);
-	if (rec == NULL) {
-		return 0;
+	status = dbwrap_delete(smb_krb5_plugin_db, key);
+	if (NT_STATUS_EQUAL(status, NT_STATUS_NOT_FOUND)) {
+		status = NT_STATUS_OK;
 	}
-
-	status = dbwrap_record_delete(rec);
-	TALLOC_FREE(rec);
 	if (!NT_STATUS_IS_OK(status)) {
 		return -1;
 	}

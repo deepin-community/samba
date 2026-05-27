@@ -3,7 +3,7 @@
 
    test suite for SMB2 ioctl operations
 
-   Copyright (C) David Disseldorp 2011-2016
+   Copyright (C) David Disseldorp 2011-2024
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -3240,7 +3240,7 @@ static NTSTATUS test_sparse_get(struct torture_context *torture,
 
 /*
  * Manually test setting and clearing sparse flag. Intended for file system
- * specifc tests to toggle the flag through SMB and check the status in the
+ * specific tests to toggle the flag through SMB and check the status in the
  * file system.
  */
 bool test_ioctl_set_sparse(struct torture_context *tctx)
@@ -3835,6 +3835,151 @@ static bool test_ioctl_sparse_qar_malformed(struct torture_context *torture,
 	torture_assert_ntstatus_equal(torture, status,
 				      NT_STATUS_INVALID_PARAMETER, "qar empty");
 
+	return true;
+}
+
+static bool test_ioctl_sparse_qar_truncated(struct torture_context *torture,
+					    struct smb2_tree *tree)
+{
+	struct smb2_handle fh;
+	union smb_ioctl ioctl;
+	struct file_alloced_range_buf far_buf;
+	NTSTATUS status;
+	enum ndr_err_code ndr_ret;
+	TALLOC_CTX *tmp_ctx = talloc_new(tree);
+	bool ok;
+	struct file_alloced_range_buf far_rsp;
+
+	ok = test_setup_create_fill(torture, tree, tmp_ctx,
+				    FNAME, &fh, 0, SEC_RIGHTS_FILE_ALL,
+				    FILE_ATTRIBUTE_NORMAL);
+	torture_assert(torture, ok, "setup file");
+
+	status = test_ioctl_fs_supported(torture, tree, tmp_ctx, &fh,
+					 FILE_SUPPORTS_SPARSE_FILES, &ok);
+	torture_assert_ntstatus_ok(torture, status, "SMB2_GETINFO_FS");
+	if (!ok) {
+		smb2_util_close(tree, fh);
+		torture_skip(torture, "Sparse files not supported\n");
+	}
+
+	status = test_ioctl_sparse_req(torture, tmp_ctx, tree, fh, true);
+	torture_assert_ntstatus_ok(torture, status, "FSCTL_SET_SPARSE");
+
+	/*
+	 * Write 0 and 1M offsets as (hopefully) two separate extents.
+	 * XXX this test assumes that these ranges will be recorded as separate
+	 * FSCTL_QUERY_ALLOCATED_RANGES extents, which isn't strictly required:
+	 * the spec basically says the FS can do what it wants as long as
+	 * non-zeroed data ranges aren't reported as sparse holes.
+	 */
+	ok = write_pattern(torture, tree, tmp_ctx, fh,
+			   0,		/* off */
+			   1024,	/* len */
+			   0);		/* pattern offset */
+	torture_assert(torture, ok, "write pattern");
+	ok = write_pattern(torture, tree, tmp_ctx, fh,
+			   1024 * 1024,	/* off */
+			   1024,	/* len */
+			   0);		/* pattern offset */
+	torture_assert(torture, ok, "write pattern");
+
+	/* qar max output enough to carry one range, should be truncated */
+	ZERO_STRUCT(ioctl);
+	ioctl.smb2.level = RAW_IOCTL_SMB2;
+	ioctl.smb2.in.file.handle = fh;
+	ioctl.smb2.in.function = FSCTL_QUERY_ALLOCATED_RANGES;
+	ioctl.smb2.in.max_output_response = sizeof(struct file_alloced_range_buf);
+	ioctl.smb2.in.flags = SMB2_IOCTL_FLAG_IS_FSCTL;
+
+	far_buf.file_off = 0;
+	far_buf.len = 2048 * 1024;
+	ndr_ret = ndr_push_struct_blob(&ioctl.smb2.in.out, tmp_ctx,
+				       &far_buf,
+			(ndr_push_flags_fn_t)ndr_push_file_alloced_range_buf);
+	torture_assert_ndr_success(torture, ndr_ret, "push far ndr buf");
+
+	status = smb2_ioctl(tree, tmp_ctx, &ioctl.smb2);
+	torture_assert_ntstatus_equal(torture, status,
+				      STATUS_BUFFER_OVERFLOW, "qar truncated");
+	torture_assert_size_equal(torture,
+				  ioctl.smb2.out.out.length, sizeof(far_buf),
+				  "qar outlen");
+	ndr_ret = ndr_pull_struct_blob(&ioctl.smb2.out.out, tmp_ctx,
+				       &far_rsp,
+			(ndr_pull_flags_fn_t)ndr_pull_file_alloced_range_buf);
+	torture_assert_ndr_success(torture, ndr_ret, "pull far range");
+	torture_assert_u64_equal(torture, far_rsp.file_off, 0, "far offset");
+	/* length depends on allocation behaviour of FS, so allow range */
+	torture_assert(torture, far_rsp.len >= 1024, "far len");
+
+	/* qar max output for just under 2 ranges, should be truncated */
+	ZERO_STRUCT(ioctl);
+	ioctl.smb2.level = RAW_IOCTL_SMB2;
+	ioctl.smb2.in.file.handle = fh;
+	ioctl.smb2.in.function = FSCTL_QUERY_ALLOCATED_RANGES;
+	ioctl.smb2.in.max_output_response = 31;
+	ioctl.smb2.in.flags = SMB2_IOCTL_FLAG_IS_FSCTL;
+
+	far_buf.file_off = 0;
+	far_buf.len = 2048 * 1024;
+	ndr_ret = ndr_push_struct_blob(&ioctl.smb2.in.out, tmp_ctx,
+				       &far_buf,
+			(ndr_push_flags_fn_t)ndr_push_file_alloced_range_buf);
+	torture_assert_ndr_success(torture, ndr_ret, "push far ndr buf");
+
+	status = smb2_ioctl(tree, tmp_ctx, &ioctl.smb2);
+	torture_assert_ntstatus_equal(torture, status,
+				      STATUS_BUFFER_OVERFLOW, "qar truncated");
+	torture_assert_size_equal(torture,
+				  ioctl.smb2.out.out.length, sizeof(far_buf),
+				  "qar outlen");
+	ndr_ret = ndr_pull_struct_blob(&ioctl.smb2.out.out, tmp_ctx,
+				       &far_rsp,
+			(ndr_pull_flags_fn_t)ndr_pull_file_alloced_range_buf);
+	torture_assert_ndr_success(torture, ndr_ret, "pull far range");
+	torture_assert_u64_equal(torture, far_rsp.file_off, 0, "far offset");
+	torture_assert(torture, far_rsp.len >= 1024, "far len");
+
+	/* qar max output for 2 ranges, should pass */
+	ZERO_STRUCT(ioctl);
+	ioctl.smb2.level = RAW_IOCTL_SMB2;
+	ioctl.smb2.in.file.handle = fh;
+	ioctl.smb2.in.function = FSCTL_QUERY_ALLOCATED_RANGES;
+	ioctl.smb2.in.max_output_response = 32;
+	ioctl.smb2.in.flags = SMB2_IOCTL_FLAG_IS_FSCTL;
+
+	far_buf.file_off = 0;
+	far_buf.len = 2048 * 1024;
+	ndr_ret = ndr_push_struct_blob(&ioctl.smb2.in.out, tmp_ctx,
+				       &far_buf,
+			(ndr_push_flags_fn_t)ndr_push_file_alloced_range_buf);
+	torture_assert_ndr_success(torture, ndr_ret, "push far ndr buf");
+
+	status = smb2_ioctl(tree, tmp_ctx, &ioctl.smb2);
+	torture_assert_ntstatus_ok(torture, status, "qar non-truncated");
+	torture_assert_size_equal(torture,
+				  ioctl.smb2.out.out.length,
+				  2 * sizeof(far_buf), "qar outlen");
+	ndr_ret = ndr_pull_struct_blob(&ioctl.smb2.out.out, tmp_ctx,
+				       &far_rsp,
+			(ndr_pull_flags_fn_t)ndr_pull_file_alloced_range_buf);
+	torture_assert_ndr_success(torture, ndr_ret, "pull far range");
+	torture_assert_u64_equal(torture, far_rsp.file_off, 0, "far offset");
+	torture_assert(torture, far_rsp.len >= 1024, "far len");
+	/* move to next buffer */
+	ioctl.smb2.out.out.data += sizeof(far_buf);
+	ioctl.smb2.out.out.length -= sizeof(far_buf);
+	ndr_ret = ndr_pull_struct_blob(&ioctl.smb2.out.out, tmp_ctx,
+				       &far_rsp,
+			(ndr_pull_flags_fn_t)ndr_pull_file_alloced_range_buf);
+	torture_assert_ndr_success(torture, ndr_ret, "pull far range");
+	torture_assert_u64_equal(torture, far_rsp.file_off, 1024 * 1024,
+				 "far offset");
+	torture_assert(torture, far_rsp.len >= 1024, "far len");
+
+	smb2_util_close(tree, fh);
+	talloc_free(tmp_ctx);
 	return true;
 }
 
@@ -5609,7 +5754,7 @@ static bool test_ioctl_trim_simple(struct torture_context *torture,
 
 	torture_assert_int_equal(torture, trim_rsp.num_ranges_processed, 1, "");
 
-	/* second half of the file should remain consitent */
+	/* second half of the file should remain consistent */
 	ok = check_pattern(torture, tree, tmp_ctx, fh, trim_chunk_len,
 			   trim_chunk_len, trim_chunk_len);
 	torture_assert(torture, ok, "non-trimmed range inconsistent");
@@ -7389,6 +7534,68 @@ static bool test_ioctl_bug14788_NETWORK_INTERFACE(struct torture_context *tortur
 }
 
 /*
+ * basic regression test for BUG 15664
+ * https://bugzilla.samba.org/show_bug.cgi?id=15664
+ */
+static bool test_ioctl_copy_chunk_bug15644(struct torture_context *torture,
+					   struct smb2_tree *tree)
+{
+	struct smb2_handle dest_h;
+	NTSTATUS status;
+	union smb_ioctl ioctl;
+	TALLOC_CTX *tmp_ctx = talloc_new(tree);
+	struct srv_copychunk chunk;
+	struct srv_copychunk_copy cc_copy;
+	enum ndr_err_code ndr_ret;
+	bool ok;
+
+	ok = test_setup_create_fill(torture,
+				    tree,
+				    tmp_ctx,
+				    FNAME2,
+				    &dest_h,
+				    0,
+				    SEC_RIGHTS_FILE_ALL,
+				    FILE_ATTRIBUTE_NORMAL);
+	torture_assert(torture, ok, "dest file create fill");
+
+	ZERO_STRUCT(ioctl);
+	ioctl.smb2.level = RAW_IOCTL_SMB2;
+	ioctl.smb2.in.file.handle = dest_h;
+	ioctl.smb2.in.function = FSCTL_SRV_COPYCHUNK;
+	ioctl.smb2.in.max_output_response = sizeof(struct srv_copychunk_rsp);
+	ioctl.smb2.in.flags = SMB2_IOCTL_FLAG_IS_FSCTL;
+
+	ZERO_STRUCT(chunk);
+	ZERO_STRUCT(cc_copy);
+	/* overwrite the resume key with a bogus value */
+	memcpy(cc_copy.source_key, "deadbeefdeadbeefdeadbeef", 24);
+	cc_copy.chunk_count = 1;
+	cc_copy.chunks = &chunk;
+	cc_copy.chunks[0].source_off = 0;
+	cc_copy.chunks[0].target_off = 0;
+	cc_copy.chunks[0].length = 4096;
+
+	ndr_ret = ndr_push_struct_blob(&ioctl.smb2.in.out, tmp_ctx,
+				       &cc_copy,
+			(ndr_push_flags_fn_t)ndr_push_srv_copychunk_copy);
+	torture_assert_ndr_success(torture, ndr_ret,
+				   "ndr_push_srv_copychunk_copy");
+
+	/* Server 2k12 returns NT_STATUS_OBJECT_NAME_NOT_FOUND */
+	status = smb2_ioctl(tree, tmp_ctx, &ioctl.smb2);
+	torture_assert_ntstatus_equal(torture, status,
+				      NT_STATUS_OBJECT_NAME_NOT_FOUND,
+				      "FSCTL_SRV_COPYCHUNK");
+
+	status = smb2_util_close(tree, dest_h);
+	torture_assert_ntstatus_ok(torture, status, "close");
+
+	talloc_free(tmp_ctx);
+	return true;
+}
+
+/*
  * testing of SMB2 ioctls
  */
 struct torture_suite *torture_smb2_ioctl_init(TALLOC_CTX *ctx)
@@ -7420,6 +7627,8 @@ struct torture_suite *torture_smb2_ioctl_init(TALLOC_CTX *ctx)
 				     test_ioctl_copy_chunk_dest_lck);
 	torture_suite_add_1smb2_test(suite, "copy_chunk_bad_key",
 				     test_ioctl_copy_chunk_bad_key);
+	torture_suite_add_1smb2_test(suite, "copy_chunk_bug15644",
+				     test_ioctl_copy_chunk_bug15644);
 	torture_suite_add_1smb2_test(suite, "copy_chunk_src_is_dest",
 				     test_ioctl_copy_chunk_src_is_dest);
 	torture_suite_add_1smb2_test(suite, "copy_chunk_src_is_dest_overlap",
@@ -7484,6 +7693,8 @@ struct torture_suite *torture_smb2_ioctl_init(TALLOC_CTX *ctx)
 				     test_ioctl_sparse_qar);
 	torture_suite_add_1smb2_test(suite, "sparse_qar_malformed",
 				     test_ioctl_sparse_qar_malformed);
+	torture_suite_add_1smb2_test(suite, "sparse_qar_truncated",
+				     test_ioctl_sparse_qar_truncated);
 	torture_suite_add_1smb2_test(suite, "sparse_punch",
 				     test_ioctl_sparse_punch);
 	torture_suite_add_1smb2_test(suite, "sparse_hole_dealloc",

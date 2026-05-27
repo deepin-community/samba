@@ -397,7 +397,7 @@ def configure(conf):
                     msg='Checking for fallthrough attribute')
 
     # these may be builtins, so we need the link=False strategy
-    conf.CHECK_FUNCS('strdup memmem printf memset memcpy memmove strcpy strncpy bzero', link=False)
+    conf.CHECK_FUNCS('strdup memmem printf memcpy memmove strcpy strncpy', link=False)
 
     # See https://bugzilla.samba.org/show_bug.cgi?id=1097
     #
@@ -422,7 +422,7 @@ def configure(conf):
     conf.CHECK_FUNCS('link readlink symlink realpath snprintf vsnprintf')
     conf.CHECK_FUNCS('asprintf vasprintf setenv unsetenv strnlen strtoull __strtoull')
     conf.CHECK_FUNCS('strtouq strtoll __strtoll strtoq memalign posix_memalign')
-    conf.CHECK_FUNCS('fmemopen')
+    conf.CHECK_FUNCS('fmemopen renameat2')
 
     if conf.CONFIG_SET('HAVE_MEMALIGN'):
         conf.CHECK_DECLS('memalign', headers='malloc.h')
@@ -448,6 +448,17 @@ def configure(conf):
         if conf.CHECK_FUNCS_IN('strlcpy strlcat', 'bsd', headers='bsd/string.h',
                                checklibc=True):
             strlcpy_in_bsd = True
+    elif conf.env.enable_fuzzing:
+        # Just to complicate it more, some versions of Honggfuzz have
+        # got strlcpy and strlcat in libc, but not in <string.h>
+        # (unless it is there coincidentally, on a BSD). Therefore we
+        # can't use CHECK_FUNCS alone to decide whether to add the
+        # headers to replace.h.
+        #
+        # As this is only known to happen on a fuzzing compiler, we'll
+        # skip the check when not in fuzzing mode.
+        conf.CHECK_HEADERS('bsd/string.h')
+
     if not conf.CHECK_FUNCS('getpeereid'):
         conf.CHECK_FUNCS_IN('getpeereid', 'bsd', headers='sys/types.h bsd/unistd.h')
     if not conf.CHECK_FUNCS_IN('setproctitle', 'setproctitle', headers='setproctitle.h'):

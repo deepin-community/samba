@@ -249,6 +249,26 @@ void update_stat_ex_from_saved_stat(struct stat_ex *dst,
 	}
 }
 
+void copy_stat_ex_timestamps(struct stat_ex *st,
+			     const struct smb_file_time *ft)
+{
+	if (!is_omit_timespec(&ft->atime)) {
+		st->st_ex_atime = ft->atime;
+	}
+
+	if (!is_omit_timespec(&ft->create_time)) {
+		st->st_ex_btime = ft->create_time;
+	}
+
+	if (!is_omit_timespec(&ft->ctime)) {
+		st->st_ex_ctime = ft->ctime;
+	}
+
+	if (!is_omit_timespec(&ft->mtime)) {
+		st->st_ex_mtime = ft->mtime;
+	}
+}
+
 void init_stat_ex_from_stat (struct stat_ex *dst,
 			    const struct stat *src,
 			    bool fake_dir_create_times)
@@ -628,11 +648,14 @@ static bool set_process_capability(enum smbd_capability capability,
 	cap_set_flag(cap, CAP_INHERITABLE, num_cap_vals, cap_vals, CAP_CLEAR);
 
 	if (cap_set_proc(cap) == -1) {
-		DEBUG(0, ("set_process_capability: cap_set_proc failed: %s\n",
-			strerror(errno)));
+		DBG_ERR("%s capability %d: cap_set_proc failed: %s\n",
+			enable ? "adding" : "dropping",
+			capability, strerror(errno));
 		cap_free(cap);
 		return False;
 	}
+	DBG_INFO("%s capability %d\n",
+		 enable ? "added" : "dropped", capability);
 
 	cap_free(cap);
 	return True;
@@ -1044,22 +1067,10 @@ int sys_get_number_of_cores(void)
 }
 #endif
 
-static struct proc_fd_pattern {
-	const char *pattern;
-	const char *test_path;
-} proc_fd_patterns[] = {
-	/* Linux */
-	{ "/proc/self/fd/%d", "/proc/self/fd/0" },
-	{ NULL, NULL },
-};
-
-static const char *proc_fd_pattern;
-
 bool sys_have_proc_fds(void)
 {
-	static bool checked;
-	static bool have_proc_fds;
-	struct proc_fd_pattern *p = NULL;
+	static bool checked = false;
+	static bool have_proc_fds = false;
 	struct stat sb;
 	int ret;
 
@@ -1067,42 +1078,19 @@ bool sys_have_proc_fds(void)
 		return have_proc_fds;
 	}
 
-	for (p = &proc_fd_patterns[0]; p->test_path != NULL; p++) {
-		ret = stat(p->test_path, &sb);
-		if (ret != 0) {
-			continue;
-		}
-		have_proc_fds = true;
-		proc_fd_pattern = p->pattern;
-		break;
-	}
-
+	ret = stat("/proc/self/fd/0", &sb);
+	have_proc_fds = (ret == 0);
 	checked = true;
+
 	return have_proc_fds;
 }
 
-const char *sys_proc_fd_path(int fd, char *buf, size_t bufsize)
+char *sys_proc_fd_path(int fd, struct sys_proc_fd_path_buf *buf)
 {
-	int written;
+	int written =
+		snprintf(buf->buf, sizeof(buf->buf), "/proc/self/fd/%d", fd);
 
-	if (!sys_have_proc_fds()) {
-		return NULL;
-	}
+	SMB_ASSERT(sys_have_proc_fds() && (written >= 0));
 
-#if defined(__clang__)
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wformat-nonliteral"
-#endif
-	written = snprintf(buf,
-			   bufsize,
-			   proc_fd_pattern,
-			   fd);
-#if defined(__clang__)
-#pragma clang diagnostic pop
-#endif
-	if (written >= bufsize) {
-		return NULL;
-	}
-
-	return buf;
+	return buf->buf;
 }

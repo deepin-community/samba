@@ -374,13 +374,13 @@ static void dns_tcp_call_loop(struct tevent_req *subreq)
 
 	/*
 	 * The dns tcp pdu's has the length as 2 byte (initial_read_size),
-	 * packet_full_request_u16 provides the pdu length then.
+	 * tstream_full_request_u16 provides the pdu length then.
 	 */
 	subreq = tstream_read_pdu_blob_send(dns_conn,
 					    dns_conn->conn->event.ctx,
 					    dns_conn->tstream,
 					    2, /* initial_read_size */
-					    packet_full_request_u16,
+					    tstream_full_request_u16,
 					    dns_conn);
 	if (subreq == NULL) {
 		dns_tcp_terminate_connection(dns_conn, "dns_tcp_call_loop: "
@@ -491,6 +491,8 @@ static void dns_tcp_accept(struct stream_connection *conn)
 				"dns_tcp_accept: out of memory");
 		return;
 	}
+	/* as server we want to fail early */
+	tstream_bsd_fail_readv_first_error(dns_conn->tstream, true);
 
 	dns_conn->conn = conn;
 	dns_conn->dns_socket = dns_socket;
@@ -498,13 +500,13 @@ static void dns_tcp_accept(struct stream_connection *conn)
 
 	/*
 	 * The dns tcp pdu's has the length as 2 byte (initial_read_size),
-	 * packet_full_request_u16 provides the pdu length then.
+	 * tstream_full_request_u16 provides the pdu length then.
 	 */
 	subreq = tstream_read_pdu_blob_send(dns_conn,
 					    dns_conn->conn->event.ctx,
 					    dns_conn->tstream,
 					    2, /* initial_read_size */
-					    packet_full_request_u16,
+					    tstream_full_request_u16,
 					    dns_conn);
 	if (subreq == NULL) {
 		dns_tcp_terminate_connection(dns_conn, "dns_tcp_accept: "
@@ -820,7 +822,7 @@ static NTSTATUS dns_task_init(struct task_server *task)
 	int ret;
 	static const char * const attrs_none[] = { NULL};
 	struct ldb_message *dns_acc;
-	char *hostname_lower;
+	const char *dns_hostname = NULL;
 	char *dns_spn;
 	bool ok;
 
@@ -880,11 +882,14 @@ static NTSTATUS dns_task_init(struct task_server *task)
 		return NT_STATUS_UNSUCCESSFUL;
 	}
 
-	hostname_lower = strlower_talloc(dns, lpcfg_netbios_name(task->lp_ctx));
-	dns_spn = talloc_asprintf(dns, "DNS/%s.%s",
-				  hostname_lower,
-				  lpcfg_dnsdomain(task->lp_ctx));
-	TALLOC_FREE(hostname_lower);
+	dns_hostname = lpcfg_dns_hostname(task->lp_ctx);
+	if (dns_hostname == NULL) {
+		return NT_STATUS_NO_MEMORY;
+	}
+	dns_spn = talloc_asprintf(dns, "DNS/%s", dns_hostname);
+	if (dns_spn == NULL) {
+		return NT_STATUS_NO_MEMORY;
+	}
 
 	ret = dsdb_search_one(dns->samdb, dns, &dns_acc,
 			      ldb_get_default_basedn(dns->samdb), LDB_SCOPE_SUBTREE,

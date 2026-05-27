@@ -1226,7 +1226,7 @@ decrypt_internal_derived(krb5_context context,
     if (len < checksum_sz + et->confoundersize) {
 	krb5_set_error_message(context, KRB5_BAD_MSIZE,
 			       N_("Encrypted data shorter then "
-				  "checksum + confunder", ""));
+				  "checksum + confounder", ""));
 	return KRB5_BAD_MSIZE;
     }
 
@@ -1301,7 +1301,7 @@ decrypt_internal_enc_then_cksum(krb5_context context,
     if (len < checksum_sz + et->confoundersize) {
 	krb5_set_error_message(context, KRB5_BAD_MSIZE,
 			       N_("Encrypted data shorter then "
-				  "checksum + confunder", ""));
+				  "checksum + confounder", ""));
 	return KRB5_BAD_MSIZE;
     }
 
@@ -1383,7 +1383,7 @@ decrypt_internal(krb5_context context,
     if (len < checksum_sz + et->confoundersize) {
 	krb5_set_error_message(context, KRB5_BAD_MSIZE,
 			       N_("Encrypted data shorter then "
-				  "checksum + confunder", ""));
+				  "checksum + confounder", ""));
 	return KRB5_BAD_MSIZE;
     }
 
@@ -1445,7 +1445,7 @@ decrypt_internal_special(krb5_context context,
     if (len < cksum_sz + et->confoundersize) {
 	krb5_set_error_message(context, KRB5_BAD_MSIZE,
 			       N_("Encrypted data shorter then "
-				  "checksum + confunder", ""));
+				  "checksum + confounder", ""));
 	return KRB5_BAD_MSIZE;
     }
 
@@ -3120,8 +3120,8 @@ krb5_crypto_prfplus(krb5_context context,
  * @param context Kerberos 5 context
  * @param crypto1 first key to combine
  * @param crypto2 second key to combine
- * @param pepper1 factor to combine with first key to garante uniqueness
- * @param pepper2 factor to combine with second key to garante uniqueness
+ * @param pepper1 factor to combine with first key to guarantee uniqueness
+ * @param pepper2 factor to combine with second key to guarantee uniqueness
  * @param enctype the encryption type of the resulting key
  * @param res allocated key, free with krb5_free_keyblock_contents()
  *
@@ -3184,7 +3184,7 @@ _krb5_crypto_set_flags(krb5_context context,
 #ifndef HEIMDAL_SMALLER
 
 /**
- * Deprecated: keytypes doesn't exists, they are really enctypes.
+ * Deprecated: keytypes don't exist, they are really enctypes.
  *
  * @ingroup krb5_deprecated
  */
@@ -3208,7 +3208,7 @@ krb5_keytype_to_enctypes (krb5_context context,
     }
     if (n == 0) {
 	krb5_set_error_message(context, KRB5_PROG_KEYTYPE_NOSUPP,
-			       "Keytype have no mapping");
+			       "Keytype has no mapping");
 	return KRB5_PROG_KEYTYPE_NOSUPP;
     }
 
@@ -3228,7 +3228,7 @@ krb5_keytype_to_enctypes (krb5_context context,
 }
 
 /**
- * Deprecated: keytypes doesn't exists, they are really enctypes.
+ * Deprecated: keytypes don't exist, they are really enctypes.
  *
  * @ingroup krb5_deprecated
  */

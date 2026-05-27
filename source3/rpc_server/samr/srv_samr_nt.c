@@ -232,7 +232,7 @@ static NTSTATUS make_samr_object_sd( TALLOC_CTX *ctx, struct security_descriptor
 				     struct dom_sid *sid, uint32_t sid_access )
 {
 	struct dom_sid domadmin_sid;
-	struct security_ace ace[5];		/* at most 5 entries */
+	struct security_ace ace[5] = {0};		/* at most 5 entries */
 	size_t i = 0;
 
 	struct security_acl *psa = NULL;
@@ -1541,7 +1541,7 @@ NTSTATUS _samr_QueryDisplayInfo(struct pipes_struct *p,
 
 	become_root();
 
-	/* THe following done as ROOT. Don't return without unbecome_root(). */
+	/* The following done as ROOT. Don't return without unbecome_root(). */
 
 	switch (r->in.level) {
 	case 1:
@@ -7046,11 +7046,12 @@ NTSTATUS _samr_RemoveMemberFromForeignDomain(struct pipes_struct *p,
 
 	if (!sid_check_is_builtin(&dinfo->sid)) {
 		struct dom_sid_buf buf2;
-		DEBUG(1,("_samr_RemoveMemberFromForeignDomain: domain_sid = %s, "
-			 "global_sam_sid() = %s\n",
-			 dom_sid_str_buf(&dinfo->sid, &buf),
-			 dom_sid_str_buf(get_global_sam_sid(), &buf2)));
-		DEBUGADD(1,("please report to samba-technical@lists.samba.org!\n"));
+		DBG_WARNING("domain_sid = %s, "
+			    "global_sam_sid() = %s\n"
+			    "please report to "
+			    "samba-technical@lists.samba.org!\n",
+			    dom_sid_str_buf(&dinfo->sid, &buf),
+			    dom_sid_str_buf(get_global_sam_sid(), &buf2));
 		return NT_STATUS_OK;
 	}
 

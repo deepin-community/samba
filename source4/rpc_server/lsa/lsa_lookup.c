@@ -35,6 +35,7 @@ struct dcesrv_lsa_TranslatedItem {
 	uint32_t flags;
 	uint32_t wb_idx;
 	bool done;
+	bool invalid_sid;
 	struct {
 		const char *domain; /* only $DOMAIN\ */
 		const char *namespace; /* $NAMESPACE\ or @$NAMESPACE */
@@ -380,6 +381,10 @@ static NTSTATUS dcesrv_lsa_LookupSids_base_call(struct dcesrv_lsa_LookupSids_bas
 			status = view->lookup_sid(state, item);
 			if (NT_STATUS_IS_OK(status)) {
 				item->done = true;
+			} else if (NT_STATUS_EQUAL(status, NT_STATUS_INVALID_SID)) {
+				item->done = true;
+				item->invalid_sid = true;
+				status = NT_STATUS_OK;
 			} else if (NT_STATUS_EQUAL(status, NT_STATUS_NONE_MAPPED)) {
 				status = NT_STATUS_OK;
 			} else if (NT_STATUS_EQUAL(status, NT_STATUS_SOME_NOT_MAPPED)) {
@@ -438,6 +443,7 @@ static NTSTATUS dcesrv_lsa_LookupSids_base_finish(
 	struct dcesrv_lsa_LookupSids_base_state *state)
 {
 	struct lsa_LookupSids3 *r = &state->r;
+	uint32_t num_invalid_sid = 0;
 	uint32_t i;
 
 	for (i=0;i<r->in.sids->num_sids;i++) {
@@ -470,9 +476,18 @@ static NTSTATUS dcesrv_lsa_LookupSids_base_finish(
 		if (item->type != SID_NAME_UNKNOWN) {
 			(*r->out.count)++;
 		}
+		if (item->invalid_sid) {
+			num_invalid_sid++;
+		}
 	}
 
 	if (*r->out.count == 0) {
+		if (num_invalid_sid != 0) {
+			for (i=0;i<r->out.names->count;i++) {
+				r->out.names->names[i].name.string = NULL;
+			}
+			return NT_STATUS_INVALID_SID;
+		}
 		return NT_STATUS_NONE_MAPPED;
 	}
 	if (*r->out.count != r->in.sids->num_sids) {
@@ -600,10 +615,7 @@ static void dcesrv_lsa_LookupSids_base_done(struct tevent_req *subreq)
 	state->r.out.result = status;
 	dcesrv_lsa_LookupSids_base_map(state);
 
-	status = dcesrv_reply(dce_call);
-	if (!NT_STATUS_IS_OK(status)) {
-		DEBUG(0,(__location__ ": dcesrv_reply() failed - %s\n", nt_errstr(status)));
-	}
+	dcesrv_async_reply(dce_call);
 }
 
 /*
@@ -663,7 +675,7 @@ NTSTATUS dcesrv_lsa_LookupSids2(struct dcesrv_call_state *dce_call,
 	return status;
 }
 
-/* A random hexidecimal number (honest!) */
+/* A random hexadecimal number (honest!) */
 #define LSA_SERVER_IMPLICIT_POLICY_STATE_MAGIC 0xc0c99e00
 
 /*
@@ -677,6 +689,8 @@ static NTSTATUS schannel_call_setup(struct dcesrv_call_state *dce_call,
 	enum dcerpc_transport_t transport =
 		dcerpc_binding_get_transport(dce_call->conn->endpoint->ep_description);
 	enum dcerpc_AuthType auth_type = DCERPC_AUTH_TYPE_NONE;
+	enum dcerpc_AuthLevel auth_level = DCERPC_AUTH_LEVEL_NONE;
+
 	if (transport != NCACN_IP_TCP) {
 		/* We can't call DCESRV_FAULT() in the sub-function */
 		dce_call->fault_code = DCERPC_FAULT_ACCESS_DENIED;
@@ -690,8 +704,14 @@ static NTSTATUS schannel_call_setup(struct dcesrv_call_state *dce_call,
 	 * NB. gensec requires schannel connections to
 	 * have at least DCERPC_AUTH_LEVEL_INTEGRITY.
 	 */
-	dcesrv_call_auth_info(dce_call, &auth_type, NULL);
-	if (auth_type != DCERPC_AUTH_TYPE_SCHANNEL) {
+	dcesrv_call_auth_info(dce_call, &auth_type, &auth_level);
+	if (auth_type == DCERPC_AUTH_TYPE_KRB5 &&
+	    auth_level == DCERPC_AUTH_LEVEL_PRIVACY)
+	{
+		/* ok */
+	} else if (auth_type == DCERPC_AUTH_TYPE_SCHANNEL) {
+		/* ok - implies at least DCERPC_AUTH_LEVEL_INTEGRITY. */
+	} else {
 		/* We can't call DCESRV_FAULT() in the sub-function */
 		dce_call->fault_code = DCERPC_FAULT_ACCESS_DENIED;
 		return NT_STATUS_ACCESS_DENIED;
@@ -720,7 +740,7 @@ static NTSTATUS schannel_call_setup(struct dcesrv_call_state *dce_call,
 		/*
 		 * This will talloc_steal() policy_state onto the
 		 * connection, which has longer lifetime than the
-		 * immidiate caller requires
+		 * immediate caller requires
 		 */
 		status = dcesrv_iface_state_store_conn(dce_call,
 						       LSA_SERVER_IMPLICIT_POLICY_STATE_MAGIC,
@@ -1284,10 +1304,7 @@ static void dcesrv_lsa_LookupNames_base_done(struct tevent_req *subreq)
 	state->r.out.result = status;
 	dcesrv_lsa_LookupNames_base_map(state);
 
-	status = dcesrv_reply(dce_call);
-	if (!NT_STATUS_IS_OK(status)) {
-		DEBUG(0,(__location__ ": dcesrv_reply() failed - %s\n", nt_errstr(status)));
-	}
+	dcesrv_async_reply(dce_call);
 }
 
 /*

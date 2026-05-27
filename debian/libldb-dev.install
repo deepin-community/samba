@@ -3,7 +3,7 @@ usr/include/samba-4.0/ldb_errors.h
 usr/include/samba-4.0/ldb_handlers.h
 usr/include/samba-4.0/ldb_module.h
 usr/include/samba-4.0/ldb_version.h
-#usr/lib/*/samba/libldb.a
-usr/lib/*/libldb.so
-usr/lib/*/pkgconfig/ldb.pc
+#usr/lib/${DEB_HOST_MULTIARCH}/samba/libldb.a
+usr/lib/${DEB_HOST_MULTIARCH}/libldb.so
+usr/lib/${DEB_HOST_MULTIARCH}/pkgconfig/ldb.pc
 usr/share/man/man3/ldb.3

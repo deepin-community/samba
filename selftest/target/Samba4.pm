@@ -618,6 +618,7 @@ sub provision_raw_prepare($$$$$$$$$$$$$$)
 	$ctx->{statedir} = "$prefix_abs/statedir";
 	$ctx->{cachedir} = "$prefix_abs/cachedir";
 	$ctx->{winbindd_socket_dir} = "$prefix_abs/wbsock";
+	$ctx->{nmbd_socket_dir} = "$prefix_abs/nmbsock";
 	$ctx->{ntp_signd_socket_dir} = "$prefix_abs/ntp_signd_socket";
 	$ctx->{nsswrap_passwd} = "$ctx->{etcdir}/passwd";
 	$ctx->{nsswrap_group} = "$ctx->{etcdir}/group";
@@ -671,18 +672,27 @@ sub provision_raw_prepare($$$$$$$$$$$$$$)
 		push (@provision_options, "OPENSSL_FORCE_FIPS_MODE=1");
 	}
 
-	if (defined($ENV{GDB_PROVISION})) {
-		push (@provision_options, "gdb --args");
-		if (!defined($ENV{PYTHON})) {
-		    push (@provision_options, "env");
-		    push (@provision_options, "python");
+	if (defined($ENV{GDB_PROVISION}) ||
+	    defined($ENV{RR_PROVISION}) ||
+	    defined($ENV{PY_DEV_PROVISION}) ||
+	    defined($ENV{VALGRIND_PROVISION})) {
+		if (defined($ENV{GDB_PROVISION})) {
+			push (@provision_options, "gdb --args");
 		}
-	}
-	if (defined($ENV{VALGRIND_PROVISION})) {
-		push (@provision_options, "valgrind");
+		if (defined($ENV{RR_PROVISION})) {
+			push (@provision_options, "rr");
+		}
+		if (defined($ENV{VALGRIND_PROVISION})) {
+			push (@provision_options, "valgrind");
+		}
 		if (!defined($ENV{PYTHON})) {
-		    push (@provision_options, "env");
-		    push (@provision_options, "python");
+			push (@provision_options, "env");
+			push (@provision_options, "python");
+		}
+		if (defined($ENV{PY_DEV_PROVISION})) {
+			# makes Python more likely to emit warnings
+			# and debug info.
+			push (@provision_options, "-X dev");
 		}
 	}
 
@@ -774,6 +784,7 @@ sub provision_raw_step1($$)
 	state directory = $ctx->{statedir}
 	cache directory = $ctx->{cachedir}
 	winbindd socket directory = $ctx->{winbindd_socket_dir}
+	nmbd:socket dir = $ctx->{nmbd_socket_dir}
 	ntp signd socket directory = $ctx->{ntp_signd_socket_dir}
 	winbind separator = /
 	interfaces = $interfaces
@@ -867,7 +878,7 @@ nogroup:x:65534:nobody
 
 	my $hostname = lc($ctx->{hostname});
 	open(HOSTS, ">>$ctx->{nsswrap_hosts}");
-	if ($hostname eq "localdc") {
+	if ($hostname eq "localdc" || $hostname eq "localvampiredc") {
 		print HOSTS "$ctx->{ipv4} ${hostname}.$ctx->{dnsname} $ctx->{dnsname} ${hostname}\n";
 		print HOSTS "$ctx->{ipv6} ${hostname}.$ctx->{dnsname} $ctx->{dnsname} ${hostname}\n";
 	} else {
@@ -1623,9 +1634,10 @@ sub provision_ad_dc_ntvfs($$$)
 	print "PROVISIONING AD DC (NTVFS)...\n";
         my $extra_conf_options = "netbios aliases = localDC1-a
         server services = +winbind -winbindd
-	ldap server require strong auth = allow_sasl_over_tls
+	ldap server require strong auth = allow_sasl_without_tls_channel_bindings
 	raw NTLMv2 auth = yes
 	lsa over netlogon = yes
+	wins hook = $ENV{SRCDIR_ABS}/testprogs/blackbox/wins_hook_test
         rpc server port = 1027
         auth event notification = true
 	dsdb event notification = true
@@ -1635,6 +1647,7 @@ sub provision_ad_dc_ntvfs($$$)
 	client min protocol = CORE
 	server min protocol = LANMAN1
 
+	server support krb5 netlogon = yes
 	CVE_2020_1472:warn_about_unused_debug_level = 3
 	CVE_2022_38023:warn_about_unused_debug_level = 3
 	allow nt4 crypto:torturetest\$ = yes
@@ -1648,6 +1661,16 @@ sub provision_ad_dc_ntvfs($$$)
 	server reject md5 schannel:tests4u2selfwk\$ = no
 	server reject md5 schannel:torturepacbdc\$ = no
 	server reject md5 schannel:torturepacwksta\$ = no
+	server reject aes schannel:schannel2\$ = no
+	server reject aes schannel:schannel3\$ = no
+	server reject aes schannel:schannel8\$ = no
+	server reject aes schannel:schannel9\$ = no
+	server reject aes schannel:torturetest\$ = no
+	server reject aes schannel:tests4u2proxywk\$ = no
+	server reject aes schannel:tests4u2selfbdc\$ = no
+	server reject aes schannel:tests4u2selfwk\$ = no
+	server reject aes schannel:torturepacbdc\$ = no
+	server reject aes schannel:torturepacwksta\$ = no
 	server require schannel:schannel0\$ = no
 	server require schannel:schannel1\$ = no
 	server require schannel:schannel2\$ = no
@@ -1725,6 +1748,11 @@ sub provision_fl2000dc($$)
 	server reject md5 schannel:tests4u2selfwk\$ = no
 	server reject md5 schannel:torturepacbdc\$ = no
 	server reject md5 schannel:torturepacwksta\$ = no
+	server reject aes schannel:tests4u2proxywk\$ = no
+	server reject aes schannel:tests4u2selfbdc\$ = no
+	server reject aes schannel:tests4u2selfwk\$ = no
+	server reject aes schannel:torturepacbdc\$ = no
+	server reject aes schannel:torturepacwksta\$ = no
 ";
 	my $extra_provision_options = ["--base-schema=2008_R2"];
 	# This environment uses plain text secrets
@@ -1780,6 +1808,11 @@ sub provision_fl2003dc($$$)
 	server reject md5 schannel:tests4u2selfwk\$ = no
 	server reject md5 schannel:torturepacbdc\$ = no
 	server reject md5 schannel:torturepacwksta\$ = no
+	server reject aes schannel:tests4u2proxywk\$ = no
+	server reject aes schannel:tests4u2selfbdc\$ = no
+	server reject aes schannel:tests4u2selfwk\$ = no
+	server reject aes schannel:torturepacbdc\$ = no
+	server reject aes schannel:torturepacwksta\$ = no
 ";
 
 	my $extra_provision_options = ["--base-schema=2008_R2"];
@@ -1837,12 +1870,18 @@ sub provision_fl2008r2dc($$$)
         # delay by 10 seconds, 10^7 usecs
 	ldap_server:delay_expire_disconnect = 10000
 
+	server support krb5 netlogon = yes
 	CVE_2022_38023:warn_about_unused_debug_level = 3
 	server reject md5 schannel:tests4u2proxywk\$ = no
 	server reject md5 schannel:tests4u2selfbdc\$ = no
 	server reject md5 schannel:tests4u2selfwk\$ = no
 	server reject md5 schannel:torturepacbdc\$ = no
 	server reject md5 schannel:torturepacwksta\$ = no
+	server reject aes schannel:tests4u2proxywk\$ = no
+	server reject aes schannel:tests4u2selfbdc\$ = no
+	server reject aes schannel:tests4u2selfwk\$ = no
+	server reject aes schannel:torturepacbdc\$ = no
+	server reject aes schannel:torturepacwksta\$ = no
 ";
 	my $extra_provision_options = ["--base-schema=2008_R2"];
 	my $ret = $self->provision($prefix,
@@ -2069,9 +2108,11 @@ sub provision_ad_dc()
 	lpq cache time = 0
 	print notify backchannel = yes
 
+	server support krb5 netlogon = yes
 	CVE_2020_1472:warn_about_unused_debug_level = 3
 	CVE_2022_38023:warn_about_unused_debug_level = 3
 	CVE_2022_38023:error_debug_level = 2
+	allow nt4 crypto:samlogontest\$ = yes
 	server reject md5 schannel:schannel2\$ = no
 	server reject md5 schannel:schannel3\$ = no
 	server reject md5 schannel:schannel8\$ = no
@@ -2083,6 +2124,17 @@ sub provision_ad_dc()
 	server reject md5 schannel:torturepacbdc\$ = no
 	server reject md5 schannel:torturepacwksta\$ = no
 	server reject md5 schannel:samlogontest\$ = no
+	server reject aes schannel:schannel2\$ = no
+	server reject aes schannel:schannel3\$ = no
+	server reject aes schannel:schannel8\$ = no
+	server reject aes schannel:schannel9\$ = no
+	server reject aes schannel:torturetest\$ = no
+	server reject aes schannel:tests4u2proxywk\$ = no
+	server reject aes schannel:tests4u2selfbdc\$ = no
+	server reject aes schannel:tests4u2selfwk\$ = no
+	server reject aes schannel:torturepacbdc\$ = no
+	server reject aes schannel:torturepacwksta\$ = no
+	server reject aes schannel:samlogontest\$ = no
 	server require schannel:schannel0\$ = no
 	server require schannel:schannel1\$ = no
 	server require schannel:schannel2\$ = no
@@ -2206,7 +2258,6 @@ sub provision_chgdcpass($$)
 
 	my $extra_smb_conf = "
 	check password script = $self->{srcdir}/selftest/checkpassword_arg1.sh ${unacceptable_password}
-	allow dcerpc auth level connect:lsarpc = yes
 	dcesrv:max auth states = 8
         drs:broken_samba_4.5_get_anc_emulation = true
         drs:get_tgt_support = false
@@ -2376,7 +2427,7 @@ sub check_env($$)
 	ad_dc_no_nss         => ["dns_hub"],
 	ad_dc_no_ntlm        => ["dns_hub"],
 
-	fl2008r2dc           => ["ad_dc"],
+	fl2008r2dc           => ["ad_dc", "nt4_dc"],
 	fl2003dc             => ["ad_dc"],
 	fl2000dc             => ["ad_dc"],
 
@@ -2571,24 +2622,74 @@ sub setup_fl2003dc
 
 sub setup_fl2008r2dc
 {
-	my ($self, $path, $dc_vars) = @_;
+	my ($self, $path, $ad_dc_vars, $nt4_dc_vars) = @_;
 
 	my $env = $self->provision_fl2008r2dc($path);
 
-	if (defined $env) {
-	        if (not defined($self->check_or_start($env, "standard"))) {
-		        return undef;
-		}
-
-		my $upn_array = ["$env->{REALM}.upn"];
-		my $spn_array = ["$env->{REALM}.spn"];
-
-		if ($self->setup_namespaces($env, $upn_array, $spn_array) != 0) {
-			return undef;
-		}
-
-		$env = $self->setup_trust($env, $dc_vars, "forest", "");
+	if (!defined $env) {
+	    return $env;
 	}
+
+	if (not defined($self->check_or_start($env, "standard"))) {
+	    return undef;
+	}
+
+	my $upn_array = ["$env->{REALM}.upn"];
+	my $spn_array = ["$env->{REALM}.spn"];
+
+	if ($self->setup_namespaces($env, $upn_array, $spn_array) != 0) {
+	    return undef;
+	}
+
+	$env = $self->setup_trust($env, $ad_dc_vars, "forest", "");
+	if (!defined $env) {
+	    return undef;
+	}
+
+	my $net = Samba::bindir_path($self, "net");
+	my $smbcontrol = Samba::bindir_path($self, "smbcontrol");
+
+	my $trustpw = "TrUsTpW";
+	$trustpw .= "$env->{SOCKET_WRAPPER_DEFAULT_IFACE}";
+	$trustpw .= "$nt4_dc_vars->{SOCKET_WRAPPER_DEFAULT_IFACE}";
+
+	my $cmd_env = $self->get_cmd_env_vars($env);
+	my $cmd = $cmd_env;
+	$cmd .= "$net rpc trust create ";
+	$cmd .= "otherdomainsid=$nt4_dc_vars->{SAMSID} ";
+	$cmd .= "otherdomain=$nt4_dc_vars->{DOMAIN} ";
+	$cmd .= "other_netbios_domain=$nt4_dc_vars->{DOMAIN} ";
+	$cmd .= "trustpw=$trustpw ";
+	$cmd .= "$env->{CONFIGURATION} ";
+	$cmd .= "-U $env->{DOMAIN}/$env->{USERNAME}\%$env->{PASSWORD} ";
+
+	if (system($cmd) != 0) {
+		warn("net rpc trust create failed\n$cmd");
+		return undef;
+	}
+
+	my $nt4_cmd_env = $self->get_cmd_env_vars($nt4_dc_vars);
+	$cmd = $nt4_cmd_env;
+	$cmd .= "$net rpc trustdom establish $env->{DOMAIN} -U/%$trustpw $nt4_dc_vars->{CONFIGURATION}";
+
+	if (system($cmd) != 0) {
+		warn("add failed\n$cmd");
+		return undef;
+	}
+
+	# Reload trusts
+	$cmd = $nt4_cmd_env;
+	$cmd .= "$smbcontrol winbindd reload-config $nt4_dc_vars->{CONFIGURATION}";
+
+	if (system($cmd) != 0) {
+		warn("add failed\n$cmd");
+		return undef;
+	}
+
+	$env->{NT4_TRUST_SERVER} = $nt4_dc_vars->{SERVER};
+	$env->{NT4_TRUST_SERVER_IP} = $nt4_dc_vars->{SERVER_IP};
+	$env->{NT4_TRUST_DOMAIN} = $nt4_dc_vars->{DOMAIN};
+	$env->{NT4_TRUST_DOMSID} = $nt4_dc_vars->{DOMSID};
 
 	return $env;
 }
@@ -3369,7 +3470,7 @@ sub setup_restoredc
 	}
 
 	#
-	# As we create a the same domain as a clone
+	# As we create the same domain as a clone
 	# we need a separate resolv.conf!
 	#
 	$ctx->{resolv_conf} = "$ctx->{etcdir}/resolv.conf";
@@ -3474,7 +3575,7 @@ sub setup_offlinebackupdc
 	}
 
 	#
-	# As we create a the same domain as a clone
+	# As we create the same domain as a clone
 	# we need a separate resolv.conf!
 	#
 	$ctx->{resolv_conf} = "$ctx->{etcdir}/resolv.conf";
@@ -3638,7 +3739,7 @@ sub setup_customdc
 	}
 
 	#
-	# As we create a the same domain as a clone
+	# As we create the same domain as a clone
 	# we need a separate resolv.conf!
 	#
 	$ctx->{resolv_conf} = "$ctx->{etcdir}/resolv.conf";
@@ -3671,10 +3772,6 @@ sub setup_customdc
 	# if this was a backup-rename, then we may need to setup namespaces
 	my $upn_array = ["$env->{REALM}.upn"];
 	my $spn_array = ["$env->{REALM}.spn"];
-
-	if ($self->setup_namespaces($env, $upn_array, $spn_array) != 0) {
-		return undef;
-	}
 
 	return $env;
 }

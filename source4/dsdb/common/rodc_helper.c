@@ -237,13 +237,13 @@ WERROR samdb_confirm_rodc_allowed_to_repl_to_sid_list(struct ldb_context *sam_ct
  * rather than relying on the caller providing those
  */
 WERROR samdb_confirm_rodc_allowed_to_repl_to(struct ldb_context *sam_ctx,
-					     struct dom_sid *rodc_machine_account_sid,
+					     const struct dom_sid *rodc_machine_account_sid,
 					     struct ldb_message *rodc_msg,
 					     struct ldb_message *obj_msg)
 {
 	TALLOC_CTX *frame = talloc_stackframe();
 	WERROR werr;
-	uint32_t num_token_sids;
+	uint32_t num_token_sids = 0;
 	struct dom_sid *token_sids;
 	const struct dom_sid *object_sid = NULL;
 

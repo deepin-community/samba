@@ -21,8 +21,10 @@
 #include "winbindd.h"
 #include "libsmb/namequery.h"
 #include "idmap.h"
-#include "tldap_gensec_bind.h"
+#include "tldap.h"
 #include "tldap_util.h"
+#include "tldap_tls_connect.h"
+#include "tldap_gensec_bind.h"
 #include "passdb.h"
 #include "lib/param/param.h"
 #include "auth/gensec/gensec.h"
@@ -36,6 +38,7 @@
 #include "source3/librpc/gen_ndr/ads.h"
 #include "source3/lib/global_contexts.h"
 #include <ldb.h>
+#include "source4/lib/tls/tls.h"
 
 struct idmap_ad_schema_names;
 
@@ -47,6 +50,7 @@ struct idmap_ad_context {
 
 	bool unix_primary_group;
 	bool unix_nss_info;
+	int ldap_timeout;
 
 	struct ldb_context *ldb;
 	struct ldb_dn **deny_ous;
@@ -291,16 +295,39 @@ static void PRINTF_ATTRIBUTE(3, 0) idmap_ad_tldap_debug(
        }
 }
 
-static uint32_t gensec_features_from_ldap_sasl_wrapping(void)
+static NTSTATUS idmap_ad_get_tldap_ctx(TALLOC_CTX *mem_ctx,
+				       const char *domname,
+				       struct tldap_context **pld)
 {
-	int wrap_flags;
+	struct netr_DsRGetDCNameInfo *dcinfo;
+	struct sockaddr_storage dcaddr = {
+		.ss_family = AF_UNSPEC,
+	};
+	struct sockaddr_storage *pdcaddr = NULL;
+	struct winbindd_domain *creds_domain = NULL;
+	struct cli_credentials *creds;
+	struct loadparm_context *lp_ctx;
+	struct tldap_context *ld;
+	int tcp_port = 389;
+	bool use_tls = false;
+	bool use_starttls = false;
+	int wrap_flags = -1;
 	uint32_t gensec_features = 0;
+	char *sitename = NULL;
+	int fd;
+	NTSTATUS status;
+	bool ok;
+	TLDAPRC rc;
 
 	wrap_flags = lp_client_ldap_sasl_wrapping();
-	if (wrap_flags == -1) {
-		wrap_flags = 0;
-	}
 
+	if (wrap_flags & ADS_AUTH_SASL_LDAPS) {
+		use_tls = true;
+		tcp_port = 636;
+	} else if (wrap_flags & ADS_AUTH_SASL_STARTTLS) {
+		use_tls = true;
+		use_starttls = true;
+	}
 	if (wrap_flags & ADS_AUTH_SASL_SEAL) {
 		gensec_features |= GENSEC_FEATURE_SEAL;
 	}
@@ -311,25 +338,6 @@ static uint32_t gensec_features_from_ldap_sasl_wrapping(void)
 	if (gensec_features != 0) {
 		gensec_features |= GENSEC_FEATURE_LDAP_STYLE;
 	}
-
-	return gensec_features;
-}
-
-static NTSTATUS idmap_ad_get_tldap_ctx(TALLOC_CTX *mem_ctx,
-				       const char *domname,
-				       struct tldap_context **pld)
-{
-	struct netr_DsRGetDCNameInfo *dcinfo;
-	struct sockaddr_storage dcaddr;
-	struct cli_credentials *creds;
-	struct loadparm_context *lp_ctx;
-	struct tldap_context *ld;
-	uint32_t gensec_features = gensec_features_from_ldap_sasl_wrapping();
-	char *sitename = NULL;
-	int fd;
-	NTSTATUS status;
-	bool ok;
-	TLDAPRC rc;
 
 	status = wb_dsgetdcname_gencache_get(mem_ctx, domname, &dcinfo);
 	if (!NT_STATUS_IS_OK(status)) {
@@ -362,9 +370,13 @@ static NTSTATUS idmap_ad_get_tldap_ctx(TALLOC_CTX *mem_ctx,
 	 * create_local_private_krb5_conf_for_domain() can deal with
 	 * sitename==NULL
 	 */
+	if (strequal(domname, lp_realm()) || strequal(domname, lp_workgroup()))
+	{
+		pdcaddr = &dcaddr;
+	}
 
 	ok = create_local_private_krb5_conf_for_domain(
-		lp_realm(), lp_workgroup(), sitename, &dcaddr);
+		lp_realm(), lp_workgroup(), sitename, pdcaddr);
 	TALLOC_FREE(sitename);
 	if (!ok) {
 		DBG_DEBUG("Could not create private krb5.conf\n");
@@ -372,7 +384,7 @@ static NTSTATUS idmap_ad_get_tldap_ctx(TALLOC_CTX *mem_ctx,
 		return NT_STATUS_DOMAIN_CONTROLLER_NOT_FOUND;
 	}
 
-	status = open_socket_out(&dcaddr, 389, 10000, &fd);
+	status = open_socket_out(&dcaddr, tcp_port, 10000, &fd);
 	if (!NT_STATUS_IS_OK(status)) {
 		DBG_DEBUG("open_socket_out failed: %s\n", nt_errstr(status));
 		TALLOC_FREE(dcinfo);
@@ -392,13 +404,20 @@ static NTSTATUS idmap_ad_get_tldap_ctx(TALLOC_CTX *mem_ctx,
 	 * Here we use or own machine account as
 	 * we run as domain member.
 	 */
-	status = pdb_get_trust_credentials(lp_workgroup(),
-					   lp_realm(),
-					   dcinfo,
-					   &creds);
+	creds_domain = find_our_domain();
+	if (creds_domain == NULL) {
+		DBG_ERR("find_our_domain() returned NULL\n");
+		TALLOC_FREE(dcinfo);
+		return NT_STATUS_INTERNAL_ERROR;
+	}
+	status = winbindd_get_trust_credentials(creds_domain,
+						dcinfo,
+						false, /* netlogon */
+						false, /* ipc_fallback */
+						&creds);
 	if (!NT_STATUS_IS_OK(status)) {
-		DBG_DEBUG("pdb_get_trust_credentials() failed - %s\n",
-			  nt_errstr(status));
+		DBG_ERR("winbindd_get_trust_credentials(%s) failed - %s\n",
+			creds_domain->name, nt_errstr(status));
 		TALLOC_FREE(dcinfo);
 		return status;
 	}
@@ -408,6 +427,49 @@ static NTSTATUS idmap_ad_get_tldap_ctx(TALLOC_CTX *mem_ctx,
 		DBG_DEBUG("loadparm_init_s3 failed\n");
 		TALLOC_FREE(dcinfo);
 		return NT_STATUS_NO_MEMORY;
+	}
+
+	if (use_tls && !tldap_has_tls_tstream(ld)) {
+		struct tstream_tls_params *tls_params = NULL;
+
+		if (use_starttls) {
+		       rc = tldap_extended(ld,
+					   LDB_EXTENDED_START_TLS_OID,
+					   NULL,
+					   NULL,
+					   0,
+					   NULL,
+					   0,
+					   NULL,
+					   NULL,
+					   NULL);
+		       if (!TLDAP_RC_IS_SUCCESS(rc)) {
+				DBG_ERR("tldap_extended(%s) failed: %s\n",
+					LDB_EXTENDED_START_TLS_OID,
+					tldap_errstr(talloc_tos(), ld, rc));
+				return NT_STATUS_LDAP(TLDAP_RC_V(rc));
+		       }
+		}
+
+		status = tstream_tls_params_client_lpcfg(talloc_tos(),
+							 lp_ctx,
+							 dcinfo->dc_unc,
+							 &tls_params);
+		if (!NT_STATUS_IS_OK(status)) {
+		       DBG_ERR("tstream_tls_params_client_lpcfg failed: %s\n",
+			       nt_errstr(status));
+		       TALLOC_FREE(dcinfo);
+		       return status;
+		}
+
+		rc = tldap_tls_connect(ld, tls_params);
+		if (!TLDAP_RC_IS_SUCCESS(rc)) {
+			DBG_ERR("tldap_gensec_bind(%s) failed: %s\n",
+				dcinfo->dc_unc,
+				tldap_errstr(dcinfo, ld, rc));
+			TALLOC_FREE(dcinfo);
+			return NT_STATUS_LDAP(TLDAP_RC_V(rc));
+		}
 	}
 
 	rc = tldap_gensec_bind(ld, creds, "ldap", dcinfo->dc_unc, NULL, lp_ctx,
@@ -515,6 +577,8 @@ static NTSTATUS idmap_ad_context_create(TALLOC_CTX *mem_ctx,
 		domname, "unix_primary_group", false);
 	ctx->unix_nss_info = idmap_config_bool(
 		domname, "unix_nss_info", false);
+	ctx->ldap_timeout = idmap_config_int(
+		domname, "ldap_timeout", 10);
 
 	schema_mode = idmap_config_const_string(
 		domname, "schema_mode", "rfc2307");
@@ -681,7 +745,7 @@ static NTSTATUS idmap_ad_query_user(struct idmap_domain *domain,
 
 	rc = tldap_search(ctx->ld, ctx->default_nc, TLDAP_SCOPE_SUB, filter,
 			  attrs, ARRAY_SIZE(attrs), 0, NULL, 0, NULL, 0,
-			  0, 0, 0, talloc_tos(), &msgs);
+			  ctx->ldap_timeout, 0, 0, talloc_tos(), &msgs);
 	if (!TLDAP_RC_IS_SUCCESS(rc)) {
 		return NT_STATUS_LDAP(TLDAP_RC_V(rc));
 	}
@@ -754,13 +818,17 @@ static NTSTATUS idmap_ad_query_user_retry(struct idmap_domain *domain,
 {
 	const NTSTATUS status_server_down =
 		NT_STATUS_LDAP(TLDAP_RC_V(TLDAP_SERVER_DOWN));
+	const NTSTATUS status_timeout =
+		NT_STATUS_LDAP(TLDAP_RC_V(TLDAP_TIMEOUT));
 	NTSTATUS status;
 
 	status = idmap_ad_query_user(domain, info);
 
-	if (NT_STATUS_EQUAL(status, status_server_down)) {
+	if (NT_STATUS_EQUAL(status, status_server_down) ||
+	    NT_STATUS_EQUAL(status, status_timeout))
+	{
 		TALLOC_FREE(domain->private_data);
-		status = idmap_ad_query_user(domain, info);
+		return NT_STATUS_HOST_UNREACHABLE;
 	}
 
 	return status;
@@ -917,7 +985,7 @@ static NTSTATUS idmap_ad_unixids_to_sids(struct idmap_domain *dom,
 
 	rc = tldap_search(ctx->ld, ctx->default_nc, TLDAP_SCOPE_SUB, filter,
 			  attrs, ARRAY_SIZE(attrs), 0, NULL, 0, NULL, 0,
-			  0, 0, 0, talloc_tos(), &msgs);
+			  ctx->ldap_timeout, 0, 0, talloc_tos(), &msgs);
 	if (!TLDAP_RC_IS_SUCCESS(rc)) {
 		return NT_STATUS_LDAP(TLDAP_RC_V(rc));
 	}
@@ -1081,7 +1149,7 @@ static NTSTATUS idmap_ad_sids_to_unixids(struct idmap_domain *dom,
 
 	rc = tldap_search(ctx->ld, ctx->default_nc, TLDAP_SCOPE_SUB, filter,
 			  attrs, ARRAY_SIZE(attrs), 0, NULL, 0, NULL, 0,
-			  0, 0, 0, talloc_tos(), &msgs);
+			  ctx->ldap_timeout, 0, 0, talloc_tos(), &msgs);
 	if (!TLDAP_RC_IS_SUCCESS(rc)) {
 		return NT_STATUS_LDAP(TLDAP_RC_V(rc));
 	}
@@ -1188,13 +1256,17 @@ static NTSTATUS idmap_ad_unixids_to_sids_retry(struct idmap_domain *dom,
 {
 	const NTSTATUS status_server_down =
 		NT_STATUS_LDAP(TLDAP_RC_V(TLDAP_SERVER_DOWN));
+	const NTSTATUS status_timeout =
+		NT_STATUS_LDAP(TLDAP_RC_V(TLDAP_TIMEOUT));
 	NTSTATUS status;
 
 	status = idmap_ad_unixids_to_sids(dom, ids);
 
-	if (NT_STATUS_EQUAL(status, status_server_down)) {
+	if (NT_STATUS_EQUAL(status, status_server_down) ||
+	    NT_STATUS_EQUAL(status, status_timeout))
+	{
 		TALLOC_FREE(dom->private_data);
-		status = idmap_ad_unixids_to_sids(dom, ids);
+		return NT_STATUS_HOST_UNREACHABLE;
 	}
 
 	return status;
@@ -1205,13 +1277,17 @@ static NTSTATUS idmap_ad_sids_to_unixids_retry(struct idmap_domain *dom,
 {
 	const NTSTATUS status_server_down =
 		NT_STATUS_LDAP(TLDAP_RC_V(TLDAP_SERVER_DOWN));
+	const NTSTATUS status_timeout =
+		NT_STATUS_LDAP(TLDAP_RC_V(TLDAP_TIMEOUT));
 	NTSTATUS status;
 
 	status = idmap_ad_sids_to_unixids(dom, ids);
 
-	if (NT_STATUS_EQUAL(status, status_server_down)) {
+	if (NT_STATUS_EQUAL(status, status_server_down) ||
+	    NT_STATUS_EQUAL(status, status_timeout))
+	{
 		TALLOC_FREE(dom->private_data);
-		status = idmap_ad_sids_to_unixids(dom, ids);
+		return NT_STATUS_HOST_UNREACHABLE;
 	}
 
 	return status;

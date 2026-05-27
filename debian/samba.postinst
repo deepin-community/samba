@@ -2,23 +2,6 @@
 
 set -e
 
-nmbd_error_handler() {
-    if [ -d /sys/class/net/lo ] && ls /sys/class/net | grep -qv ^lo$; then
-        # https://bugs.debian.org/893762
-        echo 'WARNING: nmbd failed to start as there is no non-loopback interfaces available.'
-        echo 'Either add an interface or set "disable netbios = yes" in smb.conf'
-        return 0
-    elif command -v ip > /dev/null && ip a show | grep '^[[:space:]]*inet ' | grep -vq ' lo$'; then
-        # https://bugs.debian.org/859526
-        echo 'WARNING: nmbd failed to start as there is no local IPv4 non-loopback interfaces available.'
-        echo 'Either add an IPv4 address or set "disable netbios = yes" in smb.conf'
-        return 0
-    else
-        echo 'ERROR: nmbd failed to start.'
-        return 1 # caught by set -e
-    fi
-}
-
 # We generate several files during the postinst, and we don't want
 #	them to be readable only by root.
 umask 022
@@ -65,6 +48,62 @@ then
     fi
 fi
 
+# in 2:4.20.1+dfsg-2 ad-dc functionality has been moved from samba to its own package.
+# in 2:4.21.1+dfsg-2 we cleaned up the startup scripts
+if   [ configure = "$1" ] \
+  && dpkg --compare-versions "$2" lt-nl 2:4.21.1+dfsg-2~~
+then
+
+    if [ ! -f /lib/systemd/system/samba-ad-dc.service ]
+    # samba-ad-dc package isn't installed
+    then
+        update-rc.d samba-ad-dc remove >/dev/null
+        if command -v deb-systemd-helper >/dev/null; then
+            deb-systemd-helper purge samba-ad-dc.service >/dev/null || :
+        fi
+    fi
+
+    if /usr/share/samba/is-configured samba-ad-dc
+    then
+
+        # use systemctl directly since the service file is gone
+        systemctl stop samba-ad-dc >/dev/null 2>&1 || :
+
+        # warn if ad-dc is configured but samba-ad-dc.service
+        # (which is part of samba-ad-dc package) is not present
+        if  [ ! -f /lib/systemd/system/samba-ad-dc.service ] \
+         && [ ! -f /var/lib/dpkg/info/samba-ad-dc.list ]
+        then
+            # here, the user might had requested to install samba-ad-dc *too*,
+            # in the same `apt-get` run, but it's not installed yet.  So this
+            # warning will be useless, but at least it will help in other cases.
+
+# this doesn't work:
+#    . /usr/share/debconf/confmodule
+#    db_title SAMBA || :
+#    db_input high samba/no-samba-ad-dc || :
+#    db_go || :
+# because:
+#  debconf does not display this note anywhwere when DEBIAN_FRONTEND=noninteractive
+#  lintian errors out about this note being non-translatable etc
+# so it requires too much efforts.  Let's keep the user uninformed.
+
+            cat <<-EOF >&2
+	WARNING: =====================================================================
+	WARNING: Your samba appears to be configured as an Active Directory Domain
+	WARNING: Controller (AD-DC).  AD-DC functionality has been moved out of main
+	WARNING: samba package to a separate samba-ad-dc package.
+	WARNING:
+	WARNING: Please install samba-ad-dc package for the Domain Controller to work.
+	WARNING:
+	WARNING: Please seee /usr/share/doc/samba/NEWS.Debian.gz for more information.
+	WARNING: =====================================================================
+
+EOF
+        fi
+    fi
+fi
+
 #DEBHELPER#
 
 # remove msg.sock/ directory (moved to /run/samba/)
@@ -72,8 +111,8 @@ dir=/var/lib/samba/private/msg.sock
 if [ -d $dir -a configure = "$1" ] &&
    dpkg --compare-versions "$2" lt-nl 2:4.16.0+dfsg-7~
 then
-    rm -f $dir/* || true
-    rmdir $dir || true
+    rm -f $dir/*
+    rmdir $dir
 fi
 
 exit 0

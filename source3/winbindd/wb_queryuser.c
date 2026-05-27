@@ -279,6 +279,7 @@ static void wb_queryuser_done(struct tevent_req *subreq)
 	NTSTATUS status, result;
 	bool need_group_name = false;
 	const char *tmpl = NULL;
+	uint32_t dsgetdcname_flags = DS_RETURN_DNS_NAME;
 
 	status = dcerpc_wbint_GetNssInfo_recv(subreq, info, &result);
 	TALLOC_FREE(subreq);
@@ -287,12 +288,28 @@ static void wb_queryuser_done(struct tevent_req *subreq)
 		return;
 	}
 
+	if (NT_STATUS_EQUAL(result, NT_STATUS_HOST_UNREACHABLE)) {
+		winbind_idmap_add_failed_connection_entry(info->domain_name);
+		/* Trigger DC lookup and reconnect below */
+		result = NT_STATUS_DOMAIN_CONTROLLER_NOT_FOUND;
+		dsgetdcname_flags |= DS_FORCE_REDISCOVERY;
+	}
+
 	if (NT_STATUS_EQUAL(result, NT_STATUS_DOMAIN_CONTROLLER_NOT_FOUND) &&
 	    !state->tried_dclookup) {
-		D_DEBUG("GetNssInfo got DOMAIN_CONTROLLER_NOT_FOUND, calling wb_dsgetdcname_send()\n");
-		subreq = wb_dsgetdcname_send(
-			state, state->ev, state->info->domain_name, NULL, NULL,
-			DS_RETURN_DNS_NAME);
+		const char *domain_name = find_dns_domain_name(
+			state->info->domain_name);
+
+		D_DEBUG("GetNssInfo got DOMAIN_CONTROLLER_NOT_FOUND, calling "
+			"wb_dsgetdcname_send(%s)\n",
+			domain_name);
+
+		subreq = wb_dsgetdcname_send(state,
+					     state->ev,
+					     domain_name,
+					     NULL,
+					     NULL,
+					     dsgetdcname_flags);
 		if (tevent_req_nomem(subreq, req)) {
 			return;
 		}

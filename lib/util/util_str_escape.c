@@ -26,7 +26,7 @@
  * Calculate the encoded length of a character for log_escape
  *
  */
-static size_t encoded_length(char c)
+static size_t encoded_length(unsigned char c)
 {
 	if (c != '\\' &&  c > 0x1F) {
 		return 1;
@@ -72,14 +72,14 @@ char *log_escape(TALLOC_CTX *frame, const char *in)
 
 	encoded = talloc_array( frame, char, size);
 	if (encoded == NULL) {
-		DBG_ERR( "Out of memory allocating encoded string");
+		DBG_ERR( "Out of memory allocating encoded string\n");
 		return NULL;
 	}
 
 	c = in;
 	e = encoded;
 	while (*c) {
-		if (*c != '\\' && *c > 0x1F) {
+		if (*c != '\\' && (unsigned char)(*c) > 0x1F) {
 			*e++ = *c++;
 		} else {
 			switch (*c) {
@@ -116,7 +116,7 @@ char *log_escape(TALLOC_CTX *frame, const char *in)
 				*e++ = '\\';
 				break;
 			default:
-				snprintf(e, 5, "\\x%02X", *c);
+				snprintf(e, 5, "\\x%02hhX", (unsigned char)(*c));
 				e += 4;
 			}
 			c++;

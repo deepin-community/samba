@@ -1,0 +1,4 @@
+# deliberate, a synonym for misspelled parameter
+samba-common-bin: typo-in-manual-page prefered preferred */man/man5/smb.conf.5*
+# python script run only if python3 is actually installed
+samba-common-bin: python3-script-but-no-python3-dep */samba-log-parser*

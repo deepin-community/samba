@@ -449,7 +449,7 @@ static NTSTATUS validate_nt_acl_blob(TALLOC_CTX *mem_ctx,
 	switch (xattr_version) {
 	case 1:
 	case 2:
-		/* These xattr types are unilatteral, they do not
+		/* These xattr types are unilateral, they do not
 		 * require confirmation of the hash.  In particular,
 		 * the NTVFS file server uses version 1, but
 		 * 'samba-tool ntacl' can set these as well */
@@ -1000,58 +1000,26 @@ static int acl_common_remove_object(vfs_handle_struct *handle,
 					bool is_directory)
 {
 	connection_struct *conn = handle->conn;
+	struct stat_ex st;
 	struct file_id id;
 	files_struct *fsp = NULL;
 	int ret = 0;
-	struct smb_filename *full_fname = NULL;
-	struct smb_filename *local_fname = NULL;
-	struct smb_filename *parent_dir_fname = NULL;
-	int saved_errno = 0;
-	struct smb_filename *saved_dir_fname = NULL;
-	NTSTATUS status;
 
-	saved_dir_fname = vfs_GetWd(talloc_tos(),conn);
-	if (saved_dir_fname == NULL) {
-		saved_errno = errno;
-		goto out;
-	}
+	SMB_ASSERT(strchr_m(smb_fname->base_name, '/') == NULL);
 
-	full_fname = full_path_from_dirfsp_atname(talloc_tos(),
-						  dirfsp,
-						  smb_fname);
-	if (full_fname == NULL) {
-		goto out;
-	}
-
-	status = SMB_VFS_PARENT_PATHNAME(conn,
-					 talloc_tos(),
-					 full_fname,
-					 &parent_dir_fname,
-					 &local_fname);
-	if (!NT_STATUS_IS_OK(status)) {
-		saved_errno = map_errno_from_nt_status(status);
-		goto out;
-	}
-
-	DBG_DEBUG("removing %s %s\n", is_directory ? "directory" : "file",
-		  smb_fname_str_dbg(full_fname));
-
- 	/* cd into the parent dir to pin it. */
-	ret = vfs_ChDir(conn, parent_dir_fname);
+	ret = SMB_VFS_FSTATAT(
+		conn, dirfsp, smb_fname, &st, AT_SYMLINK_NOFOLLOW);
 	if (ret == -1) {
-		saved_errno = errno;
-		goto out;
+		return ret;
 	}
 
-	/* Must use lstat here. */
-	ret = SMB_VFS_LSTAT(conn, local_fname);
-	if (ret == -1) {
-		saved_errno = errno;
-		goto out;
-	}
+	DBG_DEBUG("removing %s %s/%s\n",
+		  is_directory ? "directory" : "file",
+		  fsp_str_dbg(dirfsp),
+		  smb_fname_str_dbg(smb_fname));
 
 	/* Ensure we have this file open with DELETE access. */
-	id = vfs_file_id_from_sbuf(conn, &local_fname->st);
+	id = vfs_file_id_from_sbuf(conn, &st);
 	for (fsp = file_find_di_first(conn->sconn, id, true); fsp;
 		     fsp = file_find_di_next(fsp, true)) {
 		if (fsp->access_mask & DELETE_ACCESS &&
@@ -1065,43 +1033,20 @@ static int acl_common_remove_object(vfs_handle_struct *handle,
 	}
 
 	if (!fsp) {
-		DBG_DEBUG("%s %s not an open file\n",
+		DBG_DEBUG("%s %s/%s not an open file\n",
 			  is_directory ? "directory" : "file",
-			  smb_fname_str_dbg(full_fname));
-		saved_errno = EACCES;
-		goto out;
+			  fsp_str_dbg(dirfsp),
+			  smb_fname_str_dbg(smb_fname));
+		return EACCES;
 	}
 
 	become_root();
-	if (is_directory) {
-		ret = SMB_VFS_NEXT_UNLINKAT(handle,
-				dirfsp,
-				smb_fname,
-				AT_REMOVEDIR);
-	} else {
-		ret = SMB_VFS_NEXT_UNLINKAT(handle,
-				dirfsp,
-				smb_fname,
-				0);
-	}
+	ret = SMB_VFS_NEXT_UNLINKAT(handle,
+				    dirfsp,
+				    smb_fname,
+				    is_directory ? AT_REMOVEDIR : 0);
 	unbecome_root();
 
-	if (ret == -1) {
-		saved_errno = errno;
-	}
-
-  out:
-
-	TALLOC_FREE(parent_dir_fname);
-	TALLOC_FREE(full_fname);
-
-	if (saved_dir_fname) {
-		vfs_ChDir(conn, saved_dir_fname);
-		TALLOC_FREE(saved_dir_fname);
-	}
-	if (saved_errno) {
-		errno = saved_errno;
-	}
 	return ret;
 }
 
@@ -1154,7 +1099,7 @@ int unlink_acl_common(struct vfs_handle_struct *handle,
 		   see if we need to root override. */
 
 		/* Don't do anything fancy for streams. */
-		if (smb_fname->stream_name) {
+		if (is_ntfs_stream_smb_fname(smb_fname)) {
 			return -1;
 		}
 		return acl_common_remove_object(handle,
@@ -1172,7 +1117,7 @@ int unlink_acl_common(struct vfs_handle_struct *handle,
 int fchmod_acl_module_common(struct vfs_handle_struct *handle,
 			     struct files_struct *fsp, mode_t mode)
 {
-	if (fsp->posix_flags & FSP_POSIX_FLAGS_PATHNAMES
+	if (fsp->fsp_flags.posix_open
 	    || fsp->fsp_name->flags & SMB_FILENAME_POSIX_PATH) {
 		/* Only allow this on POSIX opens. */
 		return SMB_VFS_NEXT_FCHMOD(handle, fsp, mode);

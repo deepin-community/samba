@@ -186,6 +186,7 @@ else:
                   source='''
                          base64.c
                          dprintf.c
+                         dns_cmp.c
                          fsusage.c
                          genrand_util.c
                          getpass.c
@@ -243,13 +244,19 @@ else:
 
     bld.SAMBA_LIBRARY('samba-modules',
                       source='modules.c',
-                      deps='samba-errors samba-util',
+                      deps='samba-errors samba-util samba-debug',
                       local_include=False,
                       private_library=True)
 
     bld.SAMBA_LIBRARY('asn1util',
                       source='asn1.c',
                       deps='talloc samba-util',
+                      private_library=True,
+                      local_include=False)
+
+    bld.SAMBA_LIBRARY('util_crypt',
+                      source='util_crypt.c',
+                      deps='talloc crypt',
                       private_library=True,
                       local_include=False)
 
@@ -277,7 +284,7 @@ else:
                           tevent_req_profile.c
                       ''',
                       local_include=False,
-                      public_deps='tevent samba-errors',
+                      public_deps='tevent time-basic samba-errors',
                       public_headers='tevent_ntstatus.h tevent_unix.h tevent_werror.h',
                       header_path=[ ('*', 'util') ],
                       pc_files=[],

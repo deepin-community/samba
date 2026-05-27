@@ -55,6 +55,7 @@
 
 #define LOADPARM_SUBSTITUTION_INTERNALS 1
 #include "includes.h"
+#include "lib/util/util_file.h"
 #include "system/filesys.h"
 #include "util_tdb.h"
 #include "lib/param/loadparm.h"
@@ -161,6 +162,7 @@ static const struct loadparm_service _sDefault =
 	.volume = NULL,
 	.fstype = NULL,
 	.vfs_objects = NULL,
+	.vfs_mkdir_use_tmp_name = Auto,
 	.msdfs_proxy = NULL,
 	.aio_write_behind = NULL,
 	.dfree_command = NULL,
@@ -213,7 +215,7 @@ static const struct loadparm_service _sDefault =
 	.follow_symlinks = true,
 	.sync_always = false,
 	.strict_allocate = false,
-	.strict_rename = false,
+	._strict_rename = false,
 	.strict_sync = true,
 	.mangling_char = '~',
 	.copymap = NULL,
@@ -504,7 +506,8 @@ static bool apply_lp_set_cmdline(void)
  Initialise the global parameter structure.
 ***************************************************************************/
 
-static void init_globals(struct loadparm_context *lp_ctx, bool reinit_globals)
+void loadparm_s3_init_globals(struct loadparm_context *lp_ctx,
+			      bool reinit_globals)
 {
 	static bool done_init = false;
 	char *s = NULL;
@@ -608,7 +611,7 @@ static void init_globals(struct loadparm_context *lp_ctx, bool reinit_globals)
  	 */
 	Globals.nmbd_bind_explicit_broadcast = true;
 
-	s = talloc_asprintf(talloc_tos(), "Samba %s", samba_version_string());
+	s = talloc_asprintf(Globals.ctx, "Samba %s", samba_version_string());
 	if (s == NULL) {
 		smb_panic("init_globals: ENOMEM");
 	}
@@ -667,6 +670,7 @@ static void init_globals(struct loadparm_context *lp_ctx, bool reinit_globals)
 	Globals.winbind_sealed_pipes = true;
 	Globals.require_strong_key = true;
 	Globals.reject_md5_servers = true;
+	Globals._client_use_krb5_netlogon = LP_ENUM_Default;
 	Globals.server_schannel = true;
 	Globals.server_schannel_require_seal = true;
 	Globals.reject_md5_clients = true;
@@ -876,6 +880,7 @@ static void init_globals(struct loadparm_context *lp_ctx, bool reinit_globals)
 	Globals.smb2_max_trans = DEFAULT_SMB2_MAX_TRANSACT;
 	Globals.smb2_max_credits = DEFAULT_SMB2_MAX_CREDITS;
 	Globals.smb2_leases = true;
+	Globals._smb3_directory_leases = Auto;
 	Globals.server_multi_channel_support = true;
 
 	lpcfg_string_set(Globals.ctx, &Globals.ncalrpc_dir,
@@ -939,8 +944,6 @@ static void init_globals(struct loadparm_context *lp_ctx, bool reinit_globals)
 
 	Globals.nsupdate_command = str_list_make_v3_const(NULL, "/usr/bin/nsupdate -g", NULL);
 
-	Globals.cldap_port = 389;
-
 	Globals.dgram_port = NBT_DGRAM_SERVICE_PORT;
 
 	Globals.nbt_port = NBT_NAME_SERVICE_PORT;
@@ -950,6 +953,8 @@ static void init_globals(struct loadparm_context *lp_ctx, bool reinit_globals)
 	Globals.kpasswd_port = 464;
 
 	Globals.kdc_enable_fast = true;
+
+	Globals.winbind_debug_traceid = true;
 
 	Globals.aio_max_threads = 100;
 
@@ -996,6 +1001,15 @@ static void init_globals(struct loadparm_context *lp_ctx, bool reinit_globals)
 	Globals.rpc_start_on_demand_helpers = true;
 
 	Globals.ad_dc_functional_level = DS_DOMAIN_FUNCTION_2008_R2,
+
+	Globals.acl_claims_evaluation = ACL_CLAIMS_EVALUATION_AD_DC_ONLY;
+
+	/* Set the default Himmelblaud globals */
+	lpcfg_string_set(Globals.ctx,
+			&Globals.himmelblaud_hsm_pin_path,
+			get_dyn_HIMMELBLAUD_HSM_PIN_PATH());
+	Globals.himmelblaud_hello_enabled = false;
+	Globals.himmelblaud_sfa_fallback = false;
 
 	/* Now put back the settings that were set with lp_set_cmdline() */
 	apply_lp_set_cmdline();
@@ -1198,11 +1212,13 @@ static void discard_whitespace(char *str)
  *                      See "man regexec" for possible errors
  */
 
-int lp_wi_scan_global_parametrics(
-	const char *regex_str, size_t max_matches,
-	bool (*cb)(const char *string, regmatch_t matches[],
-		   void *private_data),
-	void *private_data)
+static int lp_wi_scan_parametrics(struct parmlist_entry *parmlist,
+				  const char *regex_str,
+				  size_t max_matches,
+				  bool (*cb)(const char *string,
+					     regmatch_t matches[],
+					     void *private_data),
+				  void *private_data)
 {
 	struct parmlist_entry *data;
 	regex_t regex;
@@ -1213,7 +1229,7 @@ int lp_wi_scan_global_parametrics(
 		return ret;
 	}
 
-	for (data = Globals.param_opt; data != NULL; data = data->next) {
+	for (data = parmlist; data != NULL; data = data->next) {
 		size_t keylen = strlen(data->key);
 		char key[keylen+1];
 		regmatch_t matches[max_matches];
@@ -1242,6 +1258,42 @@ fail:
 	return ret;
 }
 
+int lp_wi_scan_global_parametrics(const char *regex_str,
+				  size_t max_matches,
+				  bool (*cb)(const char *string,
+					     regmatch_t matches[],
+					     void *private_data),
+				  void *private_data)
+{
+	int ret = lp_wi_scan_parametrics(
+		Globals.param_opt, regex_str, max_matches, cb, private_data);
+	return ret;
+}
+
+int lp_wi_scan_share_parametrics(int snum,
+				 const char *regex_str,
+				 size_t max_matches,
+				 bool (*cb)(const char *string,
+					    regmatch_t matches[],
+					    void *private_data),
+				 void *private_data)
+{
+	struct loadparm_service *s = NULL;
+	int ret;
+
+	if (!LP_SNUM_OK(snum)) {
+		/*
+		 * We return regex return values here, REG_NOMATCH is
+		 * the closest I could find.
+		 */
+		return REG_NOMATCH;
+	}
+	s = ServicePtrs[snum];
+
+	ret = lp_wi_scan_parametrics(
+		s->param_opt, regex_str, max_matches, cb, private_data);
+	return ret;
+}
 
 #define MISSING_PARAMETER(name) \
     DEBUG(0, ("%s(): value is NULL or empty!\n", #name))
@@ -2761,24 +2813,6 @@ static bool lp_set_cmdline_helper(const char *pszParmName, const char *pszParmVa
 	return false;
 }
 
-bool lp_set_cmdline(const char *pszParmName, const char *pszParmValue)
-{
-	bool ret;
-	TALLOC_CTX *frame = talloc_stackframe();
-	struct loadparm_context *lp_ctx;
-
-	lp_ctx = setup_lp_context(frame);
-	if (lp_ctx == NULL) {
-		TALLOC_FREE(frame);
-		return false;
-	}
-
-	ret = lpcfg_set_cmdline(lp_ctx, pszParmName, pszParmValue);
-
-	TALLOC_FREE(frame);
-	return ret;
-}
-
 /***************************************************************************
  Process a parameter.
 ***************************************************************************/
@@ -4003,7 +4037,7 @@ static bool lp_load_ex(const char *pszFname,
 
 	lp_ctx = setup_lp_context(talloc_tos());
 
-	init_globals(lp_ctx, reinit_globals);
+	loadparm_s3_init_globals(lp_ctx, reinit_globals);
 
 	free_file_list();
 
@@ -4057,7 +4091,7 @@ static bool lp_load_ex(const char *pszFname,
 			/* start over */
 			DEBUG(1, ("lp_load_ex: changing to config backend "
 				  "registry\n"));
-			init_globals(lp_ctx, true);
+			loadparm_s3_init_globals(lp_ctx, true);
 
 			TALLOC_FREE(lp_ctx);
 
@@ -4263,6 +4297,17 @@ bool lp_load_with_registry_shares(const char *pszFname)
 			  true, /* reinit_globals */
 			  true,  /* allow_include_registry */
 			  true); /* load_all_shares*/
+}
+
+bool lp_load_with_registry_without_shares(const char *pszFname)
+{
+	return lp_load_ex(pszFname,
+			  false, /* global_only */
+			  true,  /* save_defaults */
+			  false, /* add_ipc */
+			  true, /* reinit_globals */
+			  true,  /* allow_include_registry */
+			  false); /* load_all_shares*/
 }
 
 /***************************************************************************
@@ -4652,7 +4697,7 @@ enum brl_flavour lp_posix_cifsu_locktype(files_struct *fsp)
 	if (posix_default_lock_was_set) {
 		return posix_cifsx_locktype;
 	} else {
-		return (fsp->posix_flags & FSP_POSIX_FLAGS_OPEN) ?
+		return fsp->fsp_flags.posix_open ?
 			POSIX_LOCK : WINDOWS_LOCK;
 	}
 }
@@ -4695,12 +4740,12 @@ void widelinks_warning(int snum)
 			"These parameters are incompatible. "
 			"Wide links will be disabled for this share.\n",
 			 lp_const_servicename(snum));
-		} else if (lp_smb3_unix_extensions()) {
-			DBG_ERR("Share '%s' has wide links and SMB3 unix "
-			"extensions enabled. "
-			"These parameters are incompatible. "
-			"Wide links will be disabled for this share.\n",
-			 lp_const_servicename(snum));
+		} else if (lp_smb3_unix_extensions(snum)) {
+			DBG_ERR("Share '%s' has wide links and SMB3 Unix "
+				"extensions enabled. "
+				"These parameters are incompatible. "
+				"Wide links will be disabled for this share.\n",
+				lp_const_servicename(snum));
 		}
 	}
 }
@@ -4708,7 +4753,7 @@ void widelinks_warning(int snum)
 bool lp_widelinks(int snum)
 {
 	/* wide links is always incompatible with unix extensions */
-	if (lp_smb1_unix_extensions() || lp_smb3_unix_extensions()) {
+	if (lp_smb1_unix_extensions() || lp_smb3_unix_extensions(snum)) {
 		/*
 		 * Unless we have "allow insecure widelinks"
 		 * turned on.
@@ -4797,6 +4842,45 @@ int lp_rpc_high_port(void)
 	return Globals.rpc_high_port;
 }
 
+const char *lp_dns_hostname(void)
+{
+	const char *dns_hostname = lp__dns_hostname();
+	const char *dns_domain = lp_dnsdomain();
+	char *netbios_name = NULL;
+	bool ok;
+
+	if (dns_hostname != NULL && dns_hostname[0] != '\0') {
+		return dns_hostname;
+	}
+
+	netbios_name = talloc_strdup(talloc_tos(), lp_netbios_name());
+	if (netbios_name == NULL) {
+		return NULL;
+	}
+	ok = strlower_m(netbios_name);
+	if (!ok) {
+		return NULL;
+	}
+
+	/* If it isn't set, try to initialize with [netbios name].[realm] */
+	if (dns_domain != NULL && dns_domain[0] != '\0') {
+		Globals._dns_hostname = talloc_asprintf(Globals.ctx,
+							"%s.%s",
+							netbios_name,
+							dns_domain);
+	} else {
+		Globals._dns_hostname = talloc_strdup(Globals.ctx,
+						      netbios_name);
+	}
+	TALLOC_FREE(netbios_name);
+	if (Globals._dns_hostname == NULL) {
+		return NULL;
+	}
+	dns_hostname = Globals._dns_hostname;
+
+	return dns_hostname;
+}
+
 /*
  * Do not allow LanMan auth if unless NTLMv1 is also allowed
  *
@@ -4849,15 +4933,24 @@ uint32_t lp_get_async_dns_timeout(void)
 	return MAX(Globals.async_dns_timeout, 1);
 }
 
-bool lp_smb3_unix_extensions(void)
+bool lp_strict_rename(int snum)
 {
-	/*
-	 * FIXME: If this gets always enabled, check source3/selftest/tests.py
-	 * and source3/wscript for HAVE_SMB3_UNIX_EXTENSIONS.
-	 */
-#if defined(DEVELOPER)
-	return lp__smb3_unix_extensions();
-#else
-	return false;
-#endif
+	if (lp_smb3_directory_leases()){
+		return true;
+	}
+	return lp__strict_rename(snum);
+}
+
+int lp_smb3_directory_leases(void)
+{
+	bool dirleases = lp__smb3_directory_leases();
+
+	if (lp__smb3_directory_leases() == Auto) {
+		dirleases &= !lp_clustering();
+	}
+
+	dirleases &= lp_smb2_leases();
+	dirleases &= lp_oplocks(GLOBAL_SECTION_SNUM);
+	dirleases &= !lp_kernel_oplocks(GLOBAL_SECTION_SNUM);
+	return dirleases;
 }

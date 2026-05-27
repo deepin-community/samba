@@ -20,8 +20,11 @@ zypper --non-interactive install \
     bind-utils \
     binutils \
     bison \
+    cargo \
     ccache \
     chrpath \
+    clang-devel \
+    codespell \
     crypto-policies-scripts \
     cups-devel \
     curl \
@@ -71,13 +74,12 @@ zypper --non-interactive install \
     mingw64-gcc \
     ncurses-devel \
     openldap2-devel \
+    openssl-devel \
     pam-devel \
     patch \
     perl \
     perl-Archive-Tar-Wrapper \
     perl-ExtUtils-MakeMaker \
-    perl-JSON \
-    perl-JSON-XS \
     perl-Parse-Yapp \
     perl-Test-Base \
     pkgconfig \
@@ -107,6 +109,7 @@ zypper --non-interactive install \
     tar \
     tracker-devel \
     tree \
+    utf8proc-devel \
     wget \
     which \
     xfsprogs-devel \

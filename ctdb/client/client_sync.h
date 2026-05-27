@@ -386,10 +386,6 @@ int ctdb_ctrl_reload_public_ips(TALLOC_CTX *mem_ctx, struct tevent_context *ev,
 				struct ctdb_client_context *client,
 				int destnode, struct timeval timeout);
 
-int ctdb_ctrl_ipreallocated(TALLOC_CTX *mem_ctx, struct tevent_context *ev,
-			    struct ctdb_client_context *client,
-			    int destnode, struct timeval timeout);
-
 int ctdb_ctrl_get_runstate(TALLOC_CTX *mem_ctx, struct tevent_context *ev,
 			   struct ctdb_client_context *client,
 			   int destnode, struct timeval timeout,
@@ -517,10 +513,5 @@ int ctdb_message_disable_recoveries(TALLOC_CTX *mem_ctx,
 				    struct ctdb_client_context *client,
 				    int destnode,
 				    struct ctdb_disable_message *disable);
-
-int ctdb_message_disable_ip_check(TALLOC_CTX *mem_ctx,
-				  struct tevent_context *ev,
-				  struct ctdb_client_context *client,
-				  int destnode, uint32_t timeout);
 
 #endif /* __CTDB_CLIENT_SYNC_H__ */

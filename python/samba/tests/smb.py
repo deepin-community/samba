@@ -25,7 +25,6 @@ from samba.ntstatus import (NT_STATUS_OBJECT_NAME_NOT_FOUND,
 from samba.samba3 import libsmb_samba_internal as libsmb
 from samba.samba3 import param as s3param
 
-PY3 = sys.version_info[0] == 3
 realm = os.environ.get('REALM')
 domain_dir = realm.lower() + '/'
 test_contents = 'abcd' * 256
@@ -39,7 +38,7 @@ test_file = os.path.join(test_dir, 'testing').replace('/', '\\')
 
 class SMBTests(samba.tests.TestCase):
     def setUp(self):
-        super(SMBTests, self).setUp()
+        super().setUp()
         self.server = os.environ["SERVER"]
         creds = self.insta_creds(template=self.get_credentials())
 
@@ -51,7 +50,7 @@ class SMBTests(samba.tests.TestCase):
         self.smb_conn.mkdir(test_dir)
 
     def tearDown(self):
-        super(SMBTests, self).tearDown()
+        super().tearDown()
         try:
             self.smb_conn.deltree(test_dir)
         except:
@@ -109,7 +108,7 @@ class SMBTests(samba.tests.TestCase):
             for i in range(1, 4):
                 contents = "I'm file {0} in dir {1}!".format(i, subdir)
                 path = self.make_sysvol_path(subdir, "file-{0}.txt".format(i))
-                self.smb_conn.savefile(path, test_contents.encode('utf8'))
+                self.smb_conn.savefile(path, contents.encode('utf8'))
                 filepaths.append(path)
 
         # sanity-check these dirs/files exist
@@ -147,7 +146,7 @@ class SMBTests(samba.tests.TestCase):
         """Returns whether a regular file exists (by trying to open it)"""
         try:
             self.smb_conn.loadfile(filepath)
-            exists = True;
+            exists = True
         except NTSTATUSError as err:
             if (err.args[0] == NT_STATUS_OBJECT_NAME_NOT_FOUND or
                 err.args[0] == NT_STATUS_OBJECT_PATH_NOT_FOUND):
@@ -204,8 +203,7 @@ class SMBTests(samba.tests.TestCase):
         self.assertEqual(contents.decode('utf8'), new_contents,
                           msg='contents of test file did not match what was written')
 
-    # with python2 this will save/load str type (with embedded nulls)
-    # with python3 this will save/load bytes type
+    # this will save/load bytes type
     def test_save_load_string_bytes(self):
         self.smb_conn.savefile(test_file, test_literal_bytes_embed_nulls)
 
@@ -213,17 +211,15 @@ class SMBTests(samba.tests.TestCase):
         self.assertEqual(contents, test_literal_bytes_embed_nulls,
                           msg='contents of test file did not match what was written')
 
-    # python3 only this will save/load unicode
+    # this will save/load unicode
     def test_save_load_utfcontents(self):
-        if PY3:
-            self.smb_conn.savefile(test_file, utf_contents.encode('utf8'))
+        self.smb_conn.savefile(test_file, utf_contents.encode('utf8'))
 
-            contents = self.smb_conn.loadfile(test_file)
-            self.assertEqual(contents.decode('utf8'), utf_contents,
-                              msg='contents of test file did not match what was written')
+        contents = self.smb_conn.loadfile(test_file)
+        self.assertEqual(contents.decode('utf8'), utf_contents,
+                          msg='contents of test file did not match what was written')
 
-    # with python2 this will save/load str type
-    # with python3 this will save/load bytes type
+    # this will save/load bytes type
     def test_save_binary_contents(self):
         self.smb_conn.savefile(test_file, binary_contents)
 

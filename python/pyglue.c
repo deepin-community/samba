@@ -18,6 +18,7 @@
 */
 
 #include "lib/replace/system/python.h"
+#include "pyerrors.h"
 #include "python/py3compat.h"
 #include "includes.h"
 #include "python/modules.h"
@@ -25,14 +26,10 @@
 #include "param/pyparam.h"
 #include "lib/socket/netif.h"
 #include "lib/util/debug.h"
+#include "lib/util/util_crypt.h"
 #include "librpc/ndr/ndr_private.h"
 #include "lib/cmdline/cmdline.h"
-
-void init_glue(void);
-static PyObject *PyExc_NTSTATUSError;
-static PyObject *PyExc_WERRORError;
-static PyObject *PyExc_HRESULTError;
-static PyObject *PyExc_DsExtendedError;
+#include "lib/crypto/gkdi.h"
 
 static PyObject *py_generate_random_str(PyObject *self, PyObject *args)
 {
@@ -314,6 +311,16 @@ static PyObject *py_is_ad_dc_built(PyObject *self,
 #endif
 }
 
+static PyObject *py_is_rust_built(PyObject *self,
+		PyObject *Py_UNUSED(ignored))
+{
+#ifdef HAVE_RUST
+	Py_RETURN_TRUE;
+#else
+	Py_RETURN_FALSE;
+#endif
+}
+
 static PyObject *py_is_selftest_enabled(PyObject *self,
                 PyObject *Py_UNUSED(ignored))
 {
@@ -429,8 +436,8 @@ static PyObject *py_interface_ips(PyObject *self, PyObject *args)
 
 static PyObject *py_strcasecmp_m(PyObject *self, PyObject *args)
 {
-	const char *s1 = NULL;
-	const char *s2 = NULL;
+	char *s1 = NULL;
+	char *s2 = NULL;
 	long cmp_result = 0;
 	if (!PyArg_ParseTuple(args, PYARG_STR_UNI
 			      PYARG_STR_UNI,
@@ -439,15 +446,15 @@ static PyObject *py_strcasecmp_m(PyObject *self, PyObject *args)
 	}
 
 	cmp_result = strcasecmp_m(s1, s2);
-	PyMem_Free(discard_const_p(char, s1));
-	PyMem_Free(discard_const_p(char, s2));
+	PyMem_Free(s1);
+	PyMem_Free(s2);
 	return PyLong_FromLong(cmp_result);
 }
 
 static PyObject *py_strstr_m(PyObject *self, PyObject *args)
 {
-	const char *s1 = NULL;
-	const char *s2 = NULL;
+	char *s1 = NULL;
+	char *s2 = NULL;
 	char *strstr_ret = NULL;
 	PyObject *result = NULL;
 	if (!PyArg_ParseTuple(args, PYARG_STR_UNI
@@ -457,13 +464,13 @@ static PyObject *py_strstr_m(PyObject *self, PyObject *args)
 
 	strstr_ret = strstr_m(s1, s2);
 	if (!strstr_ret) {
-		PyMem_Free(discard_const_p(char, s1));
-		PyMem_Free(discard_const_p(char, s2));
+		PyMem_Free(s1);
+		PyMem_Free(s2);
 		Py_RETURN_NONE;
 	}
 	result = PyUnicode_FromString(strstr_ret);
-	PyMem_Free(discard_const_p(char, s1));
-	PyMem_Free(discard_const_p(char, s2));
+	PyMem_Free(s1);
+	PyMem_Free(s2);
 	return result;
 }
 
@@ -491,6 +498,7 @@ static PyObject *py_get_burnt_commandline(PyObject *self, PyObject *args)
 
 	argv = PyList_AsStringList(frame, cmdline_as_list, "sys.argv");
 	if (argv == NULL) {
+		TALLOC_FREE(frame);
 		return NULL;
 	}
 
@@ -523,6 +531,42 @@ static PyObject *py_get_burnt_commandline(PyObject *self, PyObject *args)
 	return ret;
 }
 
+static PyObject *py_crypt(PyObject *self, PyObject *args)
+{
+	PyObject *py_hash = NULL;
+	char *phrase = NULL;
+	char *setting = NULL;
+	TALLOC_CTX *frame = NULL;
+	int ret;
+	DATA_BLOB hash = {};
+
+	if (!PyArg_ParseTuple(args, "ss", &phrase, &setting)) {
+		TALLOC_FREE(frame);
+		return NULL;
+	}
+	frame = talloc_stackframe();
+	ret = talloc_crypt_blob(frame, phrase, setting, &hash);
+	if (ret != 0) {
+		const char *errstr = talloc_crypt_errstring(frame, ret);
+		if (ret == EINVAL || ret == ERANGE || ret == ENOTRECOVERABLE) {
+			PyErr_Format(PyExc_ValueError,
+				     "could not crypt(): %s",
+				     errstr);
+		} else {
+			PyErr_Format(PyExc_OSError,
+				     "could not crypt(): %s",
+				     errstr);
+		}
+		TALLOC_FREE(frame);
+		return NULL;
+	}
+
+	py_hash = PyUnicode_FromStringAndSize((char *)hash.data, hash.length);
+	TALLOC_FREE(frame);
+	return py_hash;
+}
+
+
 static PyMethodDef py_misc_methods[] = {
 	{ "generate_random_str", (PyCFunction)py_generate_random_str, METH_VARARGS,
 		"generate_random_str(len) -> string\n"
@@ -535,12 +579,12 @@ static PyMethodDef py_misc_methods[] = {
 		METH_VARARGS, "generate_random_machine_password(min, max) -> string\n"
 		"Generate random password "
 		"(based on random utf16 characters converted to utf8 or "
-		"random ascii characters if 'unix charset' is not 'utf8')"
+		"random ascii characters if 'unix charset' is not 'utf8') "
 		"with a length >= min (at least 14) and <= max (at most 255)." },
 	{ "check_password_quality", (PyCFunction)py_check_password_quality,
 		METH_VARARGS, "check_password_quality(pass) -> bool\n"
-		"Check password quality against Samba's check_password_quality,"
-		"the implementation of Microsoft's rules:"
+		"Check password quality against Samba's check_password_quality, "
+		"the implementation of Microsoft's rules: "
 		"http://msdn.microsoft.com/en-us/subscriptions/cc786468%28v=ws.10%29.aspx"
 	},
 	{ "unix2nttime", (PyCFunction)py_unix2nttime, METH_VARARGS,
@@ -570,7 +614,7 @@ static PyMethodDef py_misc_methods[] = {
 	{ "is_ntvfs_fileserver_built", (PyCFunction)py_is_ntvfs_fileserver_built, METH_NOARGS,
 		"is the NTVFS file server built in this installation?" },
 	{ "is_heimdal_built", (PyCFunction)py_is_heimdal_built, METH_NOARGS,
-		"is Samba built with Heimdal Kerberbos?" },
+		"is Samba built with Heimdal Kerberos?" },
 	{ "generate_random_bytes",
 		(PyCFunction)py_generate_random_bytes,
 		METH_VARARGS,
@@ -584,6 +628,11 @@ static PyMethodDef py_misc_methods[] = {
 		METH_NOARGS, "How many NDR internal tokens is too many for this build?" },
 	{ "get_burnt_commandline", (PyCFunction)py_get_burnt_commandline,
 		METH_VARARGS, "Return a redacted commandline to feed to setproctitle (None if no redaction required)" },
+	{ "crypt", (PyCFunction)py_crypt,
+		METH_VARARGS,
+		"encrypt as phrase, per crypt(3), as determined by setting." },
+	{ "is_rust_built", (PyCFunction)py_is_rust_built, METH_NOARGS,
+		"is Samba built with Rust?" },
 	{0}
 };
 
@@ -598,6 +647,8 @@ static struct PyModuleDef moduledef = {
 MODULE_INIT_FUNC(_glue)
 {
 	PyObject *m;
+	PyObject *py_obj = NULL;
+	int ret;
 
 	debug_setup_talloc_log();
 
@@ -607,28 +658,57 @@ MODULE_INIT_FUNC(_glue)
 
 	PyModule_AddObject(m, "version",
 					   PyUnicode_FromString(SAMBA_VERSION_STRING));
-	PyExc_NTSTATUSError = PyErr_NewException(discard_const_p(char, "samba.NTSTATUSError"), PyExc_RuntimeError, NULL);
-	if (PyExc_NTSTATUSError != NULL) {
-		Py_INCREF(PyExc_NTSTATUSError);
-		PyModule_AddObject(m, "NTSTATUSError", PyExc_NTSTATUSError);
+	py_obj = PyErr_NewException("samba.NTSTATUSError", PyExc_RuntimeError, NULL);
+	if (py_obj != NULL) {
+		PyModule_AddObject(m, "NTSTATUSError", py_obj);
 	}
 
-	PyExc_WERRORError = PyErr_NewException(discard_const_p(char, "samba.WERRORError"), PyExc_RuntimeError, NULL);
-	if (PyExc_WERRORError != NULL) {
-		Py_INCREF(PyExc_WERRORError);
-		PyModule_AddObject(m, "WERRORError", PyExc_WERRORError);
+	py_obj = PyErr_NewException("samba.WERRORError", PyExc_RuntimeError, NULL);
+	if (py_obj != NULL) {
+		PyModule_AddObject(m, "WERRORError", py_obj);
 	}
 
-	PyExc_HRESULTError = PyErr_NewException(discard_const_p(char, "samba.HRESULTError"), PyExc_RuntimeError, NULL);
-	if (PyExc_HRESULTError != NULL) {
-		Py_INCREF(PyExc_HRESULTError);
-		PyModule_AddObject(m, "HRESULTError", PyExc_HRESULTError);
+	py_obj = PyErr_NewException("samba.HRESULTError", PyExc_RuntimeError, NULL);
+	if (py_obj != NULL) {
+		PyModule_AddObject(m, "HRESULTError", py_obj);
 	}
 
-	PyExc_DsExtendedError = PyErr_NewException(discard_const_p(char, "samba.DsExtendedError"), PyExc_RuntimeError, NULL);
-	if (PyExc_DsExtendedError != NULL) {
-		Py_INCREF(PyExc_DsExtendedError);
-		PyModule_AddObject(m, "DsExtendedError", PyExc_DsExtendedError);
+	py_obj = PyErr_NewException("samba.DsExtendedError", PyExc_RuntimeError, NULL);
+	if (py_obj != NULL) {
+		PyModule_AddObject(m, "DsExtendedError", py_obj);
+	}
+
+	ret = PyModule_AddIntConstant(m, "GKDI_L1_KEY_ITERATION", gkdi_l1_key_iteration);
+	if (ret) {
+		Py_DECREF(m);
+		return NULL;
+	}
+	ret = PyModule_AddIntConstant(m, "GKDI_L2_KEY_ITERATION", gkdi_l2_key_iteration);
+	if (ret) {
+		Py_DECREF(m);
+		return NULL;
+	}
+	py_obj = PyLong_FromLongLong(gkdi_key_cycle_duration);
+	if (py_obj == NULL) {
+		Py_DECREF(m);
+		return NULL;
+	}
+	ret = PyModule_AddObject(m, "GKDI_KEY_CYCLE_DURATION", py_obj);
+	if (ret) {
+		Py_DECREF(py_obj);
+		Py_DECREF(m);
+		return NULL;
+	}
+	py_obj = PyLong_FromLongLong(gkdi_max_clock_skew);
+	if (py_obj == NULL) {
+		Py_DECREF(m);
+		return NULL;
+	}
+	ret = PyModule_AddObject(m, "GKDI_MAX_CLOCK_SKEW", py_obj);
+	if (ret) {
+		Py_DECREF(py_obj);
+		Py_DECREF(m);
+		return NULL;
 	}
 
 	return m;

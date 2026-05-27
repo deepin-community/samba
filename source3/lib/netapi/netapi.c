@@ -22,7 +22,6 @@
 #include "lib/netapi/netapi.h"
 #include "lib/netapi/netapi_private.h"
 #include "secrets.h"
-#include "krb5_env.h"
 #include "source3/param/loadparm.h"
 #include "lib/param/param.h"
 #include "auth/gensec/gensec.h"
@@ -62,6 +61,8 @@ NET_API_STATUS libnetapi_init(struct libnetapi_ctx **context)
 {
 	NET_API_STATUS ret;
 	TALLOC_CTX *frame;
+	struct loadparm_context *lp_ctx = NULL;
+
 	if (stat_ctx && libnetapi_initialized) {
 		*context = stat_ctx;
 		return NET_API_STATUS_SUCCESS;
@@ -72,10 +73,16 @@ NET_API_STATUS libnetapi_init(struct libnetapi_ctx **context)
 #endif
 	frame = talloc_stackframe();
 
+	lp_ctx = loadparm_init_s3(frame, loadparm_s3_helpers());
+	if (lp_ctx == NULL) {
+		TALLOC_FREE(frame);
+		return W_ERROR_V(WERR_NOT_ENOUGH_MEMORY);
+	}
+
 	/* When libnetapi is invoked from an application, it does not
 	 * want to be swamped with level 10 debug messages, even if
 	 * this has been set for the server in smb.conf */
-	lp_set_cmdline("log level", "0");
+	lpcfg_set_cmdline(lp_ctx, "log level", "0");
 	setup_logging("libnetapi", DEBUG_STDERR);
 
 	if (!lp_load_global(get_dyn_CONFIGFILE())) {
@@ -89,7 +96,10 @@ NET_API_STATUS libnetapi_init(struct libnetapi_ctx **context)
 
 	BlockSignals(True, SIGPIPE);
 
-	ret = libnetapi_net_init(context);
+	ret = libnetapi_net_init(context, lp_ctx, NULL);
+	if (ret == NET_API_STATUS_SUCCESS) {
+		talloc_steal(*context, lp_ctx);
+	}
 	TALLOC_FREE(frame);
 	return ret;
 }
@@ -102,35 +112,40 @@ level etc, this avoids doing so again (which causes trouble with -d on
 the command line).
 ****************************************************************/
 
-NET_API_STATUS libnetapi_net_init(struct libnetapi_ctx **context)
+NET_API_STATUS libnetapi_net_init(struct libnetapi_ctx **context,
+				  struct loadparm_context *lp_ctx,
+				  struct cli_credentials *creds)
 {
 	NET_API_STATUS status;
 	struct libnetapi_ctx *ctx = NULL;
-	TALLOC_CTX *frame = talloc_stackframe();
-	struct loadparm_context *lp_ctx = NULL;
+	TALLOC_CTX *frame = NULL;
 
+	if (stat_ctx != NULL && libnetapi_initialized) {
+		*context = stat_ctx;
+		return NET_API_STATUS_SUCCESS;
+	}
+
+	frame = talloc_stackframe();
 	ctx = talloc_zero(frame, struct libnetapi_ctx);
 	if (!ctx) {
 		TALLOC_FREE(frame);
 		return W_ERROR_V(WERR_NOT_ENOUGH_MEMORY);
 	}
 
-	ctx->creds = cli_credentials_init(ctx);
-	if (ctx->creds == NULL) {
-		TALLOC_FREE(frame);
-		return W_ERROR_V(WERR_NOT_ENOUGH_MEMORY);
-	}
+	ctx->lp_ctx = lp_ctx;
 
-	lp_ctx = loadparm_init_s3(frame, loadparm_s3_helpers());
-	if (lp_ctx == NULL) {
-		TALLOC_FREE(frame);
-		return W_ERROR_V(WERR_NOT_ENOUGH_MEMORY);
+	ctx->creds = creds;
+	if (ctx->creds == NULL) {
+		ctx->creds = cli_credentials_init(ctx);
+		if (ctx->creds == NULL) {
+			TALLOC_FREE(frame);
+			return W_ERROR_V(WERR_NOT_ENOUGH_MEMORY);
+		}
+		/* Ignore return code, as we might not have a smb.conf */
+		(void)cli_credentials_guess(ctx->creds, lp_ctx);
 	}
 
 	BlockSignals(True, SIGPIPE);
-
-	/* Ignore return code, as we might not have a smb.conf */
-	(void)cli_credentials_guess(ctx->creds, lp_ctx);
 
 	status = libnetapi_init_private_context(ctx);
 	if (status != 0) {
@@ -142,7 +157,7 @@ NET_API_STATUS libnetapi_net_init(struct libnetapi_ctx **context)
 
 	talloc_steal(NULL, ctx);
 	*context = stat_ctx = ctx;
-	
+
 	TALLOC_FREE(frame);
 	return NET_API_STATUS_SUCCESS;
 }
@@ -206,8 +221,8 @@ NET_API_STATUS libnetapi_set_debuglevel(struct libnetapi_ctx *ctx,
 {
 	TALLOC_CTX *frame = talloc_stackframe();
 	ctx->debuglevel = talloc_strdup(ctx, debuglevel);
-	
-	if (!lp_set_cmdline("log level", debuglevel)) {
+
+	if (!lpcfg_set_cmdline(ctx->lp_ctx, "log level", debuglevel)) {
 		TALLOC_FREE(frame);
 		return W_ERROR_V(WERR_GEN_FAILURE);
 	}
@@ -224,7 +239,7 @@ NET_API_STATUS libnetapi_set_logfile(struct libnetapi_ctx *ctx,
 	TALLOC_CTX *frame = talloc_stackframe();
 	ctx->logfile = talloc_strdup(ctx, logfile);
 
-	if (!lp_set_cmdline("log file", logfile)) {
+	if (!lpcfg_set_cmdline(ctx->lp_ctx, "log file", logfile)) {
 		TALLOC_FREE(frame);
 		return W_ERROR_V(WERR_GEN_FAILURE);
 	}
@@ -356,6 +371,29 @@ NET_API_STATUS libnetapi_set_creds(struct libnetapi_ctx *ctx,
 	return NET_API_STATUS_SUCCESS;
 }
 
+/**
+ * @brief Get the credentials of the libnet context
+ *
+ * @param[in]  ctx      The netapi context
+ *
+ * @param[in]  creds    A pointer to hold the creds.
+ *
+ * @return 0 on success, an werror code otherwise.
+ */
+NET_API_STATUS libnetapi_get_creds(struct libnetapi_ctx *ctx,
+				   struct cli_credentials **creds)
+{
+	if (ctx == NULL) {
+		return W_ERROR_V(WERR_INVALID_PARAMETER);
+	}
+
+	if (creds != NULL) {
+		*creds = ctx->creds;
+	}
+
+	return NET_API_STATUS_SUCCESS;
+}
+
 /****************************************************************
 ****************************************************************/
 
@@ -391,12 +429,8 @@ NET_API_STATUS libnetapi_get_use_kerberos(struct libnetapi_ctx *ctx,
 
 NET_API_STATUS libnetapi_set_use_ccache(struct libnetapi_ctx *ctx)
 {
-	uint32_t gensec_features;
-
-	gensec_features = cli_credentials_get_gensec_features(ctx->creds);
-	gensec_features |= GENSEC_FEATURE_NTLM_CCACHE;
-	cli_credentials_set_gensec_features(ctx->creds,
-					    gensec_features,
+	cli_credentials_add_gensec_features(ctx->creds,
+					    GENSEC_FEATURE_NTLM_CCACHE,
 					    CRED_SPECIFIED);
 
 	return NET_API_STATUS_SUCCESS;
@@ -411,7 +445,7 @@ char *libnetapi_errstr(NET_API_STATUS status)
 	TALLOC_CTX *frame = talloc_stackframe();
 	char *ret;
 	if (status & 0xc0000000) {
-		ret = talloc_strdup(NULL, 
+		ret = talloc_strdup(NULL,
 				     get_friendly_nt_error_msg(NT_STATUS(status)));
 	} else {
 		ret = talloc_strdup(NULL,

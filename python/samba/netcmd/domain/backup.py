@@ -56,6 +56,7 @@ from samba.dsdb import _dsdb_load_udv_v2
 from samba.ndr import ndr_pack
 from samba.credentials import SMB_SIGNING_REQUIRED
 from samba import safe_tarfile as tarfile
+import hashlib
 
 
 # work out a SID (based on a free RID) to use when the domain gets restored.
@@ -133,6 +134,14 @@ def backup_filepath(targetdir, name, time_str):
     return os.path.join(targetdir, filename)
 
 
+def create_sha256sum(filename):
+    hash = hashlib.new('sha256')
+    with open(filename, "rb") as f:
+        for chunk in iter(lambda: f.read(65536), b""):
+            hash.update(chunk)
+    return hash.hexdigest()
+
+
 def create_backup_tar(logger, tmpdir, backup_filepath):
     # Adds everything in the tmpdir into a new tar file
     logger.info("Creating backup file %s..." % backup_filepath)
@@ -206,7 +215,7 @@ def set_admin_password(logger, samdb):
 
 
 class cmd_domain_backup_online(samba.netcmd.Command):
-    '''Copy a running DC's current DB into a backup tar file.
+    """Copy a running DC's current DB into a backup tar file.
 
     Takes a backup copy of the current domain from a running DC. If the domain
     were to undergo a catastrophic failure, then the backup file can be used to
@@ -219,7 +228,7 @@ class cmd_domain_backup_online(samba.netcmd.Command):
     - all the domain's secrets are included in the backup file.
     - although the DB contents can be untarred and examined manually, you need
       to run 'samba-tool domain backup restore' before you can start a Samba DC
-      from the backup file.'''
+      from the backup file."""
 
     synopsis = "%prog --server=<DC-to-backup> --targetdir=<output-dir>"
     takes_optiongroups = {
@@ -304,7 +313,7 @@ class cmd_domain_backup_online(samba.netcmd.Command):
 
 
 class cmd_domain_backup_restore(cmd_fsmo_seize):
-    '''Restore the domain's DB from a backup-file.
+    """Restore the domain's DB from a backup-file.
 
     This restores a previously backed up copy of the domain's DB on a new DC.
 
@@ -317,7 +326,7 @@ class cmd_domain_backup_restore(cmd_fsmo_seize):
     be joined to the new DC to recover the network.
 
     Note that this command should be run as the root user - it will fail
-    otherwise.'''
+    otherwise."""
 
     synopsis = ("%prog --backup-file=<tar-file> --targetdir=<output-dir> "
                 "--newservername=<DC-name>")
@@ -339,10 +348,10 @@ class cmd_domain_backup_restore(cmd_fsmo_seize):
 
     def register_dns_zone(self, logger, samdb, lp, ntdsguid, host_ip,
                           host_ip6, site):
-        '''
+        """
         Registers the new realm's DNS objects when a renamed domain backup
         is restored.
-        '''
+        """
         names = guess_names(lp)
         domaindn = names.domaindn
         forestdn = samdb.get_root_basedn().get_linearized()
@@ -371,7 +380,7 @@ class cmd_domain_backup_restore(cmd_fsmo_seize):
                                  dnsadmins_sid, add_root=False)
 
     def fix_old_dc_references(self, samdb):
-        '''Fixes attributes that reference the old/removed DCs'''
+        """Fixes attributes that reference the old/removed DCs"""
 
         # we just want to fix up DB problems here that were introduced by us
         # removing the old DCs. We restrict what we fix up so that the restored
@@ -396,7 +405,7 @@ class cmd_domain_backup_restore(cmd_fsmo_seize):
         samdb.transaction_commit()
 
     def create_default_site(self, samdb, logger):
-        '''Creates the default site, if it doesn't already exist'''
+        """Creates the default site, if it doesn't already exist"""
 
         sitename = DEFAULTSITE
         search_expr = "(&(cn={0})(objectclass=site))".format(sitename)
@@ -491,6 +500,8 @@ class cmd_domain_backup_restore(cmd_fsmo_seize):
         tf = tarfile.open(backup_file)
         tf.extractall(targetdir)
         tf.close()
+        # set the permissions on the target dir strict but also relaxed enough
+        os.chmod(targetdir, mode=0o755)
 
         # use the smb.conf that got backed up, by default (save what was
         # actually backed up, before we mess with it)
@@ -692,7 +703,7 @@ class cmd_domain_backup_restore(cmd_fsmo_seize):
 
 
 class cmd_domain_backup_rename(samba.netcmd.Command):
-    '''Copy a running DC's DB to backup file, renaming the domain in the process.
+    """Copy a running DC's DB to backup file, renaming the domain in the process.
 
     Where <new-domain> is the new domain's NetBIOS name, and <new-dnsrealm> is
     the new domain's realm in DNS form.
@@ -718,7 +729,7 @@ class cmd_domain_backup_rename(samba.netcmd.Command):
       in order to work (they will still refer to the old DC's IP instead of the
       new DC's address).
     - we recommend that you only use this option if you know what you're doing.
-    '''
+    """
 
     synopsis = ("%prog <new-domain> <new-dnsrealm> --server=<DC-to-backup> "
                 "--targetdir=<output-dir>")
@@ -744,7 +755,7 @@ class cmd_domain_backup_rename(samba.netcmd.Command):
     takes_args = ["new_domain_name", "new_dns_realm"]
 
     def update_dns_root(self, logger, samdb, old_realm, delete_old_dns):
-        '''Updates dnsRoot for the partition objects to reflect the rename'''
+        """Updates dnsRoot for the partition objects to reflect the rename"""
 
         # lookup the crossRef objects that hold the old realm's dnsRoot
         partitions_dn = samdb.get_partitions_dn()
@@ -783,7 +794,7 @@ class cmd_domain_backup_rename(samba.netcmd.Command):
     # Updates the CN=<domain>,CN=Partitions,CN=Configuration,... object to
     # reflect the domain rename
     def rename_domain_partition(self, logger, samdb, new_netbios_name):
-        '''Renames the domain partition object and updates its nETBIOSName'''
+        """Renames the domain partition object and updates its nETBIOSName"""
 
         # lookup the crossRef object that holds the nETBIOSName (nCName has
         # already been updated by this point, but the netBIOS hasn't)
@@ -822,7 +833,7 @@ class cmd_domain_backup_rename(samba.netcmd.Command):
         samdb.delete(dn, ["tree_delete:1"])
 
     def fix_old_dn_attributes(self, samdb):
-        '''Fixes attributes (i.e. objectCategory) that still use the old DN'''
+        """Fixes attributes (i.e. objectCategory) that still use the old DN"""
 
         samdb.transaction_start()
         # Just fix any mismatches in DN detected (leave any other errors)
@@ -942,7 +953,7 @@ class cmd_domain_backup_rename(samba.netcmd.Command):
 
 
 class cmd_domain_backup_offline(samba.netcmd.Command):
-    '''Backup the local domain directories safely into a tar file.
+    """Backup the local domain directories safely into a tar file.
 
     Takes a backup copy of the current domain from the local files on disk,
     with proper locking of the DB to ensure consistency. If the domain were to
@@ -953,7 +964,7 @@ class cmd_domain_backup_offline(samba.netcmd.Command):
     - a backup can be created even if the DC isn't currently running.
     - includes non-replicated attributes that an online backup wouldn't store.
     - takes a copy of the raw database files, which has the risk that any
-      hidden problems in the DB are preserved in the backup.'''
+      hidden problems in the DB are preserved in the backup."""
 
     synopsis = "%prog [options]"
     takes_optiongroups = {
@@ -1172,7 +1183,8 @@ class cmd_domain_backup_offline(samba.netcmd.Command):
         # Close the original samdb, to avoid any confusion, we will
         # not use this any more as the data has all been copied under
         # the transaction
-        samdb = None
+        samdb.disconnect()
+        del samdb
 
         # Open the new backed up samdb, flag it as backed up, and write
         # the next SID so the restore tool can add objects. We use
@@ -1189,7 +1201,8 @@ class cmd_domain_backup_offline(samba.netcmd.Command):
         add_backup_marker(samdb, "backupType", "offline")
 
         # Close the backed up samdb
-        samdb = None
+        samdb.disconnect()
+        del samdb
 
         # Now handle all the LDB and TDB files that are not linked to
         # anything else.  Use transactions for LDBs.
@@ -1226,19 +1239,35 @@ class cmd_domain_backup_offline(samba.netcmd.Command):
         os.remove(backup_fn)
 
         logger.info('building backup tar')
+
+        chksum_list = []
+
         for path in all_files:
             arc_path = self.get_arc_path(path, paths)
 
             if os.path.exists(path + self.backup_ext):
                 logger.info('   adding backup ' + arc_path + self.backup_ext +
                             ' to tar and deleting file')
+                chksum_list.append(
+                    "%s  %s" % (create_sha256sum(path + self.backup_ext),
+                                arc_path))
                 tar.add(path + self.backup_ext, arcname=arc_path)
                 os.remove(path + self.backup_ext)
             elif path.endswith('.ldb') or path.endswith('.tdb'):
                 logger.info('   skipping ' + arc_path)
-            else:
+            elif os.path.isfile(path):
                 logger.info('   adding misc file ' + arc_path)
+                chksum_list.append("%s  %s" %
+                                   (create_sha256sum(path),
+                                    arc_path))
                 tar.add(path, arcname=arc_path)
+
+        chksum_filepath = os.path.join(temp_tar_dir, "SHA256SUM")
+        with open(chksum_filepath, "w") as f:
+            for c in chksum_list:
+                f.write(c + '\n')
+        tar.add(chksum_filepath, os.path.basename(chksum_filepath))
+        os.remove(chksum_filepath)
 
         tar.close()
         os.rename(temp_tar_name,
@@ -1249,7 +1278,7 @@ class cmd_domain_backup_offline(samba.netcmd.Command):
 
 
 class cmd_domain_backup(samba.netcmd.SuperCommand):
-    '''Create or restore a backup of the domain.'''
+    """Create or restore a backup of the domain."""
     subcommands = {'offline': cmd_domain_backup_offline(),
                    'online': cmd_domain_backup_online(),
                    'rename': cmd_domain_backup_rename(),

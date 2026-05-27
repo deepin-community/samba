@@ -40,6 +40,9 @@ enum auth_password_state {
 #define AUTH_SESSION_INFO_SIMPLE_PRIVILEGES  0x04 /* Use a trivial map between users and privileges, rather than a DB */
 #define AUTH_SESSION_INFO_UNIX_TOKEN         0x08 /* The returned token must have the unix_token and unix_info elements provided */
 #define AUTH_SESSION_INFO_NTLM               0x10 /* The returned token must have authenticated-with-NTLM flag set */
+#define AUTH_SESSION_INFO_FORCE_COMPOUNDED_AUTHENTICATION  0x20 /* The user authenticated with a device. */
+#define AUTH_SESSION_INFO_DEVICE_DEFAULT_GROUPS     0x40 /* Add the device to the default world and network groups */
+#define AUTH_SESSION_INFO_DEVICE_AUTHENTICATED      0x80 /* Add the device to the 'authenticated users' group */
 
 struct auth_usersupplied_info
 {
@@ -76,6 +79,7 @@ struct auth_usersupplied_info
 
 	struct {
 		uint32_t negotiate_flags;
+		bool authenticate_kerberos;
 		enum netr_SchannelType secure_channel_type;
 		const char *computer_name; /* [charset(UTF8)] */
 		const char *account_name; /* [charset(UTF8)] */

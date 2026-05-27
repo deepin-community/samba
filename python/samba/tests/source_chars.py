@@ -66,8 +66,6 @@ def _find_root():
 ROOT = None
 
 IGNORED_FILES = (
-    'examples/validchars/validchr.com',
-    'examples/tridge/smb.conf',
     'source3/selftest/ktest-krb5_ccache-2',
     'source3/selftest/ktest-krb5_ccache-3',
     'testdata/source-chars-bad.c',
@@ -243,7 +241,7 @@ class CharacterTests(TestCase):
             dirs = set()
             for c in set(s):
                 if is_bad_char(c):
-                    self.fail(f"{name} has potentially bad format characters!")
+                    self.fail(f"{name} has potentially bad format character {ord(c[0])}!")
                 dirs.add(u.bidirectional(c))
 
             if 'L' in dirs and 'R' in dirs:

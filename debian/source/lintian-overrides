@@ -2,3 +2,6 @@
 samba source: very-long-line-length-in-source-file *
 # d/control has Breaks: aligned with Replaces: values:
 samba source: debian-control-has-unusual-field-spacing Breaks [debian/control:*]
+# lintian complains about usage of $VARIABLES in dh-exec-enabled d/*.install files
+# (actual reason for dh-exec is different: to expand <profiles>)
+samba source: dh-exec-useless-usage *DEB_HOST_MULTIARCH*

@@ -454,7 +454,7 @@ static NTSTATUS dcesrv_samr_OpenDomain(struct dcesrv_call_state *dce_call, TALLO
 
 	d_state->domain_sid = talloc_steal(d_state, r->in.sid);
 
-	if (dom_sid_equal(d_state->domain_sid, dom_sid_parse_talloc(mem_ctx, SID_BUILTIN))) {
+	if (dom_sid_equal(d_state->domain_sid, &global_sid_Builtin)) {
 		d_state->builtin = true;
 		d_state->domain_name = "BUILTIN";
 	} else {
@@ -1120,7 +1120,7 @@ static NTSTATUS dcesrv_samr_CreateDomainGroup(struct dcesrv_call_state *dce_call
 	d_state = h->data;
 
 	if (d_state->builtin) {
-		DEBUG(5, ("Cannot create a domain group in the BUILTIN domain"));
+		DEBUG(5, ("Cannot create a domain group in the BUILTIN domain\n"));
 		return NT_STATUS_ACCESS_DENIED;
 	}
 
@@ -1166,7 +1166,7 @@ static NTSTATUS dcesrv_samr_CreateDomainGroup(struct dcesrv_call_state *dce_call
 */
 static int compare_SamEntry(struct samr_SamEntry *e1, struct samr_SamEntry *e2)
 {
-	return e1->idx - e2->idx;
+	return NUMERIC_CMP(e1->idx, e2->idx);
 }
 
 static int compare_msgRid(struct ldb_message **m1, struct ldb_message **m2) {
@@ -1197,8 +1197,9 @@ static int compare_msgRid(struct ldb_message **m1, struct ldb_message **m2) {
 	}
 
 	/*
-	 * Get and compare the rids, if we fail to extract a rid treat it as a
-	 * missing SID and sort to the end of the list
+	 * Get and compare the rids. If we fail to extract a rid (because
+	 * there are no subauths) the msg goes to the end of the list, but
+	 * before the NULL SIDs.
 	 */
 	status = dom_sid_split_rid(NULL, sid1, NULL, &rid1);
 	if (!NT_STATUS_IS_OK(status)) {
@@ -1448,7 +1449,7 @@ static NTSTATUS dcesrv_samr_EnumDomainGroups(struct dcesrv_call_state *dce_call,
 
   This call uses transactions to ensure we don't get a new conflicting
   user while we are processing this, and to ensure the user either
-  completly exists, or does not.
+  completely exists, or does not.
 */
 static NTSTATUS dcesrv_samr_CreateUser2(struct dcesrv_call_state *dce_call, TALLOC_CTX *mem_ctx,
 				 struct samr_CreateUser2 *r)
@@ -1471,7 +1472,7 @@ static NTSTATUS dcesrv_samr_CreateUser2(struct dcesrv_call_state *dce_call, TALL
 	d_state = h->data;
 
 	if (d_state->builtin) {
-		DEBUG(5, ("Cannot create a user in the BUILTIN domain"));
+		DEBUG(5, ("Cannot create a user in the BUILTIN domain\n"));
 		return NT_STATUS_ACCESS_DENIED;
 	} else if (r->in.acct_flags == ACB_DOMTRUST) {
 		/* Domain trust accounts must be created by the LSA calls */
@@ -1778,7 +1779,7 @@ static NTSTATUS dcesrv_samr_EnumDomainUsers(struct dcesrv_call_state *dce_call,
 		}
 
 		if (ac->num_entries == 0) {
-			DBG_WARNING("No users in domain %s",
+			DBG_WARNING("No users in domain %s\n",
 				    ldb_dn_get_linearized(d_state->domain_dn));
 			talloc_free(ac);
 
@@ -1895,7 +1896,7 @@ static NTSTATUS dcesrv_samr_CreateDomAlias(struct dcesrv_call_state *dce_call, T
 	d_state = h->data;
 
 	if (d_state->builtin) {
-		DEBUG(5, ("Cannot create a domain alias in the BUILTIN domain"));
+		DEBUG(5, ("Cannot create a domain alias in the BUILTIN domain\n"));
 		return NT_STATUS_ACCESS_DENIED;
 	}
 
@@ -3677,12 +3678,12 @@ static NTSTATUS dcesrv_samr_SetUserInfo(struct dcesrv_call_state *dce_call, TALL
 		break;
 
 	case 6:
-		SET_STRING(msg, info6.account_name,     "samAccountName");
+		SET_STRING(msg, info6.account_name,     "sAMAccountName");
 		SET_STRING(msg, info6.full_name,        "displayName");
 		break;
 
 	case 7:
-		SET_STRING(msg, info7.account_name,     "samAccountName");
+		SET_STRING(msg, info7.account_name,     "sAMAccountName");
 		break;
 
 	case 8:
@@ -3726,7 +3727,6 @@ static NTSTATUS dcesrv_samr_SetUserInfo(struct dcesrv_call_state *dce_call, TALL
 		status = samr_set_password_buffers(dce_call,
 						   sam_ctx,
 						   a_state->account_dn,
-						   a_state->domain_state->domain_dn,
 						   mem_ctx,
 						   r->in.info->info18.lm_pwd_active ? r->in.info->info18.lm_pwd.hash : NULL,
 						   r->in.info->info18.nt_pwd_active ? r->in.info->info18.nt_pwd.hash : NULL);
@@ -3763,7 +3763,7 @@ static NTSTATUS dcesrv_samr_SetUserInfo(struct dcesrv_call_state *dce_call, TALL
 		IFSET(SAMR_FIELD_ACCT_EXPIRY)
 			SET_UINT64(msg, info21.acct_expiry,    "accountExpires");
 		IFSET(SAMR_FIELD_ACCOUNT_NAME)
-			SET_STRING(msg, info21.account_name,   "samAccountName");
+			SET_STRING(msg, info21.account_name,   "sAMAccountName");
 		IFSET(SAMR_FIELD_FULL_NAME)
 			SET_STRING(msg, info21.full_name,      "displayName");
 		IFSET(SAMR_FIELD_HOME_DIRECTORY)
@@ -3828,7 +3828,6 @@ static NTSTATUS dcesrv_samr_SetUserInfo(struct dcesrv_call_state *dce_call, TALL
 			status = samr_set_password_buffers(dce_call,
 							   sam_ctx,
 							   a_state->account_dn,
-							   a_state->domain_state->domain_dn,
 							   mem_ctx,
 							   lm_pwd_hash,
 							   nt_pwd_hash);
@@ -3869,7 +3868,7 @@ static NTSTATUS dcesrv_samr_SetUserInfo(struct dcesrv_call_state *dce_call, TALL
 		IFSET(SAMR_FIELD_ACCT_EXPIRY)
 			SET_UINT64(msg, info23.info.acct_expiry,    "accountExpires");
 		IFSET(SAMR_FIELD_ACCOUNT_NAME)
-			SET_STRING(msg, info23.info.account_name,   "samAccountName");
+			SET_STRING(msg, info23.info.account_name,   "sAMAccountName");
 		IFSET(SAMR_FIELD_FULL_NAME)
 			SET_STRING(msg, info23.info.full_name,      "displayName");
 		IFSET(SAMR_FIELD_HOME_DIRECTORY)
@@ -3914,14 +3913,12 @@ static NTSTATUS dcesrv_samr_SetUserInfo(struct dcesrv_call_state *dce_call, TALL
 			status = samr_set_password(dce_call,
 						   sam_ctx,
 						   a_state->account_dn,
-						   a_state->domain_state->domain_dn,
 						   mem_ctx,
 						   &r->in.info->info23.password);
 		} else IFSET(SAMR_FIELD_LM_PASSWORD_PRESENT) {
 			status = samr_set_password(dce_call,
 						   sam_ctx,
 						   a_state->account_dn,
-						   a_state->domain_state->domain_dn,
 						   mem_ctx,
 						   &r->in.info->info23.password);
 		}
@@ -3951,7 +3948,6 @@ static NTSTATUS dcesrv_samr_SetUserInfo(struct dcesrv_call_state *dce_call, TALL
 		status = samr_set_password(dce_call,
 					   sam_ctx,
 					   a_state->account_dn,
-					   a_state->domain_state->domain_dn,
 					   mem_ctx,
 					   &r->in.info->info24.password);
 		if (!NT_STATUS_IS_OK(status)) {
@@ -3983,7 +3979,7 @@ static NTSTATUS dcesrv_samr_SetUserInfo(struct dcesrv_call_state *dce_call, TALL
 		IFSET(SAMR_FIELD_ACCT_EXPIRY)
 			SET_UINT64(msg, info25.info.acct_expiry,    "accountExpires");
 		IFSET(SAMR_FIELD_ACCOUNT_NAME)
-			SET_STRING(msg, info25.info.account_name,   "samAccountName");
+			SET_STRING(msg, info25.info.account_name,   "sAMAccountName");
 		IFSET(SAMR_FIELD_FULL_NAME)
 			SET_STRING(msg, info25.info.full_name,      "displayName");
 		IFSET(SAMR_FIELD_HOME_DIRECTORY)
@@ -4027,14 +4023,12 @@ static NTSTATUS dcesrv_samr_SetUserInfo(struct dcesrv_call_state *dce_call, TALL
 			status = samr_set_password_ex(dce_call,
 						      sam_ctx,
 						      a_state->account_dn,
-						      a_state->domain_state->domain_dn,
 						      mem_ctx,
 						      &r->in.info->info25.password);
 		} else IFSET(SAMR_FIELD_LM_PASSWORD_PRESENT) {
 			status = samr_set_password_ex(dce_call,
 						      sam_ctx,
 						      a_state->account_dn,
-						      a_state->domain_state->domain_dn,
 						      mem_ctx,
 						      &r->in.info->info25.password);
 		}
@@ -4064,7 +4058,6 @@ static NTSTATUS dcesrv_samr_SetUserInfo(struct dcesrv_call_state *dce_call, TALL
 		status = samr_set_password_ex(dce_call,
 					      sam_ctx,
 					      a_state->account_dn,
-					      a_state->domain_state->domain_dn,
 					      mem_ctx,
 					      &r->in.info->info26.password);
 		if (!NT_STATUS_IS_OK(status)) {
@@ -4100,7 +4093,6 @@ static NTSTATUS dcesrv_samr_SetUserInfo(struct dcesrv_call_state *dce_call, TALL
 					       &session_key,
 					       sam_ctx,
 					       a_state->account_dn,
-					       a_state->domain_state->domain_dn,
 					       &r->in.info->info31.password,
 					       DSDB_PASSWORD_RESET);
 		if (!NT_STATUS_IS_OK(status)) {
@@ -4158,7 +4150,7 @@ static NTSTATUS dcesrv_samr_SetUserInfo(struct dcesrv_call_state *dce_call, TALL
 		{
 			SET_STRING(msg,
 				   info32.info.account_name,
-				   "samAccountName");
+				   "sAMAccountName");
 		}
 		IFSET(SAMR_FIELD_FULL_NAME)
 		{
@@ -4254,7 +4246,6 @@ static NTSTATUS dcesrv_samr_SetUserInfo(struct dcesrv_call_state *dce_call, TALL
 				&session_key,
 				a_state->sam_ctx,
 				a_state->account_dn,
-				a_state->domain_state->domain_dn,
 				&r->in.info->info32.password,
 				DSDB_PASSWORD_RESET);
 		}
@@ -4266,7 +4257,6 @@ static NTSTATUS dcesrv_samr_SetUserInfo(struct dcesrv_call_state *dce_call, TALL
 				&session_key,
 				a_state->sam_ctx,
 				a_state->account_dn,
-				a_state->domain_state->domain_dn,
 				&r->in.info->info32.password,
 				DSDB_PASSWORD_RESET);
 		}
@@ -5260,8 +5250,8 @@ static NTSTATUS dcesrv_samr_ValidatePassword(struct dcesrv_call_state *dce_call,
 					     TALLOC_CTX *mem_ctx,
 					     struct samr_ValidatePassword *r)
 {
-	struct samr_GetDomPwInfo r2;
-	struct samr_PwInfo pwInfo;
+	struct samr_GetDomPwInfo r2 = {};
+	struct samr_PwInfo pwInfo = {};
 	const char *account = NULL;
 	DATA_BLOB password;
 	enum samr_ValidationStatus res;

@@ -39,7 +39,7 @@ class UserCmdTestCase(SambaToolCmdTest):
     samdb = None
 
     def setUp(self):
-        super(UserCmdTestCase, self).setUp()
+        super().setUp()
         self.samdb = self.getSamDB("-H", "ldap://%s" % os.environ["DC_SERVER"],
                                    "-U%s%%%s" % (os.environ["DC_USERNAME"], os.environ["DC_PASSWORD"]))
 
@@ -83,7 +83,7 @@ class UserCmdTestCase(SambaToolCmdTest):
             user["checkUserFn"](user)
 
     def tearDown(self):
-        super(UserCmdTestCase, self).tearDown()
+        super().tearDown()
         # clean up all the left over users, just in case
         for user in self.users:
             if self._find_user(user["name"]):
@@ -324,7 +324,7 @@ class UserCmdTestCase(SambaToolCmdTest):
                              "syncpasswords --no-wait: 'sAMAccountName': %s out[%s]" % (user["name"], out))
             self.assertMatch(out, "# unicodePwd::: REDACTED SECRET ATTRIBUTE",
                              "getpassword '# unicodePwd::: REDACTED SECRET ATTRIBUTE': out[%s]" % out)
-            if expect_nt_hash:
+            if expect_nt_hash or "virtualSambaGPG:: " in out:
                 self.assertMatch(out, "unicodePwd:: %s" % unicodePwd,
                                  "getpassword unicodePwd: out[%s]" % out)
             else:
@@ -346,18 +346,17 @@ class UserCmdTestCase(SambaToolCmdTest):
                                                 "--attributes=%s" % attributes,
                                                 "--decrypt-samba-gpg")
             self.assertCmdSuccess(result, out, err, "Ensure getpassword runs")
-            self.assertEqual(err, "", "getpassword without url")
-            self.assertMatch(out, "Got password OK", "getpassword without url")
+            self.assertEqual(err, "Any available password returned OK\n", "getpassword without url")
             self.assertMatch(out, "sAMAccountName: %s" % (user["name"]),
                              "getpassword: 'sAMAccountName': %s out[%s]" % (user["name"], out))
-            if expect_nt_hash:
+            if expect_nt_hash or "virtualSambaGPG:: " in out:
                 self.assertMatch(out, "unicodePwd:: %s" % unicodePwd,
                                  "getpassword unicodePwd: out[%s]" % out)
             else:
                 self.assertNotIn("unicodePwd:: %s" % unicodePwd, out)
             self.assertMatch(out, "supplementalCredentials:: ",
                              "getpassword supplementalCredentials: out[%s]" % out)
-            self._verify_supplementalCredentials(out.replace("\nGot password OK\n", ""))
+            self._verify_supplementalCredentials(out)
             if "virtualSambaGPG:: " in out:
                 self.assertMatch(out, "virtualClearTextUTF8:: %s" % virtualClearTextUTF8,
                                  "getpassword virtualClearTextUTF8: out[%s]" % out)
@@ -438,6 +437,31 @@ class UserCmdTestCase(SambaToolCmdTest):
             self.assertMatch(out, name,
                              "user '%s' not found" % name)
 
+    # Test: samba-tool user list --locked-only
+    # This test does not verify that the command lists the locked user, it just
+    # tests that it does not list unlocked users. The funcional test, which
+    # lists locked users, is located in the 'samba4.ldap.password_lockout' test
+    # in source8/dsdb/tests/python/password_lockout.py
+    def test_list_locked(self):
+        (result, out, err) = self.runsubcmd("user", "list",
+                                            "-H", "ldap://%s" % os.environ["DC_SERVER"],
+                                            "-U%s%%%s" % (os.environ["DC_USERNAME"],
+                                                          os.environ["DC_PASSWORD"]),
+                                            "--locked-only")
+        self.assertCmdSuccess(result, out, err, "Error running list")
+
+        search_filter = ("(&(objectClass=user)(userAccountControl:%s:=%u))" %
+                         (ldb.OID_COMPARATOR_AND, dsdb.UF_NORMAL_ACCOUNT))
+
+        userlist = self.samdb.search(base=self.samdb.domain_dn(),
+                                     scope=ldb.SCOPE_SUBTREE,
+                                     expression=search_filter,
+                                     attrs=["samaccountname"])
+
+        for userobj in userlist:
+            name = str(userobj.get("samaccountname", idx=0))
+            self.assertNotIn(name, out,
+                             "user '%s' is incorrectly listed as locked" % name)
 
     def test_list_base_dn(self):
         base_dn = "CN=Users"
@@ -601,7 +625,9 @@ sAMAccountName: %s
                 "-H", "ldap://%s" % os.environ["DC_SERVER"],
                 "-U%s%%%s" % (os.environ["DC_USERNAME"],
                               os.environ["DC_PASSWORD"]))
-            self.assertCmdSuccess(result, out, err, "Error running show")
+            self.assertCmdSuccess(result, out, err,
+                                  "Error running show --attributes=%s"
+                                  % ",".join(attrs))
 
             self.assertIn(";format=GeneralizedTime", out)
             self.assertIn(";format=UnixTime", out)
@@ -1100,6 +1126,41 @@ sAMAccountName: %s
             self.assertCmdSuccess(result, out, err, "Error running user unlock")
             self.assertEqual(err, "", "Shouldn't be any error messages")
 
+    def test_disable_remove_supplemental_groups(self):
+        """disable user and remove supplemental groups"""
+        username = "userRemoveGroups"
+        user = self._randomUser({"name": username})
+        self._create_user(user)
+
+        usergroups = self._get_groups(username)
+        self.assertTrue(len(usergroups) == 1, "exactly one membership expected")
+        self.assertEqual(usergroups[0],
+                         "Domain Users",
+                         "Unexpected groupmembership")
+
+        self._add_groupmember("Domain Admins", username)
+        self._add_groupmember("Print Operators", username)
+
+        usergroups = self._get_groups(username)
+        self.assertTrue(len(usergroups) == 3, "exactly 3 memberships expected")
+
+        (result, out, err) = self.runsubcmd(
+            "user", "disable", username,
+            "--remove-supplemental-groups",
+            "-H", "ldap://%s" % os.environ["DC_SERVER"],
+            "-U%s%%%s" % (os.environ["DC_USERNAME"],
+            os.environ["DC_PASSWORD"]))
+        self.assertCmdSuccess(
+            result, out, err,
+            "Error running user disable --remove-supplemental-groups")
+        self.assertEqual(err, "",
+                         "Shouldn't be any error messages from user disable")
+
+        usergroups = self._get_groups(username)
+        self.assertTrue(len(usergroups) == 1, "exactly one membership expected")
+        self.assertEqual(usergroups[0], "Domain Users",
+                         "Unexpected groupmembership")
+
     def _randomUser(self, base=None):
         """create a user with random attribute values, you can specify base attributes"""
         if base is None:
@@ -1245,3 +1306,46 @@ template """
             return userlist[0]
         else:
             return None
+
+    def _add_groupmember(self, group, user):
+        (result, out, err) =  self.runsubcmd(
+            "group", "addmembers", group, user,
+            "-H", "ldap://%s" % os.environ["DC_SERVER"],
+            "-U%s%%%s" % (os.environ["DC_USERNAME"],
+                          os.environ["DC_PASSWORD"]))
+        self.assertCmdSuccess(
+            result, out, err, "Error running group addmembers")
+        self.assertEqual(
+            err,
+            "",
+            "Shouldn't be any error messages from group addmembers")
+
+        return out.rstrip().split("\n")
+
+    def _remove_groupmember(self, group, user):
+        (result, out, err) = self.runsubcmd(
+            "group", "removemembers", group, user,
+            "-H", "ldap://%s" % os.environ["DC_SERVER"],
+            "-U%s%%%s" % (os.environ["DC_USERNAME"],
+                          os.environ["DC_PASSWORD"]))
+        self.assertCmdSuccess(
+            result, out, err, "Error running group removemembers")
+        self.assertEqual(
+            err,
+            "",
+            "Shouldn't be any error messages from group removemembers")
+
+        return out.rstrip().split("\n")
+
+    def _get_groups(self, user):
+        (result, out, err) = self.runsubcmd(
+            "user", "getgroups", user,
+            "-H", "ldap://%s" % os.environ["DC_SERVER"],
+            "-U%s%%%s" % (os.environ["DC_USERNAME"],
+            os.environ["DC_PASSWORD"]))
+        self.assertCmdSuccess(result, out, err, "Error running user getgroups")
+        self.assertEqual(err,
+                         "",
+                         "Shouldn't be any error messages from user getgroups")
+
+        return out.rstrip().split("\n")

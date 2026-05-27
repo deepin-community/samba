@@ -1,48 +1,909 @@
-samba (2:4.19.5+dfsg-1deepin5) unstable; urgency=high
+samba (2:4.22.8+dfsg-0+deb13u2) trixie-security; urgency=medium
 
-  * Fix CVE-2025-10230: WINS hook shell command injection vulnerability
-    - Add validation for WINS names before passing to wins hook script
-    - Prevent arbitrary command execution through malicious NetBIOS names
-    - Restrict valid characters to letters, digits, hyphens, underscores and periods
-    - Add test cases to verify the fix
+  * https://bugzilla.samba.org/show_bug.cgi?id=16018
+    May-2026 samba security update fixing the following issues:
+    CVE-2026-1933: Missing access check on reparse point operations
+      https://bugzilla.samba.org/show_bug.cgi?id=15992
+    CVE-2026-2340: vfs_worm does not block directory modification
+      https://bugzilla.samba.org/show_bug.cgi?id=15997
+    CVE-2026-3012: group policy certificate enrollment uses http://
+      without validation
+      https://bugzilla.samba.org/show_bug.cgi?id=16003
+    CVE-2026-3238: unauthenticated udp packet crashes AD DC nbt server
+      https://bugzilla.samba.org/show_bug.cgi?id=16012
+    CVE-2026-4480: Unauthenticated Remote Code Execution using print command
+      https://bugzilla.samba.org/show_bug.cgi?id=16033
+    CVE-2026-4408: Remote Code Execution in SAMR when check password script
+      contains %u substitution placeholder
+      https://bugzilla.samba.org/show_bug.cgi?id=16034
 
- -- lichenggang <lichenggang@uniontech.com>  Thu, 19 Mar 2026 21:09:19 +0800
+ -- Michael Tokarev <mjt@tls.msk.ru>  Fri, 15 May 2026 06:38:23 +0300
 
+samba (2:4.22.8+dfsg-0+deb13u1) trixie; urgency=medium
 
-samba (2:4.19.5+dfsg-1deepin4) unstable; urgency=medium
+  * new upstream stable/bugfix release:
+   - https://bugzilla.samba.org/show_bug.cgi?id=15790:
+     Bind dlz 9.20
+   - https://bugzilla.samba.org/show_bug.cgi?id=15959:
+     New Spotlight default search field incorrectly initialized
+   - https://bugzilla.samba.org/show_bug.cgi?id=15964:
+     "net offlinejoin requestodj" manpage entry incorrectly mentiones
+     provided credentials
+   - https://bugzilla.samba.org/show_bug.cgi?id=15972:
+     Winbind group resolution failure
+   - https://bugzilla.samba.org/show_bug.cgi?id=15977:
+     ctdbd socket documentation is wrong
+   - https://bugzilla.samba.org/show_bug.cgi?id=15979:
+     possible memory leak  on rpc_spoolss
+   - https://bugzilla.samba.org/show_bug.cgi?id=15984:
+     smbd: in contend_dirleases() don't bother checking when not enabled
+  * add-support-for-bind-9.20.patch: remove (now applied upstream)
+  * d/clean: also remove python/samba/provision/kerberos_implementation.py
+    (Closes: #1048754)
 
-  * fix missing systemd .service files.
+ -- Michael Tokarev <mjt@tls.msk.ru>  Thu, 19 Feb 2026 15:17:34 +0300
 
- -- wangrong <wangrong@uniontech.com>  Mon, 19 May 2025 21:49:45 +0800
+samba (2:4.22.7+dfsg-0+deb13u1) trixie; urgency=medium
 
-samba (2:4.19.5+dfsg-1deepin3) unstable; urgency=medium
+  * new upstream stable/bugfix release:
+   - https://bugzilla.samba.org/show_bug.cgi?id=15809:
+     samba-bgqd: rework man page
+   - https://bugzilla.samba.org/show_bug.cgi?id=15897:
+     Assert failed: (dirfd != -1) || (smb_fname->base_name[0] == '/')
+     in vfswrap_openat
+   - https://bugzilla.samba.org/show_bug.cgi?id=15926:
+     Samba 4.22 breaks Time Machine
+   - https://bugzilla.samba.org/show_bug.cgi?id=15930:
+     Searching for numbers doesn't work with Spotlight
+   - https://bugzilla.samba.org/show_bug.cgi?id=15935:
+     Crash in ctdbd on failed updateip
+   - https://bugzilla.samba.org/show_bug.cgi?id=15936:
+     samba-bgqd can't find [printers] share
+   - https://bugzilla.samba.org/show_bug.cgi?id=15940:
+     vfs_recycle does not update mtime
+   - https://bugzilla.samba.org/show_bug.cgi?id=15947:
+     mdssvc doesn't support $time.iso dates before 1970
+   - https://bugzilla.samba.org/show_bug.cgi?id=15950:
+     ctdb can crash with inconsistent cluster lock configuration
+   - https://bugzilla.samba.org/show_bug.cgi?id=15955:
+     Winbind can hang forever in gssapi if there are network issues
+   - https://bugzilla.samba.org/show_bug.cgi?id=15961:
+     libldb requires linking libreplace on Linux
+   - https://bugzilla.samba.org/show_bug.cgi?id=15963:
+     Fix winbind cache consistency
+  * revert-ldb-use-hexchars_upper-from-replace.h.patch: remove
+    (now applied by upstream)
 
-  * update debian/rules to disable services.
+ -- Michael Tokarev <mjt@tls.msk.ru>  Thu, 18 Dec 2025 22:13:42 +0300
 
- -- wangrong <wangrong@uniontech.com>  Mon, 19 May 2025 20:36:32 +0800
+samba (2:4.22.6+dfsg-0+deb13u1) trixie; urgency=medium
 
-samba (2:4.19.5+dfsg-1deepin2) unstable; urgency=medium
+  * new upstream stable/security release:
+   - https://bugzilla.samba.org/show_bug.cgi?id=15843:
+     macOS Finder client DFS broken on 4.22.0
+   - https://bugzilla.samba.org/show_bug.cgi?id=15900:
+     'net ads group' failed to list domain groups
+   - https://bugzilla.samba.org/show_bug.cgi?id=15905:
+     samba-4.21 fails to join AD when multiple DCs are returned
+   - https://bugzilla.samba.org/show_bug.cgi?id=15919:
+     vfs_ceph_new should not use ceph_ll_nonblocking_readv_writev for fsync_send
+   - https://bugzilla.samba.org/show_bug.cgi?id=15921:
+     CTDB_SOCKET can be used even when CTDB_TEST_MODE is not set
+   - https://bugzilla.samba.org/show_bug.cgi?id=15926:
+     Samba 4.22 breaks Time Machine
+   - https://bugzilla.samba.org/show_bug.cgi?id=15927:
+     Spotlight search restriction for shares incomplete and default search
+     searches in too many attributes
+   - https://bugzilla.samba.org/show_bug.cgi?id=15931:
+     rpcd_mdssvc may crash because name mangling is not initialized
+   - https://bugzilla.samba.org/show_bug.cgi?id=15933:
+     Only increment lease epoch if a lease was granted
 
-  * fix mips filesize is zero.
-  * set file/directory mode.
-  * disable user home share.
-  * client support NT1.
-  * fix add usershare fail with specified port.
-  * support negotiate smb protocol and resolve host name.
-  * fix smbtree segfault.
-  * delete postinst and postrm for libnss-winbind to prohibit update /etc/nsswitch.conf.
-  * d/samba-common.postinst: ignore ucf error.
-  * fix smb userpass mount fail.
-  * fix statvfs fail.
-  * samba.postinst ignore rm/rmdir error.
+  * new upstream security release:
+   - CVE-2025-9640: Uninitialized memory disclosure via vfs_streams_xattr
+     https://www.samba.org/samba/security/CVE-2025-9640.html
+   - CVE-2025-10230: Command injection via WINS server hook script
+     https://www.samba.org/samba/security/CVE-2025-10230.html
 
- -- wangrong <wangrong@uniontech.com>  Thu, 01 Aug 2024 15:27:44 +0800
+ -- Michael Tokarev <mjt@tls.msk.ru>  Thu, 16 Oct 2025 19:19:45 +0300
 
-samba (2:4.19.5+dfsg-1deepin1) unstable; urgency=medium
+samba (2:4.22.4+dfsg-1~deb13u1) trixie; urgency=medium
 
-  * No source change upload against python 3.12.
+  * new upstream stable/bugfix release:
+   - https://bugzilla.samba.org/show_bug.cgi?id=14981:
+     netr_LogonSamLogonEx returns NR_STATUS_ACCESS_DENIED with SysvolReady=0
+   - https://bugzilla.samba.org/show_bug.cgi?id=15663:
+     Apparently there is a conflict between shadow_copy2 module
+     and virusfilter (action quarantine)
+   - https://bugzilla.samba.org/show_bug.cgi?id=15816:
+     vfs_streams_depot fstatat broken
+   - https://bugzilla.samba.org/show_bug.cgi?id=15840:
+     kinit command is failing with Missing cache Error
+   - https://bugzilla.samba.org/show_bug.cgi?id=15844:
+     getpwuid does not shift to new DC when current DC is down
+   - https://bugzilla.samba.org/show_bug.cgi?id=15876:
+     Windows security hardening locks out schannel'ed
+     netlogon dc calls like netr_DsRGetDCName
+   - https://bugzilla.samba.org/show_bug.cgi?id=15877:
+     Fix handling of empty GPO link
+   - https://bugzilla.samba.org/show_bug.cgi?id=15880:
+     SMB ACL inheritance doesn't work for files created
+   - https://bugzilla.samba.org/show_bug.cgi?id=15881:
+     Unresponsive second DC can cause idmapping failure when using idmap_ad
+     (was libads-fix-get_kdc_ip_string.patch)
+   - https://bugzilla.samba.org/show_bug.cgi?id=15891:
+     Figuring out the DC name from IP address fails
+     and breaks fork_domain_child()
+   - https://bugzilla.samba.org/show_bug.cgi?id=15892:
+     Delayed leader broadcast can block ctdb forever
+  * libads-fix-get_kdc_ip_string.patch: remove, included upstream
+  * d/gbp.conf: debian-branch=debian/4.22
 
- -- Tianyu Chen <sweetyfish@deepin.org>  Wed, 03 Jul 2024 05:12:53 +0200
+ -- Michael Tokarev <mjt@tls.msk.ru>  Thu, 21 Aug 2025 20:37:38 +0300
+
+samba (2:4.22.3+dfsg-4) unstable; urgency=medium
+
+  * fix python3-talloc.symbols generation to not have -debian_revision
+    or +dfsg/+samba suffix in the version number - just the epoch if any
+    and the upstream version (fix lintian error)
+
+ -- Michael Tokarev <mjt@tls.msk.ru>  Thu, 17 Jul 2025 13:52:35 +0300
+
+samba (2:4.22.3+dfsg-3) unstable; urgency=medium
+
+  [ Sascha Lucas ]
+  * winbind pam-config: fix account section to actually execute pam_winbind
+    entries after usually successful cal to pam_unix, in a way how it's done
+    in sssd (Closes: #907318)
+
+  [ Douglas Bagnall ]
+  * debian/panic-action: make the wording more user-friendly and steer users
+    towards configuration and logs (Closes: #1089853)
+
+  [ Michael Tokarev ]
+  * d/python3-talloc.symbols.in: add forgotten epoch number for recent versions
+    (this doesn't actually affect anything since there were no new symbols with
+    these versions, but it's better to stay correct)
+  * d/control: fix winbind:Enhances for libkrb5-26-heimdal which
+    is libkrb5-26t64-heimdal in trixie and up, keeping in mind possible
+    backporting to older debian/ubuntu versions (before-trixie build profile)
+  * libads-fix-get_kdc_ip_string.patch (upstream fix for #1109005)
+    (Closes: #1109005)
+
+ -- Michael Tokarev <mjt@tls.msk.ru>  Tue, 15 Jul 2025 12:42:04 +0300
+
+samba (2:4.22.3+dfsg-2) unstable; urgency=medium
+
+  * Revert "d/control,d/rules: ensure we use the most recent talloc/tevent/tdb"
+    There's no need for samba-libs to depend on exact versions of support libs
+    anymore, since 4.21.3+dfsg-5 (where the mistake has been made) is long gone
+  * Revert "d/control: add conflicts/breaks for libtevent0t64 on mjt repo"
+    This Breaks was special and temporary, and not useful for debian archive at
+    all (it was only needed for mjt's own repository where the wrong package
+    name slipped out once).  Remove this cruft for trixie
+  * python3-talloc.symbols[.in] -- provide long-forgotten symbols file, so that
+    versioned dependency on python3-talloc (mostly for python3-samba) will be
+    less strict.  For smoother upgrades
+  * document forgotten change in previous changelog entry
+
+ -- Michael Tokarev <mjt@tls.msk.ru>  Wed, 09 Jul 2025 17:08:31 +0300
+
+samba (2:4.22.3+dfsg-1) unstable; urgency=medium
+
+  * new upstream stable/bugfix release, mostly targetting the Jul-08 update
+    for Active Directory Domain Controllers
+    (https://bugzilla.samba.org/show_bug.cgi?id=15876, Closes: #1108904):
+   - https://bugzilla.samba.org/show_bug.cgi?id=15854:
+     samba-tool cannot add user to group whose name
+     is exactly 16 characters long
+   - https://bugzilla.samba.org/show_bug.cgi?id=15869:
+     Startup messages of rpc daemons fills /var/log/messages
+   - https://bugzilla.samba.org/show_bug.cgi?id=15876:
+     Windows security hardening locks out schannel'ed netlogon
+     dc calls like netr_DsRGetDCName
+  * update d/copyright to point to https://www.gnu.org/licenses/
+    instead of FSF postal address
+  * d/control: stop depending on exact same version of samba-common
+    Package samba-common contains a few files/dirs common for several samba
+    packages.  Its contents hasn't changed for quite some time.  There's
+    definitely no need to depend on exact version of this package - eg, 4.17
+    (from bookworm) will work just fine with samba version 4.22.  Drop version
+    requirement for samba-common dep entirely.  If/when we have real change in
+    samba-common which is needed by other packages, we can specify particular
+    version there.  For smoother upgrades
+
+ -- Michael Tokarev <mjt@tls.msk.ru>  Mon, 07 Jul 2025 23:16:23 +0300
+
+samba (2:4.22.2+dfsg-1) unstable; urgency=medium
+
+  * new upstream stable/bugfix release:
+   - https://bugzilla.samba.org/show_bug.cgi?id=15707:
+     CVE-2025-0620: smbd doesn't pick up group membership changes when
+     re-authenticating an expired SMB session
+     Closes: #1107248
+   - https://bugzilla.samba.org/show_bug.cgi?id=15727:
+     net ad join fails with
+    "Failed to join domain: failed to create kerberos keytab"
+   - https://bugzilla.samba.org/show_bug.cgi?id=15819:
+     vfs_ceph_snapshots fails to list snapshots for entries at any level
+     beyond share root
+   - https://bugzilla.samba.org/show_bug.cgi?id=15851:
+     dcerpcd not able to bind to listening port
+   - https://bugzilla.samba.org/show_bug.cgi?id=15858:
+     CTDB does not put nodes running NFS into grace on graceful shutdown
+   - https://bugzilla.samba.org/show_bug.cgi?id=15861:
+     Profile sync fails due to Directory Leases
+  * d/control: add libcrypt-dev build-dependency (Closes: #1106959)
+  * add-support-for-bind-9.20.patch (Closes: #1107139)
+
+ -- Michael Tokarev <mjt@tls.msk.ru>  Thu, 05 Jun 2025 19:12:34 +0300
+
+samba (2:4.22.1+dfsg-1) unstable; urgency=medium
+
+  * new upstream stable/bugfix release:
+   - https://bugzilla.samba.org/show_bug.cgi?id=15727:
+     net ad join fails with "Failed to join domain:
+     failed to create kerberos keytab"
+   - https://bugzilla.samba.org/show_bug.cgi?id=15767:
+     Deadlock between two smbd processes
+   - https://bugzilla.samba.org/show_bug.cgi?id=15774:
+     Running "gpo manage motd set" twice fails with backtrace
+   - https://bugzilla.samba.org/show_bug.cgi?id=15791:
+     Remove of file or directory not possible with vfs_acl_tdb
+   - https://bugzilla.samba.org/show_bug.cgi?id=15810:
+     Add async io API from libcephfs to ceph_new VFS module
+   - https://bugzilla.samba.org/show_bug.cgi?id=15818:
+     vfs_ceph_new module does not work with other modules
+     for snapshot management
+   - https://bugzilla.samba.org/show_bug.cgi?id=15822:
+     Enable support for cephfs case insensitive behavior
+   - https://bugzilla.samba.org/show_bug.cgi?id=15823:
+     Subnet based interfaces definition not listening
+     on all covered IP addresses
+   - https://bugzilla.samba.org/show_bug.cgi?id=15829:
+     samba-tool gpo backup creates entity backups it can't read
+   - https://bugzilla.samba.org/show_bug.cgi?id=15834:
+     vfs_ceph_new: Add path based fallback for SMB_VFS_FCHOWN,
+     SMB_VFS_FCHMOD and SMB_VFS_FNTIMES
+   - https://bugzilla.samba.org/show_bug.cgi?id=15836:
+     PANIC: assert failed at source3/smbd/smb2_oplock.c(156):
+     sconn->oplocks.exclusive_open>=0
+   - https://bugzilla.samba.org/show_bug.cgi?id=15839:
+     gp_cert_auto_enroll_ext.py has problem unpacking GUIDs with prepended 0's
+   - https://bugzilla.samba.org/show_bug.cgi?id=15841:
+     Wide link issue in samba 4.22
+   - https://bugzilla.samba.org/show_bug.cgi?id=15845:
+     NT_STATUS_INVALID_PARAMETER: Can't create folders
+     on share of an exfat file system
+   - https://bugzilla.samba.org/show_bug.cgi?id=15849:
+     Lease code is not endian-safe
+  * drop widelinks-nofollow.patch (included upstream)
+  * drop smbd-fix-handling-of-directory-leases-and-oplock-lev.patch (ditto)
+
+ -- Michael Tokarev <mjt@tls.msk.ru>  Fri, 18 Apr 2025 13:02:55 +0300
+
+samba (2:4.22.0+dfsg-3) unstable; urgency=medium
+
+  * widelinks-nofollow.patch (https://bugzilla.samba.org/show_bug.cgi?id=15841)
+    (Closes: #1101581)
+
+ -- Michael Tokarev <mjt@tls.msk.ru>  Wed, 02 Apr 2025 14:34:31 +0300
+
+samba (2:4.22.0+dfsg-2) unstable; urgency=medium
+
+  * smbd-fix-handling-of-directory-leases-and-oplock-lev.patch
+    (Closes: #1100604)
+
+ -- Michael Tokarev <mjt@tls.msk.ru>  Sat, 29 Mar 2025 07:24:47 +0300
+
+samba (2:4.22.0+dfsg-1) unstable; urgency=medium
+
+  * new upstream release
+  * samba-libs: provide libndr5 too (with a compat symlink)
+  * add libsamba-security-private.so link for freeipa testsuite
+    (Closes: #1099340)
+  * d/samba-vfs-ceph.install: install also ceph_new vfs module
+    (Closes: #1098670)
+  * d/*.install: s@/*/@/${DEB_HOST_MULTIARCH}/@
+  * d/source/lintian-overrides: add dh-exec-useless-usage *DEB_HOST_MULTIARCH*
+
+ -- Michael Tokarev <mjt@tls.msk.ru>  Fri, 07 Mar 2025 00:02:26 +0300
+
+samba (2:4.22.0~rc1+dfsg-1) experimental; urgency=medium
+
+  * d/control: remove vorlon@ from Uploaders.
+    Thank you, dear friend, for all the work you've done. RIP!
+  * new upstream release candidate
+    Closes: #1084559 (crypt module removal in python 3.13)
+  * remove patches which has been applied upstream
+  * fix-nfs-service-name-to-nfs-kernel-server.patch:
+    refresh, remove now-unneeded hunk
+  * revert-ldb-use-hexchars_upper-from-replace.h.patch
+    to avoid linking libldb2 with libreplace
+  * replace-xpg-strerror.patch
+    to avoid linking other libs with libreplace
+  * d/rules: fixup component versions
+  * libtalloc, libtevent, libtdb, libldb: symbols: add new versions
+  * libldb2.symbols: add new version
+  * samba-libs: libndr.so soname bump to 6, add new symbols
+  * samba-libs: add libutil-crypt-private-samba.so.0
+
+ -- Michael Tokarev <mjt@tls.msk.ru>  Fri, 07 Feb 2025 12:37:12 +0300
+
+samba (2:4.21.3+dfsg-6) unstable; urgency=medium
+
+  * d/genshlibs: remove the special-case for libsmbclient0 since
+    we expand t64:Provides in d/control directly
+  * d/control: add ${t64:Provides} comments
+  * d/control: more t64 work: for libtevent0t64, break libtevent0
+    not <<${source:Version} but <<${binary:Version}, because source
+    is samba not tevent (Closes: #1092881)
+
+ -- Michael Tokarev <mjt@tls.msk.ru>  Sun, 12 Jan 2025 23:16:00 +0300
+
+samba (2:4.21.3+dfsg-5) unstable; urgency=medium
+
+  * the Fixing Big Mishaps release.
+
+  * d/rules: fix talloc, tevent, tdb subpackages version numbers, add epoch
+
+    Due to a mistake, I screwed up sub-packages versions completely,
+    by using the wrong variable when generating the versions, - so
+    all mentioned packages had version number of ldb, not their own.
+
+    Fix this.
+
+    Unfortunately, the wrong version is larger than all the correct ones.
+    To compensate, use the same epoch number as is already used by current
+    samba package (2:).
+
+    While at it, use common variable to hold the +samba version suffix.
+
+  * d/*.symbols: mark most recent version markers with 2: epoch too
+
+  * d/control,d/rules: ensure we use the most recent libtalloc/libtevent/libtdb
+    for now, to compensate for the wrong versions.
+
+  * d/control: add explicit Provides of non-t64 libs
+
+    Apparentlty due to usage of both t64 and pre-t64 packages
+    (with different build profiles), debhelper is not populating
+    necessary values for ${t64:Provides}.  So libtevent0t64 is
+    not providing libtevent0 on the relevant architectures.
+    Ditto for libsmbclient0 providing libsmbclient.
+
+    Add explicit arch-specific Provides: for libsmbclient0 and
+    libtevent0t64.
+
+    List only the affected release architectures in there.
+
+    This removes the only user of X-Time64-Compat control field
+    in debian.
+
+  * d/rules: do not install wscript_build in examples
+
+  * d/control: fix libtevent wrong build profile when building for mjt's
+    repository.  Does not affect debian thankfully.  The problem is that
+    libtevent0t64 slipped into the repository for older (before-trixie)
+    distributions, where t64 migration hasn't been completed.  This should
+    not cause actual problems as a problem is only possible when upgrading
+    to the new debian (or ubuntu) release where t64 transition has happened,
+    and during such upgrade, new libtevent0t64 will be pulled in - thanks to
+    the first big mistake above, since it now has 2: epoch.
+  * d/control: add Breaks for libtevent0t64 on mjt repo.  This also
+    does not affect debian, but makes my life definitely easier.
+
+ -- Michael Tokarev <mjt@tls.msk.ru>  Sun, 12 Jan 2025 00:17:49 +0300
+
+samba (2:4.21.3+dfsg-4) unstable; urgency=medium
+
+  * Revert "d/control: mark arch-all perl and python packages with :native
+    for now" - it worked just fine on local build but fails on buildds?
+  * d/control: add :native alternative for arch-all perl & python packages
+    for now, to help cross-building samba on bookworm and before
+    (no difference for trixie).  Use foo:native|foo alternative to work
+    around dpkg/apt disparity in handling :native deps.
+
+ -- Michael Tokarev <mjt@tls.msk.ru>  Sat, 11 Jan 2025 11:47:04 +0300
+
+samba (2:4.21.3+dfsg-2) unstable; urgency=medium
+
+  * ctdb-failover-statd_callout-PATH_MAX-workaround.patch
+    another tweak for hurd (for missing PATH_MAX)
+  * d/control: add a note about ntp & signd socket, replace ntp with ntpsec
+  * d/control: provide ability to cross-build samba finally
+    (using qemu-user helper)
+  * d/control: mark arch-all perl and python packages with :native for now
+    (to help cross-building on bookworm)
+
+ -- Michael Tokarev <mjt@tls.msk.ru>  Fri, 10 Jan 2025 23:23:31 +0300
+
+samba (2:4.21.3+dfsg-1) unstable; urgency=medium
+
+  * new upstream stable/bugfix release:
+   - https://bugzilla.samba.org/show_bug.cgi?id=6750:
+     After 'machine password timeout' /etc/krb5.keytab is not updated
+   - https://bugzilla.samba.org/show_bug.cgi?id=15697:
+     Compound rename from Mac clients can fail with
+     NT_STATUS_INTERNAL_ERROR if the file has a lease
+   - https://bugzilla.samba.org/show_bug.cgi?id=15701:
+     More possible replication loops against Azure AD
+   - https://bugzilla.samba.org/show_bug.cgi?id=15724:
+     vfs crossrename seems not work correctly
+   - https://bugzilla.samba.org/show_bug.cgi?id=15755:
+     Avoid event failure race when disabling an event script
+   - https://bugzilla.samba.org/show_bug.cgi?id=15758:
+     Segfault in vfs_btrfs
+   - https://bugzilla.samba.org/show_bug.cgi?id=15765:
+     Fix heap-user-after-free with association groups
+   - https://bugzilla.samba.org/show_bug.cgi?id=15771:
+     Memory leak wbcCtxLookupSid
+  * d/patches/: specify more Forwarded: urls
+  * d/patches/: source3-lib-util_sec.c-include-grp.h-for-setgroups.patch >
+                include-grp.h-for-setgroups-in-a-few-places.patch:
+    add 1 more place for setgroups()
+  * d/rules: remember last versions of ldb/talloc/tevent/tdb, reality check
+  * d/control: since we don't use debconf anymore, no need
+    to (build-)depend on po-debconf either
+
+ -- Michael Tokarev <mjt@tls.msk.ru>  Mon, 06 Jan 2025 21:20:31 +0300
+
+samba (2:4.21.2+dfsg-4) unstable; urgency=medium
+
+  * d/rules: guard building compile_et target with !mitkrb5
+  * source3-lib-util_sec.c-include-grp.h-for-setgroups.patch for hurd ftbfs
+  * build talloc/tevent/tdb from samba source:
+   - import talloc, tevent and tdb packaging into samba
+   - stop shipping internal-to-samba libpytalloc-util development files
+  * d/copyright: mention myself for d/*
+
+ -- Michael Tokarev <mjt@tls.msk.ru>  Sun, 01 Dec 2024 22:28:05 +0300
+
+samba (2:4.21.2+dfsg-3) unstable; urgency=medium
+
+  * Revert "d/rules: as of 4.17, no need to explicitly build intermediate
+    targets anymore".  It is still a problem with samba 4.21, it just were
+    hidden.
+  * ldb-no-replace.diff: avoid embedding rpath to private samba libs
+    for libldb.so
+  * heimdal-spelling.patch: remove (forgotten, applied upstream)
+  * d/patches/* update dep3 metadata
+  * add-missing-libs-deps.diff: update to include more missing deps
+    (as submitted upstream)
+
+ -- Michael Tokarev <mjt@tls.msk.ru>  Thu, 28 Nov 2024 22:28:27 +0300
+
+samba (2:4.21.2+dfsg-2) unstable; urgency=medium
+
+  * resurrect python3-ldb (removed in previous release)
+    The removal of python3-ldb were unwarranted, as long as libldb
+    itself is stand-alone, lets keep its python bindings stand-alone
+    too.
+  * d/rules: s/execute_after_dh_install/execute_after_dh_install-arch/
+    since it is arch-specific
+
+ -- Michael Tokarev <mjt@tls.msk.ru>  Tue, 26 Nov 2024 18:56:17 +0300
+
+samba (2:4.21.2+dfsg-1) unstable; urgency=medium
+
+  * new upstream stable/bugfix release:
+   - https://bugzilla.samba.org/show_bug.cgi?id=14356
+     protocol error - Unclear debug message "pad length mismatch"
+     for invalid bind packet
+   - https://bugzilla.samba.org/show_bug.cgi?id=15320
+     Update CTDB to track all TCP connections to public IP addresses
+   - https://bugzilla.samba.org/show_bug.cgi?id=15425
+     NetrGetLogonCapabilities QueryLevel 2 needs to be implemented
+   - https://bugzilla.samba.org/show_bug.cgi?id=15732
+     smbd fails to correctly check sharemode against OVERWRITE dispositions
+   - https://bugzilla.samba.org/show_bug.cgi?id=15740
+     gss_accept_sec_context() from Heimdal does not imply GSS_C_MUTUAL_FLAG
+     with GSS_C_DCE_STYLE
+   - https://bugzilla.samba.org/show_bug.cgi?id=15749
+     winbindd should call process_set_title() for locator child
+   - https://bugzilla.samba.org/show_bug.cgi?id=15752
+     winexe no longer works with samba 4.21
+   - https://bugzilla.samba.org/show_bug.cgi?id=15754
+     Panic in close_directory
+  * d/control: add python3-cryptography to python3-samba Depends
+    (Closes: #1086768)
+  * d/control: move python3-gpg recommends from python3-samba to samba-ad-dc
+  * d/control: extend libpcap-dev from hurd-i386 to hurd-any (Closes: #1087409)
+  * ship winexe binary (Closes: #1081269).
+    New Build-Depends: gcc-mingw-w64-i686-win32 gcc-mingw-w64-x86-64-win32
+  * d/control: provide Breaks/Replaces for winexe in kali linux (#1081269)
+  * swallow python3-ldb by python3-samba (and remove python3-ldb-dev)
+  * d/rules: drop mis-using --bundled-libraries configure option
+  * d/samba.postinst: replace test for /usr/bin/deb-systemd-helper file
+    with "command -v" (lintian)
+  * d/libldb2.lintian-overrides: remove overrides which were needed for compat
+    symlink (compat for older ldb in separate source)
+  * d/samba.install: stop shipping log2pcap.1 (the tool is not installed)
+  * d/rules: rename LDB_* vars to ldb-, and use common var for -Vldb:Version
+  * move-msg.sock-from-var-lib-samba-to-run-samba.patch: update
+    to cover failing tests too
+
+ -- Michael Tokarev <mjt@tls.msk.ru>  Mon, 25 Nov 2024 21:38:17 +0300
+
+samba (2:4.21.1+dfsg-2) unstable; urgency=medium
+
+  * d/control: add Recommends: samba-ad-dc for samba for now
+    to avoid breaking existing installs
+  * d/samba.postrm: stop unmasking of samba-ad-dc
+    (it is already done in postinst)
+  * d/samba.postinst,d/samba.maintscripts: remove samba-ad-dc
+    startup files and stop the service (Closes: #1085617)
+
+ -- Michael Tokarev <mjt@tls.msk.ru>  Fri, 25 Oct 2024 12:30:52 +0300
+
+samba (2:4.21.1+dfsg-1) unstable; urgency=medium
+
+  * new upstream stable/bugfix release
+  * d/salsa-ci.yml: disable reprotest vary build_path
+  * d/control: Build-Depend on python3-setuptools (Closes: #1080851)
+  * d/rules: stop providing compat symlink for old ldb
+    modules location for old sssd
+  * d/changelog: mention closing of #835404 by 4.21.0-1
+
+ -- Michael Tokarev <mjt@tls.msk.ru>  Mon, 14 Oct 2024 21:21:50 +0300
+
+samba (2:4.21.0+dfsg-1) unstable; urgency=medium
+
+  * switch to 4.21 branch
+  * update to 4.21.0 (new upstream)
+    (Closes: #835404)
+  * fix-nfs-service-name-to-nfs-kernel-server.patch: refresh
+  * Force-LDB-as-standalone.patch: remove (ldb is always internal now)
+  * d/rules: ldb lib is now private by default, expose it as public
+  * d/rules: ldb uses LDB_VERSION variable now, not VERSION
+  * tilde-in-version.diff: remove (applied upstream)
+  * heimdal-spelling.patch: disable for now
+  * d/rules: s/vendor-name/vendor-suffix/
+  * d/ctdb.install: no more sudoers file
+  * d/samba-libs.symbols, d/control, d/samba-libs.install: libndr4=>libndr5
+    This requires sssd to be rebuilt
+  * samba-{libs,dev}.install, python3-{samba,ldb).install: refresh libs
+    (with lintian-overrides)
+  * samba-libs.install, samba-dev.install: new (semi-public) library:
+    libsamba-policy.so (used by the python stuff only, for now)
+  * samba-libs.install: new private library: libsamba-net-private-samba.so.0
+  * libldb2.symbols: add new symbols & 2.10.0 version
+    (and remove 2.9.1 minor version)
+  * d/control: bump libtdb version dependency to 1.4.12
+  * d/ctdb.install: install winbind_ctdb_updatekeytab.sh file
+
+ -- Michael Tokarev <mjt@tls.msk.ru>  Mon, 02 Sep 2024 17:48:34 +0300
+
+samba (2:4.20.4+dfsg-1) unstable; urgency=medium
+
+  * new upstream (minor/bugfix) release fixing the ABI symbol generation
+    (Closes: #1078008)
+  * mention d/*.symbols change in previous changelog entry
+  * revert: d/*.symbols: add new variant of version marks (with underscore)
+
+ -- Michael Tokarev <mjt@tls.msk.ru>  Tue, 06 Aug 2024 16:58:18 +0300
+
+samba (2:4.20.3+dfsg-1) unstable; urgency=medium
+
+  * update to the new upstream stable/bugfix release (4.20.3).
+    See WHATSNEW.txt for details.
+  * tilde-in-version.diff: remove, an equivalent is applied upstream
+  * d/rules: s/vendor-name/vendor-suffix/ as per new upstream option
+  * d/samba-ad-dc.lintian-overrides: add systemd-diversion override too
+  * d/*.symbols: add new variant of version marks (with underscore)
+
+ -- Michael Tokarev <mjt@tls.msk.ru>  Fri, 02 Aug 2024 18:33:51 +0300
+
+samba (2:4.20.2+dfsg-11) unstable; urgency=medium
+
+  * d/control: remove Andrew Bartlett email from Uploaders per his request
+  * samba-common-bin.lintian-override: fixup python3-script-but-no-python3-dep
+    override
+  * fix name of samba-common-bin.lintian-overrides (it is plural)
+
+ -- Michael Tokarev <mjt@tls.msk.ru>  Tue, 30 Jul 2024 15:54:36 +0300
+
+samba (2:4.20.2+dfsg-10) unstable; urgency=medium
+
+  * d/rules: shorten dpkg_late_eval
+  * d/rules: stop renaming heimdal dir for mitkrb5 profile
+  * d/rules: remove the only usage of ${with_mitkrb5}
+  * d/rules: rearrange CFLAGS/LDFLAGS settings to use
+    DEB_*_MAINT_APPEND due to dpkg #1077005
+  * skip -9 release because of test upload to experimental
+
+ -- Michael Tokarev <mjt@tls.msk.ru>  Thu, 25 Jul 2024 11:35:21 +0300
+
+samba (2:4.20.2+dfsg-8) unstable; urgency=medium
+
+  * d/samba-common-bin.lintian-override: fix the typo in the last fix
+  * d/samba-log-parser: python3-minimal is enough
+  * d/rules: define dpkg_late_eval macro since dpkg 1.22.8 does not define
+    it anymore (Closes: #1076920)
+
+ -- Michael Tokarev <mjt@tls.msk.ru>  Wed, 24 Jul 2024 16:54:54 +0300
+
+samba (2:4.20.2+dfsg-7) unstable; urgency=medium
+
+  * d/samba-common-bin.lintian-override: update samba-log-parser override
+  * d/control: add Breaks: older samba-ad-dc by samba (Closes: #1076196)
+
+ -- Michael Tokarev <mjt@tls.msk.ru>  Sun, 14 Jul 2024 19:42:39 +0300
+
+samba (2:4.20.2+dfsg-6) unstable; urgency=medium
+
+  * make-python-optional.diff: remove the forgotten unneeded patch
+  * d/samba.NEWS: re-wrap it a little bit
+  * d/samba.postinst: notify the user about probably-missing samba-ad-dc
+    package on upgrade (debconf template samba/no-samba-ad-dc)
+  * d/samba-common.postinst: remove (clean up) old debconf entries
+
+ -- Michael Tokarev <mjt@tls.msk.ru>  Mon, 08 Jul 2024 16:40:49 +0300
+
+samba (2:4.20.2+dfsg-5) unstable; urgency=medium
+
+  * replace internal-to-samba-build python3-ldb-dev package
+    with a transitional empty package (to be removed in trixie+1)
+  * d/control: ensure python3-samba depends on exact version of python3-ldb,
+    the same way as samba-libs depends on exact version of libldb2
+  * d/rules: ensure python3-ldb does not depend on samba-libs|python3-samba
+  * d/rules: refine and explain --with-shared-modules
+  * d/control: d/control: drop old (buster and before) Breaks
+
+ -- Michael Tokarev <mjt@tls.msk.ru>  Mon, 01 Jul 2024 10:41:04 +0300
+
+samba (2:4.20.2+dfsg-4) unstable; urgency=medium
+
+  * d/control: add the forgotten epoch for Breaks/Replaces
+    of samba-vfs-ceph & samba-vfs-glusterfs (Closes: #1074299)
+
+ -- Michael Tokarev <mjt@tls.msk.ru>  Wed, 26 Jun 2024 12:20:08 +0300
+
+samba (2:4.20.2+dfsg-3) unstable; urgency=medium
+
+  * split out samba-vfs-glusterfs from samba-vfs-modules
+    (pick up and rework ubuntu changes)
+  * split out samba-vfs-ceph from samba-vfs-modules
+  * merge samba-vfs-modules (remaining) into main samba package
+  * the only remaining extra vfs module, snapper, does not need extra handling
+  * d/samba-ad-dc.lintian-overrides: add conflicts-with-version override
+    for /usr-move
+  * samba-common-bin: use trivial separate shell wrapper for the python script
+  * d/rules: use before-trixie build profile to control dh_movetousr run too
+  * d/*.service: provide empty value for referenced environment vars
+    (Closes: #1073969)
+  * d/dirs: remove leftover file
+  * d/samba-common-bin.dirs: stop creating /etc/samba/tls/
+  * d/samba.dirs: stop creating bin & sbin
+
+ -- Michael Tokarev <mjt@tls.msk.ru>  Tue, 25 Jun 2024 07:58:16 +0300
+
+samba (2:4.20.2+dfsg-2) unstable; urgency=medium
+
+  * tilde-in-version.diff - allow tilde in version string
+
+ -- Michael Tokarev <mjt@tls.msk.ru>  Thu, 20 Jun 2024 09:49:50 +0300
+
+samba (2:4.20.2+dfsg-1) unstable; urgency=medium
+
+  * new upstream stable/bugfix release:
+   - https://bugzilla.samba.org/show_bug.cgi?id=13019
+     Dynamic DNS updates with the internal DNS are not working
+   - https://bugzilla.samba.org/show_bug.cgi?id=13213
+     Samba build is not reproducible
+   - https://bugzilla.samba.org/show_bug.cgi?id=14981
+     netr_LogonSamLogonEx returns NR_STATUS_ACCESS_DENIED with SysvolReady=0
+   - https://bugzilla.samba.org/show_bug.cgi?id=15412 Anonymous smb3
+     signing/encryption should be allowed (similar to Windows Server 2022)
+   - https://bugzilla.samba.org/show_bug.cgi?id=15435
+     Regression DFS not working with widelinks = true
+   - https://bugzilla.samba.org/show_bug.cgi?id=15569
+     ldb qsort might r/w out of bounds with an intransitive compare function
+   - https://bugzilla.samba.org/show_bug.cgi?id=15573
+     Panic in dreplsrv_op_pull_source_apply_changes_trigger
+   - https://bugzilla.samba.org/show_bug.cgi?id=15620
+     s4:nbt_server: does not provide unexpected handling, so winbindd
+     can't use nmb requests instead cldap
+   - https://bugzilla.samba.org/show_bug.cgi?id=15625
+     Many qsort() comparison functions are non-transitive, which can lead
+     to out-of-bounds access in some circumstances
+   - https://bugzilla.samba.org/show_bug.cgi?id=15633
+     samba-gpupdate - Invalid NtVer in netlogon_samlogon_response
+   - https://bugzilla.samba.org/show_bug.cgi?id=15638
+     Need to change gitlab-ci.yml tags in all branches to avoid CI bill
+   - https://bugzilla.samba.org/show_bug.cgi?id=15642 winbindd,
+     net ads join and other things don't work on an ipv6 only host
+   - https://bugzilla.samba.org/show_bug.cgi?id=15653 idmap_ad creates
+     an incorrect local krb5.conf in case of trusted domain lookups
+   - https://bugzilla.samba.org/show_bug.cgi?id=15654
+     new --vendor-name and --vendor-patch-revision options for ./configure
+   - https://bugzilla.samba.org/show_bug.cgi?id=15659
+     Segmentation fault when deleting files in vfs_recycle
+     Closes: #1073252
+   - https://bugzilla.samba.org/show_bug.cgi?id=15660 The images don't build
+     after the git security release and CentOS 8 Stream is EOL
+   - https://bugzilla.samba.org/show_bug.cgi?id=15662
+     vfs_widelinks with DFS shares breaks case insensitivity
+   - https://bugzilla.samba.org/show_bug.cgi?id=15664
+     Panic in vfs_offload_token_db_fetch_fsp()
+   - https://bugzilla.samba.org/show_bug.cgi?id=15665
+     CTDB RADOS mutex helper misses namespace support
+   - https://bugzilla.samba.org/show_bug.cgi?id=15666 "client use kerberos"
+     and --use-kerberos is ignored for the machine account
+  * d/libldb2.symbols,d.python3-ldb.symbols.in: add new version (2.9.1)
+  * use ./configure --vendor-name= instead of patching ./VERSION
+  * omit samba-ad-dc for i386 ubuntu
+  * samba-ad-dc: usr-move compensation maintscripts: add "set -e"
+
+ -- Michael Tokarev <mjt@tls.msk.ru>  Wed, 19 Jun 2024 23:59:36 +0300
+
+samba (2:4.20.1+dfsg-5) unstable; urgency=medium
+
+  * Build-Depends: dpkg-dev>=trixie for Arch packages only (for t64 rename)
+  * d/samba.NEWS: reword the last entry a bit
+  * d/samba-ad-dc.init: chmod +x
+  * d/control: bump Standards-Version to 4.7.0 (no changes needed)
+
+ -- Michael Tokarev <mjt@tls.msk.ru>  Mon, 10 Jun 2024 20:17:53 +0300
+
+samba (2:4.20.1+dfsg-4) unstable; urgency=medium
+
+  [ Helmut Grohne ]
+  * Mitigate ineffective replaces due to /usr-move (DEP17 P1)
+    (Closes: #1072102)
+
+  [ Michael Tokarev ]
+  * d/control: mark libkeyutils-dev as linux-only [linux-any]
+  * d/control: drop old versions of versioned dependencies
+
+ -- Michael Tokarev <mjt@tls.msk.ru>  Wed, 29 May 2024 20:31:41 +0300
+
+samba (2:4.20.1+dfsg-3) unstable; urgency=medium
+
+  * d/rules: move samba-common install to d/samba-common.install
+  * d/rules: install samba-ad-dc init files for the right package
+  * d/samba.postinst: remove nmbd_error_handler for the initscript
+    (it is not used in systemd case)
+
+ -- Michael Tokarev <mjt@tls.msk.ru>  Sun, 26 May 2024 18:48:17 +0300
+
+samba (2:4.20.1+dfsg-2) unstable; urgency=medium
+
+  * move many files from samba package to samba-ad-dc package.
+    From now on, samba-ad-dc isn't just a meta-package, it is actually
+    needed for AD-DC functionality.  If you run AD-DC, please ensure
+    that samba-ad-dc package is installed (it is not recommended by samba)
+    Closes: #1051770
+  * move samba-tool and samba-gpupdate from samba-common-bin and samba
+    packages to python3-samba.  This is an Active Directory stuff, not
+    needed for a stand-alone server or a client, but might be useful
+    for auth-only (neither file-server nor file-client) AD installs
+    Closes: #1068360
+  * remove addshare.py, setoption.py and source_samba.py python scripts
+    These aren't used by samba packages and are hardly useful generally, esp.
+    having in mind their unusual locations.  The apport hook (source_samba.py)
+    is mostly obsolete, it hasn't been updated for a very long time.
+  * add make-python-optional.diff, so python3 can be made optional
+    for samba-common-bin
+  * remove python3-samba and python from Depends of samba and samba-common-bin
+    packages, moving it to Recommends.  This lets the user to install a stand-
+    alone samba file server without any Active Directory bits and even without
+    python interpreter
+  * d/samba.install: do not install samba_downgrade_db (to old pre-4.8 version)
+  * move smbcontrol binary from samba to samba-common-bin,
+    since it can also be used to control winbindd
+  * d/control: tdb-tools (tdbbackup) are run from python modules,
+    move from samba:Depends to python3-samba:Recommends
+  * d/control: samba: no need to depend on libpam-runtime or libpam-modules
+  * d/control: samba: no need to recommend samba-ad-provision
+  * debian/TODO: update a bit, remove many obsolete entries
+
+ -- Michael Tokarev <mjt@tls.msk.ru>  Sun, 26 May 2024 17:48:13 +0300
+
+samba (2:4.20.1+dfsg-1) unstable; urgency=medium
+
+  * new upstream major release
+  * d/control: bump tevent/talloc/tdb versions for Build-Depends
+  * d/libldb2.symbols, d/python3-ldb.symbols.in: add new version (2.9.0)
+  * d/patches/meaningful-error-if-no-python3-markdown.patch: fixup
+  * d/*.install: internal library names changed:
+    libfoo-samba4.so.0 => libfoo-private-samba.so.0
+  * d/samba-libs.install: update names for libdcerpc & libndr private libs
+  * d/samba-libs.install, d/samba-libs.links, d/samba-libs.symbols:
+    libndr has soversion 4 now.  This breaks binaries linked with libndr!
+  * d/samba-libs.symbols: update with new ndr4 symbols
+  * d/libsmbclient.symbols: update with new symbols
+  * d/samba-dev.install: add smb3posix.h
+  * d/not-installed: add usr/bin/wspsearch experimental windows search binary
+  * d/control: libperl-json is not needed for build anymore
+  * d/control: bump minimum mit-krb5 version in Build-Depends to 1.21
+    (for pkg.samba.mitkrb5 build profile)
+  * Closes: #1070335 (wronly filed)
+
+ -- Michael Tokarev <mjt@tls.msk.ru>  Wed, 08 May 2024 13:23:57 +0300
+
+samba (2:4.19.6+dfsg-3) unstable; urgency=medium
+
+  * fix brown-paper-bag bugs in previous upload
+    (in meaningful-error-if-no-python3-markdown.patch)
+
+ -- Michael Tokarev <mjt@tls.msk.ru>  Thu, 02 May 2024 20:47:15 +0300
+
+samba (2:4.19.6+dfsg-2) unstable; urgency=medium
+
+  [ Michael Tokarev ]
+  * meaningful-error-if-no-python3-markdown.patch:
+    update to include 2 other places where markdown gets improted
+  * d/winbind.service:
+    - order it before nss-user-lookup.target (Closes: #1068649)
+    - fix typo
+    - nmb.service is nmbd.service in debian
+  * move include/samba/core/*.h from samba-libs to libwbclient-dev
+    (Closes: #1064544)
+
+  [ Alex Murray ]
+  * fix smbd apparmor breakage since change to local systemd services
+    (Cloes: #1069661)
+
+ -- Michael Tokarev <mjt@tls.msk.ru>  Thu, 02 May 2024 14:08:31 +0300
+
+samba (2:4.19.6+dfsg-1) unstable; urgency=medium
+
+  * new upstream stable/bugfix release:
+   - https://bugzilla.samba.org/show_bug.cgi?id=15527 fd_handle_destructor()
+     panics within an smbd_smb2_close() if vfs_stat_fsp() fails in fd_close()
+   - https://bugzilla.samba.org/show_bug.cgi?id=15580
+     Packet marshalling push support missing for
+     CTDB_CONTROL_TCP_CLIENT_DISCONNECTED and CTDB_CONTROL_TCP_CLIENT_PASSED
+   - https://bugzilla.samba.org/show_bug.cgi?id=15588
+     samba-gpupdate: Correctly implement site support
+   - https://bugzilla.samba.org/show_bug.cgi?id=15599
+     libgpo: Segfault in python bindings
+  * revert d/rules: remove Debian/Ubuntu "branding"
+
+ -- Michael Tokarev <mjt@tls.msk.ru>  Mon, 08 Apr 2024 11:18:38 +0300
+
+samba (2:4.19.5+dfsg-5) unstable; urgency=medium
+
+  * implement pkg.samba.before-trixie build profile
+    (undo t64 changhes and drop build-dep)
+  * d/rules: remove Debian/Ubuntu "branding", no need in that
+  * d/control: samba-dsdb-modules: drop hardcoded dependency on libgpgme11
+    (Closes: #1068526)
+
+ -- Michael Tokarev <mjt@tls.msk.ru>  Sun, 07 Apr 2024 16:04:30 +0300
+
+samba (2:4.19.5+dfsg-4) unstable; urgency=medium
+
+  * stop shipping python3/dist-packages/samba/tests
+    (Closes: #1064512, #1063149)
+  * add Debian-Specific tag to debian-specific patches
+  * d/genshlibs: run dh_makeshlibs on libsmbclient0
+    (Closes: #1065349)
+
+ -- Michael Tokarev <mjt@tls.msk.ru>  Sun, 03 Mar 2024 15:37:16 +0300
+
+samba (2:4.19.5+dfsg-3) unstable; urgency=medium
+
+  * d/control: add versioned depends on dpkg-dev to avoid accidental
+    build of time64_t packages on older systems
+  * +lower-dns-lookup-mismatch-messages.patch (reduce log noise)
+  * d/control: add libtirpc-dev and rpcsvc-proto to Build-Depends-Arch
+    (Closes: #1065188)
+
+ -- Michael Tokarev <mjt@tls.msk.ru>  Fri, 01 Mar 2024 19:18:35 +0300
+
+samba (2:4.19.5+dfsg-2) unstable; urgency=medium
+
+  * rename libsmbclient => libsmbclient0 for 64-bit time_t transition
+    Closes: #1064337
+  * d/libsmbclient.lintian-overrides: remove, soname now = package name
+  * add Breaks: of sssd packages to samba-libs
+  * +passchange-error-message.patch - fix password change error message
+  * +edns0.patch: enable EDNS0 support in internal UDP-only DNS client
+    https://bugzilla.samba.org/show_bug.cgi?id=15536
+
+ -- Michael Tokarev <mjt@tls.msk.ru>  Wed, 28 Feb 2024 19:38:48 +0300
 
 samba (2:4.19.5+dfsg-1) unstable; urgency=medium
 
