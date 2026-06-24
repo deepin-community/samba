@@ -1,0 +1,13 @@
+--- a/source3/param/loadparm.c
++++ b/source3/param/loadparm.c
+@@ -4439,6 +4439,10 @@
+ 		label = lp_servicename(ctx, lp_sub, snum);
+ 	}
+ 
++	if (!label) {
++		return "";
++	}
++
+ 	/*
+ 	 * Volume label can be a max of 32 bytes. Make sure to truncate
+ 	 * it at a codepoint boundary if it's longer than 32 and contains
