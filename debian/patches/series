@@ -35,3 +35,4 @@ CVE-2025-10230-fix.patch
 # CVE-2025-9640: Fix uninitialized memory write in vfs_streams_xattr
 CVE-2025-9640-1.patch
 CVE-2025-9640-2.patch
+CVE-2026-58218.patch

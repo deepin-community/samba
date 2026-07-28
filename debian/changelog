@@ -1,3 +1,9 @@
+samba (2:4.19.5+dfsg-1deepin7) unstable; urgency=medium
+
+  * fix(cve): CVE-2026-58218
+
+ -- deepin-ci-robot <packages@deepin.org>  Wed, 29 Jul 2026 04:18:31 +0800
+
 samba (2:4.19.5+dfsg-1deepin6) unstable; urgency=medium
 
   * Fix CVE-2025-9640: uninitialized memory write in vfs_streams_xattr
