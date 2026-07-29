@@ -1,4 +1,4 @@
-/* 
+/*
    Unix SMB/CIFS implementation.
 
    crachnames implementation for the drsuapi pipe
@@ -43,23 +43,23 @@ static WERROR DsCrackNameOneFilter(struct ldb_context *sam_ctx, TALLOC_CTX *mem_
 				   struct smb_krb5_context *smb_krb5_context,
 				   uint32_t format_flags, enum drsuapi_DsNameFormat format_offered,
 				   enum drsuapi_DsNameFormat format_desired,
-				   struct ldb_dn *name_dn, const char *name, 
-				   const char *domain_filter, const char *result_filter, 
+				   struct ldb_dn *name_dn, const char *name,
+				   const char *domain_filter, const char *result_filter,
 				   struct drsuapi_DsNameInfo1 *info1, int scope, struct ldb_dn *search_dn);
 static WERROR DsCrackNameOneSyntactical(TALLOC_CTX *mem_ctx,
 					enum drsuapi_DsNameFormat format_offered,
 					enum drsuapi_DsNameFormat format_desired,
-					struct ldb_dn *name_dn, const char *name, 
+					struct ldb_dn *name_dn, const char *name,
 					struct drsuapi_DsNameInfo1 *info1);
 
-static WERROR dns_domain_from_principal(TALLOC_CTX *mem_ctx, struct smb_krb5_context *smb_krb5_context, 
-					const char *name, 
-					struct drsuapi_DsNameInfo1 *info1) 
+static WERROR dns_domain_from_principal(TALLOC_CTX *mem_ctx, struct smb_krb5_context *smb_krb5_context,
+					const char *name,
+					struct drsuapi_DsNameInfo1 *info1)
 {
 	krb5_error_code ret;
 	krb5_principal principal;
 	/* perhaps it's a principal with a realm, so return the right 'domain only' response */
-	ret = krb5_parse_name_flags(smb_krb5_context->krb5_context, name, 
+	ret = krb5_parse_name_flags(smb_krb5_context->krb5_context, name,
 				    KRB5_PRINCIPAL_PARSE_REQUIRE_REALM, &principal);
 	if (ret) {
 		info1->status = DRSUAPI_DS_NAME_STATUS_NOT_FOUND;
@@ -83,7 +83,7 @@ static enum drsuapi_DsNameStatus LDB_lookup_spn_alias(struct ldb_context *ldb_ct
 {
 	/*
 	 * Some of the logic of this function is mirrored in find_spn_alias()
-	 * in source4/dsdb.samdb/ldb_modules/samldb.c. If you change this to
+	 * in source4/dsdb/samdb/ldb_modules/samldb.c. If you change this to
 	 * not return the first matched alias, you will need to rethink that
 	 * function too.
 	 */
@@ -96,7 +96,7 @@ static enum drsuapi_DsNameStatus LDB_lookup_spn_alias(struct ldb_context *ldb_ct
 	char *service_dn_str;
 
 	const char *directory_attrs[] = {
-		"sPNMappings", 
+		"sPNMappings",
 		NULL
 	};
 
@@ -142,7 +142,7 @@ static enum drsuapi_DsNameStatus LDB_lookup_spn_alias(struct ldb_context *ldb_ct
 
 	for (i = 0; i < spnmappings->num_values; i++) {
 		char *mapping, *p, *str;
-		mapping = talloc_strdup(tmp_ctx, 
+		mapping = talloc_strdup(tmp_ctx,
 					(const char *)spnmappings->values[i].data);
 		if (!mapping) {
 			DEBUG(1, ("LDB_lookup_spn_alias: ldb_search: dn: %s did not have an sPNMapping\n", service_dn_str));
@@ -154,7 +154,7 @@ static enum drsuapi_DsNameStatus LDB_lookup_spn_alias(struct ldb_context *ldb_ct
 
 		p = strchr(mapping, '=');
 		if (!p) {
-			DEBUG(1, ("ldb_search: dn: %s sPNMapping malformed: %s\n", 
+			DEBUG(1, ("ldb_search: dn: %s sPNMapping malformed: %s\n",
 				  service_dn_str, mapping));
 			talloc_free(tmp_ctx);
 			return DRSUAPI_DS_NAME_STATUS_NOT_FOUND;
@@ -195,36 +195,40 @@ static WERROR DsCrackNameSPNAlias(struct ldb_context *sam_ctx, TALLOC_CTX *mem_c
 	WERROR wret;
 	krb5_error_code ret;
 	krb5_principal principal;
-	const krb5_data *component;
+	krb5_data component;
 	const char *service, *dns_name;
 	char *new_service;
 	char *new_princ;
 	enum drsuapi_DsNameStatus namestatus;
 
 	/* parse principal */
-	ret = krb5_parse_name_flags(smb_krb5_context->krb5_context, 
+	ret = krb5_parse_name_flags(smb_krb5_context->krb5_context,
 				    name, KRB5_PRINCIPAL_PARSE_NO_REALM, &principal);
 	if (ret) {
 		DEBUG(2, ("Could not parse principal: %s: %s\n",
-			  name, smb_get_krb5_error_message(smb_krb5_context->krb5_context, 
+			  name, smb_get_krb5_error_message(smb_krb5_context->krb5_context,
 							   ret, mem_ctx)));
 		return WERR_NOT_ENOUGH_MEMORY;
 	}
 
 	/* grab cifs/, http/ etc */
 
-	/* This is checked for in callers, but be safe */
-	if (krb5_princ_size(smb_krb5_context->krb5_context, principal) < 2) {
+	ret = smb_krb5_princ_component(smb_krb5_context->krb5_context,
+				       principal, 0, &component);
+	if (ret) {
 		info1->status = DRSUAPI_DS_NAME_STATUS_NOT_FOUND;
 		krb5_free_principal(smb_krb5_context->krb5_context, principal);
 		return WERR_OK;
 	}
-	component = krb5_princ_component(smb_krb5_context->krb5_context,
-					 principal, 0);
-	service = (const char *)component->data;
-	component = krb5_princ_component(smb_krb5_context->krb5_context,
-					 principal, 1);
-	dns_name = (const char *)component->data;
+	service = (const char *)component.data;
+	ret = smb_krb5_princ_component(smb_krb5_context->krb5_context,
+				       principal, 1, &component);
+	if (ret) {
+		info1->status = DRSUAPI_DS_NAME_STATUS_NOT_FOUND;
+		krb5_free_principal(smb_krb5_context->krb5_context, principal);
+		return WERR_OK;
+	}
+	dns_name = (const char *)component.data;
 
 	/* MAP it */
 	namestatus = LDB_lookup_spn_alias(sam_ctx, mem_ctx,
@@ -293,7 +297,7 @@ static WERROR DsCrackNameUPN(struct ldb_context *sam_ctx, TALLOC_CTX *mem_ctx,
 		return WERR_OK;
 	}
 
-	ret = krb5_parse_name_flags(smb_krb5_context->krb5_context, name, 
+	ret = krb5_parse_name_flags(smb_krb5_context->krb5_context, name,
 				    KRB5_PRINCIPAL_PARSE_REQUIRE_REALM, &principal);
 	if (ret) {
 		info1->status = DRSUAPI_DS_NAME_STATUS_NOT_FOUND;
@@ -303,11 +307,14 @@ static WERROR DsCrackNameUPN(struct ldb_context *sam_ctx, TALLOC_CTX *mem_ctx,
 	realm = smb_krb5_principal_get_realm(
 		mem_ctx, smb_krb5_context->krb5_context, principal);
 	if (realm == NULL) {
+		krb5_free_principal(smb_krb5_context->krb5_context, principal);
 		return WERR_NOT_ENOUGH_MEMORY;
 	}
 
 	realm_encoded = ldb_binary_encode_string(mem_ctx, realm);
 	if (realm_encoded == NULL) {
+		TALLOC_FREE(realm);
+		krb5_free_principal(smb_krb5_context->krb5_context, principal);
 		return WERR_NOT_ENOUGH_MEMORY;
 	}
 
@@ -335,7 +342,7 @@ static WERROR DsCrackNameUPN(struct ldb_context *sam_ctx, TALLOC_CTX *mem_ctx,
 		break;
 	case 0:
 		krb5_free_principal(smb_krb5_context->krb5_context, principal);
-		return dns_domain_from_principal(mem_ctx, smb_krb5_context, 
+		return dns_domain_from_principal(mem_ctx, smb_krb5_context,
 						 name, info1);
 	default:
 		info1->status = DRSUAPI_DS_NAME_STATUS_NOT_UNIQUE;
@@ -349,7 +356,7 @@ static WERROR DsCrackNameUPN(struct ldb_context *sam_ctx, TALLOC_CTX *mem_ctx,
 	 * match this filter, so we specify
 	 * KRB5_PRINCIPAL_UNPARSE_DISPLAY
 	 */
-	ret = krb5_unparse_name_flags(smb_krb5_context->krb5_context, principal, 
+	ret = krb5_unparse_name_flags(smb_krb5_context->krb5_context, principal,
 				      KRB5_PRINCIPAL_UNPARSE_NO_REALM |
 				      KRB5_PRINCIPAL_UNPARSE_DISPLAY,
 				      &unparsed_name_short);
@@ -376,10 +383,10 @@ static WERROR DsCrackNameUPN(struct ldb_context *sam_ctx, TALLOC_CTX *mem_ctx,
 		free(unparsed_name_short);
 		return WERR_NOT_ENOUGH_MEMORY;
 	}
-	status = DsCrackNameOneFilter(sam_ctx, mem_ctx, 
-				      smb_krb5_context, 
-				      format_flags, format_offered, format_desired, 
-				      NULL, unparsed_name_short, domain_filter, result_filter, 
+	status = DsCrackNameOneFilter(sam_ctx, mem_ctx,
+				      smb_krb5_context,
+				      format_flags, format_offered, format_desired,
+				      NULL, unparsed_name_short, domain_filter, result_filter,
 				      info1, LDB_SCOPE_SUBTREE, NULL);
 	free(unparsed_name_short);
 
@@ -388,7 +395,7 @@ static WERROR DsCrackNameUPN(struct ldb_context *sam_ctx, TALLOC_CTX *mem_ctx,
 
 /*
  * This function will workout the filtering parameter in order to be able to do
- * the adapted search when the incomming format is format_functional.
+ * the adapted search when the incoming format is format_functional.
  * This boils down to defining the search_dn (passed as pointer to ldb_dn *) and the
  * ldap filter request.
  * Main input parameters are:
@@ -625,7 +632,7 @@ WERROR DsCrackNameOneName(struct ldb_context *sam_ctx, TALLOC_CTX *mem_ctx,
 			return WERR_NOT_ENOUGH_MEMORY;
 		}
 
-		domain_filter = talloc_asprintf(mem_ctx, 
+		domain_filter = talloc_asprintf(mem_ctx,
 						"(&(objectClass=crossRef)(netbiosName=%s)(systemFlags:%s:=%u))",
 						domain_encoded,
 						LDB_OID_COMPARATOR_AND,
@@ -709,7 +716,7 @@ WERROR DsCrackNameOneName(struct ldb_context *sam_ctx, TALLOC_CTX *mem_ctx,
 			info1->status = DRSUAPI_DS_NAME_STATUS_NOT_FOUND;
 			return WERR_OK;
 		}
-		ldap_sid = ldap_encode_ndr_dom_sid(mem_ctx, 
+		ldap_sid = ldap_encode_ndr_dom_sid(mem_ctx,
 						   sid);
 		if (!ldap_sid) {
 			return WERR_NOT_ENOUGH_MEMORY;
@@ -724,8 +731,8 @@ WERROR DsCrackNameOneName(struct ldb_context *sam_ctx, TALLOC_CTX *mem_ctx,
 		char *unparsed_name;
 		const char *unparsed_name_encoded = NULL;
 
-		ret = smb_krb5_init_context(mem_ctx, 
-					    (struct loadparm_context *)ldb_get_opaque(sam_ctx, "loadparm"), 
+		ret = smb_krb5_init_context(mem_ctx,
+					    (struct loadparm_context *)ldb_get_opaque(sam_ctx, "loadparm"),
 					    &smb_krb5_context);
 
 		if (ret) {
@@ -760,12 +767,12 @@ WERROR DsCrackNameOneName(struct ldb_context *sam_ctx, TALLOC_CTX *mem_ctx,
 
 		krb5_free_principal(smb_krb5_context->krb5_context, principal);
 
+		/* The ldb_binary_encode_string() here avoids LDAP filter injection attacks */
 		unparsed_name_encoded = ldb_binary_encode_string(mem_ctx, unparsed_name);
 		if (unparsed_name_encoded == NULL) {
 			return WERR_NOT_ENOUGH_MEMORY;
 		}
 
-		/* The ldb_binary_encode_string() here avoid LDAP filter injection attacks */
 		result_filter = talloc_asprintf(mem_ctx, "(&(userPrincipalName=%s)(objectClass=user))",
 						unparsed_name_encoded);
 
@@ -777,11 +784,10 @@ WERROR DsCrackNameOneName(struct ldb_context *sam_ctx, TALLOC_CTX *mem_ctx,
 		krb5_principal principal;
 		char *unparsed_name_short;
 		const char *unparsed_name_short_encoded = NULL;
-		const krb5_data *component;
-		char *service;
+		bool principal_is_host = false;
 
-		ret = smb_krb5_init_context(mem_ctx, 
-					    (struct loadparm_context *)ldb_get_opaque(sam_ctx, "loadparm"), 
+		ret = smb_krb5_init_context(mem_ctx,
+					    (struct loadparm_context *)ldb_get_opaque(sam_ctx, "loadparm"),
 					    &smb_krb5_context);
 
 		if (ret) {
@@ -798,7 +804,7 @@ WERROR DsCrackNameOneName(struct ldb_context *sam_ctx, TALLOC_CTX *mem_ctx,
 		} else if (ret == 0) {
 			krb5_free_principal(smb_krb5_context->krb5_context, principal);
 		}
-		ret = krb5_parse_name_flags(smb_krb5_context->krb5_context, name, 
+		ret = krb5_parse_name_flags(smb_krb5_context->krb5_context, name,
 					    KRB5_PRINCIPAL_PARSE_NO_REALM, &principal);
 		if (ret) {
 			return dns_domain_from_principal(mem_ctx, smb_krb5_context,
@@ -807,7 +813,7 @@ WERROR DsCrackNameOneName(struct ldb_context *sam_ctx, TALLOC_CTX *mem_ctx,
 
 		domain_filter = NULL;
 
-		ret = krb5_unparse_name_flags(smb_krb5_context->krb5_context, principal, 
+		ret = krb5_unparse_name_flags(smb_krb5_context->krb5_context, principal,
 					      KRB5_PRINCIPAL_UNPARSE_NO_REALM, &unparsed_name_short);
 		if (ret) {
 			krb5_free_principal(smb_krb5_context->krb5_context, principal);
@@ -821,20 +827,35 @@ WERROR DsCrackNameOneName(struct ldb_context *sam_ctx, TALLOC_CTX *mem_ctx,
 			return WERR_NOT_ENOUGH_MEMORY;
 		}
 
-		component = krb5_princ_component(smb_krb5_context->krb5_context,
-						 principal, 0);
-		service = (char *)component->data;
-		if ((krb5_princ_size(smb_krb5_context->krb5_context,
-							principal) == 2) &&
-			(strcasecmp(service, "host") == 0)) {
+		if ((krb5_princ_size(smb_krb5_context->krb5_context, principal) == 2)) {
+			krb5_data component;
+
+			ret = smb_krb5_princ_component(smb_krb5_context->krb5_context,
+						       principal, 0, &component);
+			if (ret) {
+				krb5_free_principal(smb_krb5_context->krb5_context, principal);
+				free(unparsed_name_short);
+				return WERR_INTERNAL_ERROR;
+			}
+
+			principal_is_host = strcasecmp(component.data, "host") == 0;
+		}
+
+		if (principal_is_host) {
 			/* the 'cn' attribute is just the leading part of the name */
+			krb5_data component;
 			char *computer_name;
 			const char *computer_name_encoded = NULL;
-			component = krb5_princ_component(
-						smb_krb5_context->krb5_context,
-						principal, 1);
-			computer_name = talloc_strndup(mem_ctx, (char *)component->data,
-							strcspn((char *)component->data, "."));
+			ret = smb_krb5_princ_component(
+				smb_krb5_context->krb5_context,
+				principal, 1, &component);
+			if (ret) {
+				krb5_free_principal(smb_krb5_context->krb5_context, principal);
+				free(unparsed_name_short);
+				return WERR_INTERNAL_ERROR;
+			}
+			computer_name = talloc_strndup(mem_ctx, (char *)component.data,
+							strcspn((char *)component.data, "."));
 			if (computer_name == NULL) {
 				krb5_free_principal(smb_krb5_context->krb5_context, principal);
 				free(unparsed_name_short);
@@ -848,7 +869,7 @@ WERROR DsCrackNameOneName(struct ldb_context *sam_ctx, TALLOC_CTX *mem_ctx,
 				return WERR_NOT_ENOUGH_MEMORY;
 			}
 
-			result_filter = talloc_asprintf(mem_ctx, "(|(&(servicePrincipalName=%s)(objectClass=user))(&(cn=%s)(objectClass=computer)))", 
+			result_filter = talloc_asprintf(mem_ctx, "(|(&(servicePrincipalName=%s)(objectClass=user))(&(cn=%s)(objectClass=computer)))",
 							unparsed_name_short_encoded,
 							computer_name_encoded);
 		} else {
@@ -872,22 +893,22 @@ WERROR DsCrackNameOneName(struct ldb_context *sam_ctx, TALLOC_CTX *mem_ctx,
 						 name_dn, name, info1);
 	}
 
-	return DsCrackNameOneFilter(sam_ctx, mem_ctx, 
-				    smb_krb5_context, 
-				    format_flags, format_offered, format_desired, 
-				    name_dn, name, 
-				    domain_filter, result_filter, 
+	return DsCrackNameOneFilter(sam_ctx, mem_ctx,
+				    smb_krb5_context,
+				    format_flags, format_offered, format_desired,
+				    name_dn, name,
+				    domain_filter, result_filter,
 				    info1, scope, search_dn);
 }
 
 /* Subcase of CrackNames.  It is possible to translate a LDAP-style DN
- * (FQDN_1779) into a canoical name without actually searching the
+ * (FQDN_1779) into a canonical name without actually searching the
  * database */
 
 static WERROR DsCrackNameOneSyntactical(TALLOC_CTX *mem_ctx,
 					enum drsuapi_DsNameFormat format_offered,
 					enum drsuapi_DsNameFormat format_desired,
-					struct ldb_dn *name_dn, const char *name, 
+					struct ldb_dn *name_dn, const char *name,
 					struct drsuapi_DsNameInfo1 *info1)
 {
 	char *cracked;
@@ -897,7 +918,7 @@ static WERROR DsCrackNameOneSyntactical(TALLOC_CTX *mem_ctx,
 	}
 
 	switch (format_desired) {
-	case DRSUAPI_DS_NAME_FORMAT_CANONICAL: 
+	case DRSUAPI_DS_NAME_FORMAT_CANONICAL:
 		cracked = ldb_dn_canonical_string(mem_ctx, name_dn);
 		break;
 	case DRSUAPI_DS_NAME_FORMAT_CANONICAL_EX:
@@ -913,7 +934,7 @@ static WERROR DsCrackNameOneSyntactical(TALLOC_CTX *mem_ctx,
 		return WERR_NOT_ENOUGH_MEMORY;
 	}
 
-	return WERR_OK;	
+	return WERR_OK;
 }
 
 /* Given a filter for the domain, and one for the result, perform the
@@ -927,8 +948,8 @@ static WERROR DsCrackNameOneFilter(struct ldb_context *sam_ctx, TALLOC_CTX *mem_
 				   struct smb_krb5_context *smb_krb5_context,
 				   uint32_t format_flags, enum drsuapi_DsNameFormat format_offered,
 				   enum drsuapi_DsNameFormat format_desired,
-				   struct ldb_dn *name_dn, const char *name, 
-				   const char *domain_filter, const char *result_filter, 
+				   struct ldb_dn *name_dn, const char *name,
+				   const char *domain_filter, const char *result_filter,
 				   struct drsuapi_DsNameInfo1 *info1,
 				   int scope, struct ldb_dn *search_dn)
 {
@@ -961,7 +982,7 @@ static WERROR DsCrackNameOneFilter(struct ldb_context *sam_ctx, TALLOC_CTX *mem_
 	const char * const _result_attrs_spn[] = { "servicePrincipalName", NULL};
 
 	const char * const _domain_attrs_display[] = { "ncName", "dnsRoot", NULL};
-	const char * const _result_attrs_display[] = { "displayName", "samAccountName", NULL};
+	const char * const _result_attrs_display[] = { "displayName", "sAMAccountName", NULL};
 
 	const char * const _domain_attrs_sid[] = { "ncName", "dnsRoot", NULL};
 	const char * const _result_attrs_sid[] = { "objectSid", NULL};
@@ -984,11 +1005,11 @@ static WERROR DsCrackNameOneFilter(struct ldb_context *sam_ctx, TALLOC_CTX *mem_
 		domain_attrs = _domain_attrs_nt4;
 		result_attrs = _result_attrs_nt4;
 		break;
-	case DRSUAPI_DS_NAME_FORMAT_GUID:		
+	case DRSUAPI_DS_NAME_FORMAT_GUID:
 		domain_attrs = _domain_attrs_guid;
 		result_attrs = _result_attrs_guid;
 		break;
-	case DRSUAPI_DS_NAME_FORMAT_DISPLAY:		
+	case DRSUAPI_DS_NAME_FORMAT_DISPLAY:
 		domain_attrs = _domain_attrs_display;
 		result_attrs = _result_attrs_display;
 		break;
@@ -1116,14 +1137,14 @@ static WERROR DsCrackNameOneFilter(struct ldb_context *sam_ctx, TALLOC_CTX *mem_
 		break;
 	case 0:
 		switch (format_offered) {
-		case DRSUAPI_DS_NAME_FORMAT_SERVICE_PRINCIPAL: 
-			return DsCrackNameSPNAlias(sam_ctx, mem_ctx, 
-						   smb_krb5_context, 
+		case DRSUAPI_DS_NAME_FORMAT_SERVICE_PRINCIPAL:
+			return DsCrackNameSPNAlias(sam_ctx, mem_ctx,
+						   smb_krb5_context,
 						   format_flags, format_offered, format_desired,
 						   name, info1);
 
 		case DRSUAPI_DS_NAME_FORMAT_USER_PRINCIPAL:
-			return DsCrackNameUPN(sam_ctx, mem_ctx, smb_krb5_context, 
+			return DsCrackNameUPN(sam_ctx, mem_ctx, smb_krb5_context,
 					      format_flags, format_offered, format_desired,
 					      name, info1);
 		default:
@@ -1193,8 +1214,8 @@ static WERROR DsCrackNameOneFilter(struct ldb_context *sam_ctx, TALLOC_CTX *mem_
 	}
 	case DRSUAPI_DS_NAME_FORMAT_CANONICAL_EX: {
 		/* Not in the virtual ldb attribute */
-		return DsCrackNameOneSyntactical(mem_ctx, 
-						 DRSUAPI_DS_NAME_FORMAT_FQDN_1779, 
+		return DsCrackNameOneSyntactical(mem_ctx,
+						 DRSUAPI_DS_NAME_FORMAT_FQDN_1779,
 						 DRSUAPI_DS_NAME_FORMAT_CANONICAL_EX,
 						 result->dn, name, info1);
 	}
@@ -1242,7 +1263,7 @@ static WERROR DsCrackNameOneFilter(struct ldb_context *sam_ctx, TALLOC_CTX *mem_
 				info1->status = DRSUAPI_DS_NAME_STATUS_NO_MAPPING;
 				return WERR_OK;
 			}
-			if (dom_sid_in_domain(dom_sid_parse_talloc(mem_ctx, SID_BUILTIN), sid)) {
+			if (dom_sid_in_domain(&global_sid_Builtin, sid)) {
 				_dom = "BUILTIN";
 			} else {
 				const char *attrs[] = { NULL };
@@ -1256,7 +1277,7 @@ static WERROR DsCrackNameOneFilter(struct ldb_context *sam_ctx, TALLOC_CTX *mem_
 							     NULL,
 							     LDB_SCOPE_BASE,
 							     attrs,
-							     "(&(objectSid=%s)(objectClass=domain))", 
+							     "(&(objectSid=%s)(objectClass=domain))",
 							     ldap_encode_ndr_dom_sid(mem_ctx, dom_sid));
 
 				if (ldb_ret != LDB_SUCCESS) {
@@ -1324,7 +1345,7 @@ static WERROR DsCrackNameOneFilter(struct ldb_context *sam_ctx, TALLOC_CTX *mem_
 		info1->result_name	= ldb_msg_find_attr_as_string(result, "displayName", NULL);
 		if (!info1->result_name) {
 			info1->result_name	= ldb_msg_find_attr_as_string(result, "sAMAccountName", NULL);
-		} 
+		}
 		if (!info1->result_name) {
 			info1->status = DRSUAPI_DS_NAME_STATUS_NOT_FOUND;
 		} else {
@@ -1390,17 +1411,17 @@ static WERROR DsCrackNameOneFilter(struct ldb_context *sam_ctx, TALLOC_CTX *mem_
  * return the user and domain DNs.  This is used in the KDC to then
  * return the Keys and evaluate policy */
 
-NTSTATUS crack_user_principal_name(struct ldb_context *sam_ctx, 
-				   TALLOC_CTX *mem_ctx, 
-				   const char *user_principal_name, 
+NTSTATUS crack_user_principal_name(struct ldb_context *sam_ctx,
+				   TALLOC_CTX *mem_ctx,
+				   const char *user_principal_name,
 				   struct ldb_dn **user_dn,
-				   struct ldb_dn **domain_dn) 
+				   struct ldb_dn **domain_dn)
 {
 	WERROR werr;
 	struct drsuapi_DsNameInfo1 info1;
 	werr = DsCrackNameOneName(sam_ctx, mem_ctx, 0,
 				  DRSUAPI_DS_NAME_FORMAT_USER_PRINCIPAL,
-				  DRSUAPI_DS_NAME_FORMAT_FQDN_1779, 
+				  DRSUAPI_DS_NAME_FORMAT_FQDN_1779,
 				  user_principal_name,
 				  &info1);
 	if (!W_ERROR_IS_OK(werr)) {
@@ -1423,8 +1444,8 @@ NTSTATUS crack_user_principal_name(struct ldb_context *sam_ctx,
 	if (domain_dn) {
 		werr = DsCrackNameOneName(sam_ctx, mem_ctx, 0,
 					  DRSUAPI_DS_NAME_FORMAT_CANONICAL,
-					  DRSUAPI_DS_NAME_FORMAT_FQDN_1779, 
-					  talloc_asprintf(mem_ctx, "%s/", 
+					  DRSUAPI_DS_NAME_FORMAT_FQDN_1779,
+					  talloc_asprintf(mem_ctx, "%s/",
 							  info1.dns_domain_name),
 					  &info1);
 		if (!W_ERROR_IS_OK(werr)) {
@@ -1452,17 +1473,17 @@ NTSTATUS crack_user_principal_name(struct ldb_context *sam_ctx,
  * return the user and domain DNs.  This is used in the KDC to then
  * return the Keys and evaluate policy */
 
-NTSTATUS crack_service_principal_name(struct ldb_context *sam_ctx, 
-				      TALLOC_CTX *mem_ctx, 
-				      const char *service_principal_name, 
+NTSTATUS crack_service_principal_name(struct ldb_context *sam_ctx,
+				      TALLOC_CTX *mem_ctx,
+				      const char *service_principal_name,
 				      struct ldb_dn **user_dn,
-				      struct ldb_dn **domain_dn) 
+				      struct ldb_dn **domain_dn)
 {
 	WERROR werr;
 	struct drsuapi_DsNameInfo1 info1;
 	werr = DsCrackNameOneName(sam_ctx, mem_ctx, 0,
 				  DRSUAPI_DS_NAME_FORMAT_SERVICE_PRINCIPAL,
-				  DRSUAPI_DS_NAME_FORMAT_FQDN_1779, 
+				  DRSUAPI_DS_NAME_FORMAT_FQDN_1779,
 				  service_principal_name,
 				  &info1);
 	if (!W_ERROR_IS_OK(werr)) {
@@ -1485,8 +1506,8 @@ NTSTATUS crack_service_principal_name(struct ldb_context *sam_ctx,
 	if (domain_dn) {
 		werr = DsCrackNameOneName(sam_ctx, mem_ctx, 0,
 					  DRSUAPI_DS_NAME_FORMAT_CANONICAL,
-					  DRSUAPI_DS_NAME_FORMAT_FQDN_1779, 
-					  talloc_asprintf(mem_ctx, "%s/", 
+					  DRSUAPI_DS_NAME_FORMAT_FQDN_1779,
+					  talloc_asprintf(mem_ctx, "%s/",
 							  info1.dns_domain_name),
 					  &info1);
 		if (!W_ERROR_IS_OK(werr)) {
@@ -1510,10 +1531,10 @@ NTSTATUS crack_service_principal_name(struct ldb_context *sam_ctx,
 	return NT_STATUS_OK;
 }
 
-NTSTATUS crack_name_to_nt4_name(TALLOC_CTX *mem_ctx, 
+NTSTATUS crack_name_to_nt4_name(TALLOC_CTX *mem_ctx,
 				struct ldb_context *ldb,
 				enum drsuapi_DsNameFormat format_offered,
-				const char *name, 
+				const char *name,
 				const char **nt4_domain, const char **nt4_account)
 {
 	WERROR werr;
@@ -1528,7 +1549,7 @@ NTSTATUS crack_name_to_nt4_name(TALLOC_CTX *mem_ctx,
 	}
 
 	werr = DsCrackNameOneName(ldb, mem_ctx, 0,
-				  format_offered, 
+				  format_offered,
 				  DRSUAPI_DS_NAME_FORMAT_NT4_ACCOUNT,
 				  name,
 				  &info1);

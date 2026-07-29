@@ -44,7 +44,7 @@ from samba.dcerpc.windows_event_ids import (
 class AuthLogTestsSamLogon(samba.tests.auth_log_base.AuthLogTestBase):
 
     def setUp(self):
-        super(AuthLogTestsSamLogon, self).setUp()
+        super().setUp()
         self.lp = samba.tests.env_loadparm()
         self.session = system_session()
         self.ldb = SamDB(
@@ -60,7 +60,7 @@ class AuthLogTestsSamLogon(samba.tests.auth_log_base.AuthLogTestBase):
                            (self.netbios_name, self.base_dn))
 
     def tearDown(self):
-        super(AuthLogTestsSamLogon, self).tearDown()
+        super().tearDown()
         delete_force(self.ldb, self.samlogon_dn)
 
     def _test_samlogon(self, binding, creds, checkFunction):
@@ -126,14 +126,10 @@ class AuthLogTestsSamLogon(samba.tests.auth_log_base.AuthLogTestBase):
         logon_level = netlogon.NetlogonNetworkTransitiveInformation
         logon = samba.dcerpc.netlogon.netr_NetworkInfo()
 
-        logon.challenge = [
-            x if isinstance(x, int) else ord(x) for x in challenge]
+        logon.challenge = list(challenge)
         logon.nt = netlogon.netr_ChallengeResponse()
         logon.nt.length = len(response["nt_response"])
-        logon.nt.data = [
-            x if isinstance(x, int) else ord(x) for
-            x in response["nt_response"]
-        ]
+        logon.nt.data = list(response["nt_response"])
         logon.identity_info = samba.dcerpc.netlogon.netr_IdentityInfo()
         (username, domain) = creds.get_ntlm_username_domain()
 

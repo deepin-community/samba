@@ -51,7 +51,7 @@ static const char *kdc_plugin_deps[] = {
 static struct heim_plugin_data kdc_plugin_data = {
     "krb5",
     "kdc",
-    KRB5_PLUGIN_KDC_VERSION_11,
+    KRB5_PLUGIN_KDC_VERSION_12,
     kdc_plugin_deps,
     kdc_get_instance
 };
@@ -147,7 +147,6 @@ struct verify_uc {
     hdb_entry *krbtgt;
     EncTicketPart *ticket;
     krb5_pac pac;
-    krb5_boolean *is_trusted;
 };
 
 static krb5_error_code KRB5_LIB_CALL
@@ -165,8 +164,7 @@ verify(krb5_context context, const void *plug, void *plugctx, void *userctx)
 			 uc->client_principal,
 			 uc->delegated_proxy,
 			 uc->client, uc->server, uc->krbtgt,
-			 uc->ticket, uc->pac,
-			 uc->is_trusted);
+			 uc->ticket, uc->pac);
     return ret;
 }
 
@@ -178,8 +176,7 @@ _kdc_pac_verify(astgs_request_t r,
 		hdb_entry *server,
 		hdb_entry *krbtgt,
 		EncTicketPart *ticket,
-		krb5_pac pac,
-		krb5_boolean *is_trusted)
+		krb5_pac pac)
 {
     struct verify_uc uc;
 
@@ -194,7 +191,6 @@ _kdc_pac_verify(astgs_request_t r,
     uc.krbtgt = krbtgt;
     uc.ticket = ticket,
     uc.pac = pac;
-    uc.is_trusted = is_trusted;
 
     return _krb5_plugin_run_f(r->context, &kdc_plugin_data,
 			     0, &uc, verify);
@@ -301,6 +297,33 @@ _kdc_referral_policy(astgs_request_t r)
 
     if (have_plugin)
         ret = _krb5_plugin_run_f(r->context, &kdc_plugin_data, 0, r, referral_policy);
+
+    return ret;
+}
+
+static krb5_error_code KRB5_LIB_CALL
+hwauth_policy(krb5_context context, const void *plug, void *plugctx, void *userctx)
+{
+    const krb5plugin_kdc_ftable *ft = plug;
+
+    if (ft->hwauth_policy == NULL) {
+	return KRB5_PLUGIN_NO_HANDLE;
+    }
+    return ft->hwauth_policy((void *)plug, userctx);
+}
+
+krb5_error_code
+_kdc_hwauth_policy(astgs_request_t r)
+{
+    krb5_error_code ret = KRB5_PLUGIN_NO_HANDLE;
+
+    if (have_plugin) {
+	ret = _krb5_plugin_run_f(r->context, &kdc_plugin_data, 0, r, hwauth_policy);
+    }
+
+    if (ret == KRB5_PLUGIN_NO_HANDLE) {
+	ret = 0;
+    }
 
     return ret;
 }
@@ -532,6 +555,19 @@ kdc_request_add_pac_buffer(astgs_request_t r,
 	heim_release(pac);
 
     return ret;
+}
+
+/*
+ * Override the e-data field to be returned in an error reply. The data will be
+ * owned by the KDC and eventually will be freed with krb5_data_free().
+ */
+KDC_LIB_FUNCTION krb5_error_code KDC_LIB_CALL
+kdc_request_set_e_data(astgs_request_t r, heim_octet_string e_data)
+{
+    krb5_data_free(&r->e_data);
+    r->e_data = e_data;
+
+    return 0;
 }
 
 #undef _KDC_REQUEST_GET_ACCESSOR

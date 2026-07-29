@@ -606,14 +606,6 @@ static bool wbinfo_list_own_domain(void)
 }
 
 /* show sequence numbers */
-static bool wbinfo_show_sequence(const char *domain)
-{
-	d_printf("This command has been deprecated.  Please use the "
-		 "--online-status option instead.\n");
-	return false;
-}
-
-/* show sequence numbers */
 static bool wbinfo_show_onlinestatus(const char *domain)
 {
 	struct wbcDomainInfo *domain_list = NULL;
@@ -1656,9 +1648,9 @@ static bool wbinfo_auth_krb5(char *username, const char *cctype, uint32_t flags)
 	char *local_cctype = NULL;
 	uid_t uid;
 	struct wbcLogonUserParams params;
-	struct wbcLogonUserInfo *info;
-	struct wbcAuthErrorInfo *error;
-	struct wbcUserPasswordPolicyInfo *policy;
+	struct wbcLogonUserInfo *info = NULL;
+	struct wbcAuthErrorInfo *error = NULL;
+	struct wbcUserPasswordPolicyInfo *policy = NULL;
 	TALLOC_CTX *frame = talloc_tos();
 
 	if ((s = talloc_strdup(frame, username)) == NULL) {
@@ -1762,7 +1754,9 @@ static bool wbinfo_auth_krb5(char *username, const char *cctype, uint32_t flags)
 		}
 	}
  done:
-
+	wbcFreeMemory(error);
+	wbcFreeMemory(policy);
+	wbcFreeMemory(info);
 	wbcFreeMemory(params.blobs);
 
 	return WBC_ERROR_IS_OK(wbc_status);
@@ -2293,7 +2287,6 @@ enum {
 	OPT_SET_AUTH_USER = 1000,
 	OPT_GET_AUTH_USER,
 	OPT_DOMAIN_NAME,
-	OPT_SEQUENCE,
 	OPT_GETDCNAME,
 	OPT_DSGETDCNAME,
 	OPT_DC_INFO,
@@ -2578,12 +2571,6 @@ int main(int argc, const char **argv, char **envp)
 			.argInfo    = POPT_ARG_NONE,
 			.val        = OPT_LIST_OWN_DOMAIN,
 			.descrip    = "List own domain",
-		},
-		{
-			.longName   = "sequence",
-			.argInfo    = POPT_ARG_NONE,
-			.val        = OPT_SEQUENCE,
-			.descrip    = "Deprecated command, see --online-status",
 		},
 		{
 			.longName   = "online-status",
@@ -3094,13 +3081,6 @@ int main(int argc, const char **argv, char **envp)
 			if (!wbinfo_list_domains(false, verbose)) {
 				d_fprintf(stderr,
 					  "Could not list trusted domains\n");
-				goto done;
-			}
-			break;
-		case OPT_SEQUENCE:
-			if (!wbinfo_show_sequence(opt_domain_name)) {
-				d_fprintf(stderr,
-					  "Could not show sequence numbers\n");
 				goto done;
 			}
 			break;

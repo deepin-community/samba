@@ -1,0 +1,4 @@
+python3-talloc: package-name-doesnt-match-sonames libpytalloc-util.cpython-*
+# False positives, see #896012
+python3-talloc: library-not-linked-against-libc [usr/lib/*/libpytalloc-util.cpython-*.so.*]
+python3-talloc: no-symbols-control-file usr/lib/*/libpytalloc-util.cpython-*.so.*

@@ -48,8 +48,6 @@ struct cli_state {
 	 * A list of subsidiary connections for DFS.
 	 */
         struct cli_state *prev, *next;
-	int rap_error;
-	NTSTATUS raw_status; /* maybe via NT_STATUS_DOS() */
 	bool map_dos_errors;
 
 	/*
@@ -91,6 +89,7 @@ struct cli_state {
 		struct smbXcli_session *session;
 		struct smbXcli_tcon *tcon;
 		struct idr_context *open_handles;
+		bool client_smb311_posix;
 	} smb2;
 };
 
@@ -98,8 +97,6 @@ struct file_info {
 	uint64_t size;
 	uint64_t allocated_size;
 	uint32_t attr;
-	uid_t uid;
-	gid_t gid;
 	uint64_t ino;
 	/* these times are normally kept in GMT */
 	struct timespec btime_ts; /* Birth-time if supported by system */
@@ -108,7 +105,6 @@ struct file_info {
 	struct timespec ctime_ts;
 	char *name;
 	char *short_name;
-	uint32_t mode;
 	uint32_t reparse_tag;
 	dev_t st_ex_dev;
 	mode_t st_ex_mode;

@@ -21,6 +21,7 @@
 #include "libnet/libnet.h"
 #include "libcli/composite/composite.h"
 #include "libcli/cldap/cldap.h"
+#include "source3/libads/netlogon_ping.h"
 #include <ldb.h>
 #include <ldb_errors.h>
 #include "ldb_wrap.h"
@@ -93,7 +94,7 @@
  *		ldapServiceName:	<domain_dns_name>:<netbios_name>$@<REALM>
  *		serverName:		CN=Servers,CN=<site_name>,CN=Sites,CN=Configuration,<domain_partition>
  *		supportedCapabilities:	...
- *		isSyncronized:		TRUE
+ *		isSynchronized:		TRUE
  *		isGlobalCatalogReady:	TRUE
  *		domainFunctionality:	0
  *		forestFunctionality:	0
@@ -361,7 +362,7 @@
  * Result:
  *      CN=<new_dc_netbios_name>,CN=Computers,<domain_partition>
  *		distinguishedName:	CN=<new_dc_netbios_name>,CN=Computers,<domain_partition>
- *		userAccoountControl:	4096 <0x1000>
+ *		userAccountControl:	4096 <0x1000>
  */
 
 /*
@@ -549,7 +550,7 @@
  * Result:
  *      CN=<new_dc_netbios_name>,CN=Computers,<domain_partition>
  *		distinguishedName:	CN=<new_dc_netbios_name>,CN=Computers,<domain_partition>
- *		userAccoountControl:	4096 <0x00001000>
+ *		userAccountControl:	4096 <0x00001000>
  */
 
 /*
@@ -565,7 +566,7 @@
  *	attrs:	userAccountControl
  * Result:
  *      CN=<new_dc_netbios_name>,CN=Computers,<domain_partition>
- *		userAccoountControl:	4096 <0x00001000>
+ *		userAccountControl:	4096 <0x00001000>
  */
 
 /*
@@ -575,7 +576,7 @@
  *
  * Request (replace):
  *	CN=<new_dc_netbios_name>,CN=Computers,<domain_partition>
- *	userAccoountControl:	532480 <0x82000>
+ *	userAccountControl:	532480 <0x82000>
  * Result:
  *	<success>
  */
@@ -687,8 +688,6 @@ struct libnet_BecomeDC_state {
 	struct dom_sid zero_sid;
 
 	struct {
-		struct cldap_socket *sock;
-		struct cldap_netlogon io;
 		struct NETLOGON_SAM_LOGON_RESPONSE_EX netlogon;
 	} cldap;
 
@@ -750,35 +749,35 @@ static void becomeDC_recv_cldap(struct tevent_req *req);
 static void becomeDC_send_cldap(struct libnet_BecomeDC_state *s)
 {
 	struct composite_context *c = s->creq;
+	struct libnet_context *libnet = s->libnet;
 	struct tevent_req *req;
 	struct tsocket_address *dest_address;
 	int ret;
 
-	s->cldap.io.in.dest_address	= NULL;
-	s->cldap.io.in.dest_port	= 0;
-	s->cldap.io.in.realm		= s->domain.dns_name;
-	s->cldap.io.in.host		= s->dest_dsa.netbios_name;
-	s->cldap.io.in.user		= NULL;
-	s->cldap.io.in.domain_guid	= NULL;
-	s->cldap.io.in.domain_sid	= NULL;
-	s->cldap.io.in.acct_control	= -1;
-	s->cldap.io.in.version		= NETLOGON_NT_VERSION_5 | NETLOGON_NT_VERSION_5EX;
-	s->cldap.io.in.map_response	= true;
-
-	ret = tsocket_address_inet_from_strings(s, "ip",
-						s->source_dsa.address,
-						lpcfg_cldap_port(s->libnet->lp_ctx),
-						&dest_address);
+	ret = tsocket_address_inet_from_strings(
+		s, "ip", s->source_dsa.address, 389, &dest_address);
 	if (ret != 0) {
 		c->status = map_nt_error_from_unix_common(errno);
 		if (!composite_is_ok(c)) return;
 	}
 
-	c->status = cldap_socket_init(s, NULL, dest_address, &s->cldap.sock);
-	if (!composite_is_ok(c)) return;
+	req = netlogon_pings_send(s,		     /* mem_ctx */
+				  libnet->event_ctx, /* ev */
+				  lpcfg_client_netlogon_ping_protocol(
+					  libnet->lp_ctx), /* proto */
+				  &dest_address,	   /* servers*/
+				  1,			   /* num_servers */
+				  (struct netlogon_ping_filter){
+					  .ntversion = NETLOGON_NT_VERSION_5 |
+						       NETLOGON_NT_VERSION_5EX,
+					  .acct_ctrl = -1,
+					  .domain = s->domain.dns_name,
+					  .hostname = s->dest_dsa.netbios_name,
+				  },
+				  1, /* min_servers */
+				  tevent_timeval_current_ofs(2,
+							     0)); /* timeout */
 
-	req = cldap_netlogon_send(s, s->libnet->event_ctx,
-				  s->cldap.sock, &s->cldap.io);
 	if (composite_nomem(req, c)) return;
 	tevent_req_set_callback(req, becomeDC_recv_cldap, s);
 }
@@ -790,17 +789,22 @@ static void becomeDC_recv_cldap(struct tevent_req *req)
 	struct libnet_BecomeDC_state *s = tevent_req_callback_data(req,
 					  struct libnet_BecomeDC_state);
 	struct composite_context *c = s->creq;
+	struct netlogon_samlogon_response **responses = NULL;
+	struct netlogon_samlogon_response *resp = NULL;
 
-	c->status = cldap_netlogon_recv(req, s, &s->cldap.io);
+	c->status = netlogon_pings_recv(req, s, &responses);
 	talloc_free(req);
 	if (!composite_is_ok(c)) {
-		DEBUG(0,("Failed to send, receive or parse CLDAP reply from server %s for our host %s: %s\n", 
-			 s->cldap.io.in.dest_address, 
-			 s->cldap.io.in.host, 
-			 nt_errstr(c->status)));
+		DBG_ERR("Failed to send, receive or parse CLDAP reply "
+			"for our host %s: %s\n",
+			s->dest_dsa.netbios_name,
+			nt_errstr(c->status));
 		return;
 	}
-	s->cldap.netlogon = s->cldap.io.out.netlogon.data.nt5_ex;
+	resp = responses[0];
+
+	map_netlogon_samlogon_response(resp);
+	s->cldap.netlogon = resp->data.nt5_ex;
 
 	s->domain.dns_name		= s->cldap.netlogon.dns_domain;
 	s->domain.netbios_name		= s->cldap.netlogon.domain_name;
@@ -817,7 +821,7 @@ static void becomeDC_recv_cldap(struct tevent_req *req)
 	DEBUG(0,("CLDAP response: forest=%s dns=%s netbios=%s server_site=%s  client_site=%s\n",
 		 s->forest.dns_name, s->domain.dns_name, s->domain.netbios_name,
 		 s->source_dsa.site_name, s->dest_dsa.site_name));
-	if (!s->dest_dsa.site_name || strcmp(s->dest_dsa.site_name, "") == 0) {
+	if (!s->dest_dsa.site_name || (s->dest_dsa.site_name[0] == '\0')) {
 		DEBUG(0,("Got empty client site - using server site name %s\n",
 			 s->source_dsa.site_name));
 		s->dest_dsa.site_name = s->source_dsa.site_name;
@@ -1612,9 +1616,10 @@ static void becomeDC_drsuapi1_connect_recv(struct composite_context *req)
 
 	s->drsuapi1.drsuapi_handle = s->drsuapi1.pipe->binding_handle;
 
-	c->status = gensec_session_key(s->drsuapi1.pipe->conn->security_state.generic_state,
-				       s,
-				       &s->drsuapi1.gensec_skey);
+	c->status = dcerpc_binding_handle_auth_session_key(
+				s->drsuapi1.drsuapi_handle,
+				s,
+				&s->drsuapi1.gensec_skey);
 	if (!composite_is_ok(c)) return;
 
 	becomeDC_drsuapi_bind_send(s, &s->drsuapi1, becomeDC_drsuapi1_bind_recv);
@@ -2302,6 +2307,7 @@ static void becomeDC_drsuapi1_add_entry_recv(struct tevent_req *subreq)
 	struct composite_context *c = s->creq;
 	struct drsuapi_DsAddEntry *r = talloc_get_type_abort(s->ndr_struct_ptr,
 				       struct drsuapi_DsAddEntry);
+	const struct dcerpc_binding *bd1 = NULL;
 	char *binding_str;
 	uint32_t assoc_group_id;
 
@@ -2492,7 +2498,8 @@ static void becomeDC_drsuapi1_add_entry_recv(struct tevent_req *subreq)
 	}
 
 	/* w2k3 uses the same assoc_group_id as on the first connection, so we do */
-	assoc_group_id = dcerpc_binding_get_assoc_group_id(s->drsuapi1.pipe->binding);
+	bd1 = dcerpc_binding_handle_get_binding(s->drsuapi1.pipe->binding_handle);
+	assoc_group_id = dcerpc_binding_get_assoc_group_id(bd1);
 	c->status = dcerpc_binding_set_assoc_group_id(s->drsuapi2.binding, assoc_group_id);
 	if (!composite_is_ok(c)) return;
 
@@ -2524,9 +2531,10 @@ static void becomeDC_drsuapi2_connect_recv(struct composite_context *req)
 
 	s->drsuapi2.drsuapi_handle = s->drsuapi2.pipe->binding_handle;
 
-	c->status = gensec_session_key(s->drsuapi2.pipe->conn->security_state.generic_state,
-				       s,
-				       &s->drsuapi2.gensec_skey);
+	c->status = dcerpc_binding_handle_auth_session_key(
+				s->drsuapi2.drsuapi_handle,
+				s,
+				&s->drsuapi2.gensec_skey);
 	if (!composite_is_ok(c)) return;
 
 	becomeDC_drsuapi_bind_send(s, &s->drsuapi2, becomeDC_drsuapi2_bind_recv);
@@ -2539,6 +2547,7 @@ static void becomeDC_drsuapi2_bind_recv(struct tevent_req *subreq)
 	struct libnet_BecomeDC_state *s = tevent_req_callback_data(subreq,
 					  struct libnet_BecomeDC_state);
 	struct composite_context *c = s->creq;
+	const struct dcerpc_binding *bd1 = NULL;
 	char *binding_str;
 	uint32_t assoc_group_id;
 	WERROR status;
@@ -2569,7 +2578,8 @@ static void becomeDC_drsuapi2_bind_recv(struct tevent_req *subreq)
 	}
 
 	/* w2k3 uses the same assoc_group_id as on the first connection, so we do */
-	assoc_group_id = dcerpc_binding_get_assoc_group_id(s->drsuapi1.pipe->binding);
+	bd1 = dcerpc_binding_handle_get_binding(s->drsuapi1.pipe->binding_handle);
+	assoc_group_id = dcerpc_binding_get_assoc_group_id(bd1);
 	c->status = dcerpc_binding_set_assoc_group_id(s->drsuapi3.binding, assoc_group_id);
 	if (!composite_is_ok(c)) return;
 	/* w2k3 uses the concurrent multiplex feature on the 3rd connection, so we do */
@@ -2594,9 +2604,10 @@ static void becomeDC_drsuapi3_connect_recv(struct composite_context *req)
 
 	s->drsuapi3.drsuapi_handle = s->drsuapi3.pipe->binding_handle;
 
-	c->status = gensec_session_key(s->drsuapi3.pipe->conn->security_state.generic_state,
-				       s,
-				       &s->drsuapi3.gensec_skey);
+	c->status = dcerpc_binding_handle_auth_session_key(
+				s->drsuapi3.drsuapi_handle,
+				s,
+				&s->drsuapi3.gensec_skey);
 	if (!composite_is_ok(c)) return;
 
 	becomeDC_drsuapi3_pull_schema_send(s);

@@ -34,13 +34,13 @@ struct torture_suite *torture_local_string_case(TALLOC_CTX *mem_ctx);
  * http://en.wikipedia.org/w/index.php?title=Ancient_Greek&oldid=421361065#Example_text
  */
 
-const char *plato_english_ascii =
+static const char plato_english_ascii[] =
 	"What you, men of Athens, have learned from my accusers, I do not"
 	" know: but I, for my part, nearly forgot who I was thanks to them since"
 	" they spoke so persuasively. And yet, of the truth, they have spoken,"
 	" one might say, nothing at all.";
 
-const char *plato_english_utf16le_base64 =
+static const char plato_english_utf16le_base64[] =
 	"VwBoAGEAdAAgAHkAbwB1ACwAIABtAGUAbgAgAG8AZgAgAEEAdABoAGUAbgBzACwAIABoAGEAdgBl"
 	"ACAAbABlAGEAcgBuAGUAZAAgAGYAcgBvAG0AIABtAHkAIABhAGMAYwB1AHMAZQByAHMALAAgAEkA"
 	"IABkAG8AIABuAG8AdAAgAGsAbgBvAHcAOgAgAGIAdQB0ACAASQAsACAAZgBvAHIAIABtAHkAIABw"
@@ -51,7 +51,7 @@ const char *plato_english_utf16le_base64 =
 	"AGsAZQBuACwAIABvAG4AZQAgAG0AaQBnAGgAdAAgAHMAYQB5ACwAIABuAG8AdABoAGkAbgBnACAA"
 	"YQB0ACAAYQBsAGwALgA=";
 
-static const char *plato_utf8_base64 =
+static const char plato_utf8_base64[] =
 	"4b2Nz4TOuSDOvOG9ss69IOG9kc68zrXhv5bPgiwg4b2mIOG8hM69zrTPgc61z4IgzobOuM63zr3O"
 	"seG/ls6/zrksIM+AzrXPgM+Mzr3OuM6xz4TOtSDhvZHPgOG9uCDPhOG/ts69IOG8kM684b+2zr0g"
 	"zrrOsc+EzrfOs8+Mz4HPic69LCDOv+G9kM66IM6/4by2zrTOsTog4byQzrPhvbwgzrQnIM6/4b2W"
@@ -61,7 +61,7 @@ static const char *plato_utf8_base64 =
 	"4b2hz4Ig4byUz4DOv8+CIM614bywz4DOteG/ls69IM6/4b2QzrThvbLOvSDOteG8sM+Bzq7Ous6x"
 	"z4POuc69Lg==";
 
-static const char *plato_utf16le_base64 =
+static const char plato_utf16le_base64[] =
 	"TR/EA7kDIAC8A3IfvQMgAFEfvAO1A9YfwgMsACAAZh8gAAQfvQO0A8EDtQPCAyAAhgO4A7cDvQOx"
 	"A9YfvwO5AywAIADAA7UDwAPMA70DuAOxA8QDtQMgAFEfwAN4HyAAxAP2H70DIAAQH7wD9h+9AyAA"
 	"ugOxA8QDtwOzA8wDwQPJA70DLAAgAL8DUB+6AyAAvwM2H7QDsQM6ACAAEB+zA3wfIAC0AycAIAC/"
@@ -71,14 +71,14 @@ static const char *plato_utf16le_base64 =
 	"swO1AyAAYR/CAyAAFB/AA78DwgMgALUDMB/AA7UD1h+9AyAAvwNQH7QDch+9AyAAtQMwH8EDrgO6"
 	"A7EDwwO5A70DLgA=";
 
-static const char *plato_latin_utf8_base64 =
+static const char plato_latin_utf8_base64[] =
 	"SMOzdGkgbcOobiBodW1lw65zLCDDtCDDoW5kcmVzIEF0aMSTbmHDrm9pLCBwZXDDs250aGF0ZSBo"
 	"dXDDsiB0w7RuIGVtw7RuIGthdMSTZ8OzcsWNbiwgb3VrIG/DrmRhOiBlZ+G5kSBkJyBvw7tuIGth"
 	"w6wgYXV0w7JzIGh1cCcgYXV0xY1uIG9sw61nb3UgZW1hdXRvw7sgZXBlbGF0aMOzbcSTbiwgaG/D"
 	"unTFjSBwaXRoYW7DtHMgw6lsZWdvbi4gS2HDrXRvaSBhbMSTdGjDqXMgZ2UgaMWNcyDDqXBvcyBl"
 	"aXBlw65uIG91ZMOobiBlaXLhuJdrYXNpbi4=";
 
-static const char *plato_latin_utf16le_base64 =
+static const char plato_latin_utf16le_base64[] =
 	"SADzAHQAaQAgAG0A6ABuACAAaAB1AG0AZQDuAHMALAAgAPQAIADhAG4AZAByAGUAcwAgAEEAdABo"
 	"ABMBbgBhAO4AbwBpACwAIABwAGUAcADzAG4AdABoAGEAdABlACAAaAB1AHAA8gAgAHQA9ABuACAA"
 	"ZQBtAPQAbgAgAGsAYQB0ABMBZwDzAHIATQFuACwAIABvAHUAawAgAG8A7gBkAGEAOgAgAGUAZwBR"
@@ -88,25 +88,25 @@ static const char *plato_latin_utf16le_base64 =
 	"aQAgAGEAbAATAXQAaADpAHMAIABnAGUAIABoAE0BcwAgAOkAcABvAHMAIABlAGkAcABlAO4AbgAg"
 	"AG8AdQBkAOgAbgAgAGUAaQByABceawBhAHMAaQBuAC4A";
 
-static const char *gd_utf8_base64 = "R8O8bnRoZXIgRGVzY2huZXI=";
-static const char *gd_utf8_upper_base64 = "R8OcTlRIRVIgREVTQ0hORVI=";
-static const char *gd_utf8_lower_base64 = "Z8O8bnRoZXIgZGVzY2huZXI=";
-static const char *gd_cp850_base64 = "R4FudGhlciBEZXNjaG5lcg==";
-static const char *gd_cp850_upper_base64 = "R5pOVEhFUiBERVNDSE5FUg==";
-static const char *gd_cp850_lower_base64 = "Z4FudGhlciBkZXNjaG5lcg==";
-static const char *gd_iso8859_1_base64 = "R/xudGhlciBEZXNjaG5lcg==";
-static const char *gd_utf16le_base64 = "RwD8AG4AdABoAGUAcgAgAEQAZQBzAGMAaABuAGUAcgA=";
+static const char gd_utf8_base64[] = "R8O8bnRoZXIgRGVzY2huZXI=";
+static const char gd_utf8_upper_base64[] = "R8OcTlRIRVIgREVTQ0hORVI=";
+static const char gd_utf8_lower_base64[] = "Z8O8bnRoZXIgZGVzY2huZXI=";
+static const char gd_cp850_base64[] = "R4FudGhlciBEZXNjaG5lcg==";
+static const char gd_cp850_upper_base64[] = "R5pOVEhFUiBERVNDSE5FUg==";
+static const char gd_cp850_lower_base64[] = "Z4FudGhlciBkZXNjaG5lcg==";
+static const char gd_iso8859_1_base64[] = "R/xudGhlciBEZXNjaG5lcg==";
+static const char gd_utf16le_base64[] = "RwD8AG4AdABoAGUAcgAgAEQAZQBzAGMAaABuAGUAcgA=";
 /* täst */
-static const char *utf8_nfc_base64 = "dMOkc3QA";
+static const char utf8_nfc_base64[] = "dMOkc3QA";
 /* täst, where ä = a + combining diaeresis */
-static const char *utf8_nfd_base64 = "dGHMiHN0AA==";
+static const char utf8_nfd_base64[] = "dGHMiHN0AA==";
 
 /*
  * These cp850 bytes correspond to high Unicode codes, stretching out to
  * 3-byte sequences in utf-8.
  */
-static const char *cp850_high_points = "\xb9\xba\xbb\xbc\xcd\xce";
-static const char *utf8_high_points = "╣║╗╝═╬";
+static const char cp850_high_points[] = "\xb9\xba\xbb\xbc\xcd\xce";
+static const char utf8_high_points[] = "╣║╗╝═╬";
 
 static bool test_cp850_high_points(struct torture_context *tctx)
 {
@@ -1847,6 +1847,165 @@ static bool test_plato(struct torture_context *tctx)
 	return true;
 }
 
+
+
+static bool test_short_strings(struct torture_context *tctx)
+{
+	char zeros[6] = {0};
+	char s[6] =     {'s'};
+	bool ok;
+	char *out;
+	size_t out_len;
+
+	ok = convert_string_talloc(tctx,
+				   CH_UTF8, CH_UTF16LE,
+				   zeros, 0,
+				   &out, &out_len);
+	torture_assert(tctx, ok, "{\"\", 0} to utf16 failed");
+	torture_assert(tctx, out_len == 2, "{\"\", 0} length is two");
+	torture_assert(tctx, out[0] == 0 && out[1] == 0, "{\"\", 0} utf16 is zero");
+	TALLOC_FREE(out);
+
+	ok = convert_string_talloc(tctx,
+				   CH_UTF8, CH_UTF16LE,
+				   zeros, 1,
+				   &out, &out_len);
+	torture_assert(tctx, ok, "{\"\\0\", 1} to utf16 failed");
+	torture_assert(tctx, out_len == 2, "{\"\\0\", 1} length is two");
+	torture_assert(tctx, out[0] == 0 && out[1] == 0, "{\"\\0\", 1} utf16 is zero");
+	TALLOC_FREE(out);
+
+	ok = convert_string_talloc(tctx,
+				   CH_UTF8, CH_UTF16LE,
+				   zeros, 2,
+				   &out, &out_len);
+	torture_assert(tctx, ok, "{\"\\0\\0\", 2} to utf16 failed");
+	torture_assert(tctx, out_len == 4, "{\"\\0\\0\", 2} length is four");
+	torture_assert(tctx, out[0] == 0 && out[1] == 0, "{\"\\0\\0\", 2} utf16 is zero");
+	TALLOC_FREE(out);
+
+	ok = convert_string_talloc(tctx,
+				   CH_UTF8, CH_UTF16LE,
+				   s, 0,
+				   &out, &out_len);
+	torture_assert(tctx, ok, "{\"s\", 0} to utf16 failed");
+	torture_assert(tctx, out_len == 2, "{\"s\", 0} length is two");
+	torture_assert(tctx, out[0] == 0 && out[1] == 0,
+		       "{\"s\", 0} utf16 is zero");
+	TALLOC_FREE(out);
+
+	ok = convert_string_talloc(tctx,
+				   CH_UTF8, CH_UTF16LE,
+				   s, 1,
+				   &out, &out_len);
+	torture_assert(tctx, ok, "{\"s\", 1} to utf16 failed");
+	torture_assert(tctx, out_len == 2, "{\"s\", 1} length is two");
+	torture_assert(tctx, out[0] == 's' && out[1] == 0,
+		       "{\"s\", 1} utf16 is s");
+	TALLOC_FREE(out);
+
+	ok = convert_string_talloc(tctx,
+				   CH_UTF8, CH_UTF16LE,
+				   s, 2,
+				   &out, &out_len);
+	torture_assert(tctx, ok, "{\"s\\0\", 2} to utf16 failed");
+	torture_assert(tctx, out_len == 4, "{\"s\\0\", 2} length is four");
+	torture_assert(tctx, out[0] == 's' && out[1] == 0,
+		       "{\"s\\0\", 0} utf16 is s");
+	TALLOC_FREE(out);
+
+
+	/* going to utf8 */
+	ok = convert_string_talloc(tctx,
+				   CH_UTF16LE, CH_UTF8,
+				   zeros, 0,
+				   &out, &out_len);
+	torture_assert(tctx, ok, "{\"\", 0} to utf8 failed");
+	torture_assert(tctx, out_len == 1, "{\"\", 0} length is one");
+	torture_assert(tctx, out[0] == 0, "{\"\", 0} utf8[0] is zero");
+	TALLOC_FREE(out);
+
+	ok = convert_string_talloc(tctx,
+				   CH_UTF16LE, CH_UTF8,
+				   zeros, 2,
+				   &out, &out_len);
+	torture_assert(tctx, ok, "{\"\\0\", 1} to utf8 failed");
+	torture_assert(tctx, out_len == 1, "{\"\\0\", 1} length is one");
+	torture_assert(tctx, out[0] == 0 && out[1] == 0,
+		       "{\"\\0\", 1} utf8 is zero");
+	TALLOC_FREE(out);
+
+	ok = convert_string_talloc(tctx,
+				   CH_UTF16LE, CH_UTF8,
+				   zeros, 4,
+				   &out, &out_len);
+	torture_assert(tctx, ok, "{\"\\0\\0\\0\\0\", 4} to utf8 failed");
+	torture_assert(tctx, out_len == 2, "{\"\\0\\0\\0\\0\", 4} length is two");
+	torture_assert(tctx, out[0] == 0 && out[1] == 0,
+		       "{\"\\0\\0\\0\\0\", 4} utf8 is zero");
+	TALLOC_FREE(out);
+
+	ok = convert_string_talloc(tctx,
+				   CH_UTF16LE, CH_UTF8,
+				   s, 0,
+				   &out, &out_len);
+	torture_assert(tctx, ok, "{\"s\", 0} to utf8 failed");
+	torture_assert(tctx, out_len == 1, "{\"s\", 0} length is one");
+	torture_assert(tctx, out[0] == 0, "{\"s\", 0} utf8 is zero");
+	TALLOC_FREE(out);
+
+	ok = convert_string_talloc(tctx,
+				   CH_UTF16LE, CH_UTF8,
+				   s, 2,
+				   &out, &out_len);
+	torture_assert(tctx, ok, "{\"s\\0\", 2} to utf8 failed");
+	torture_assert(tctx, out_len == 1, "{\"s\\0\", 2} length is one");
+	torture_assert(tctx, out[0] == 's' && out[1] == 0,
+		       "{\"s\\0\", 2} utf8 is s");
+	TALLOC_FREE(out);
+
+
+	ok = convert_string_talloc(tctx,
+				   CH_UTF16LE, CH_UTF8,
+				   s, 4,
+				   &out, &out_len);
+	torture_assert(tctx, ok, "{\"s\\0\\0\\0\", 4} utf8 failed");
+	torture_assert(tctx, out_len == 2, "\"s\\0\\0\\0\", 4} utf8 length is two");
+	torture_assert(tctx, out[0] == 's' && out[1] == 0,
+		       "{\"s\\0\\0\\0\", 4} utf8 is s");
+	TALLOC_FREE(out);
+
+	/* odd numbers of bytes from UTF-16 should fail */
+	ok = convert_string_talloc(tctx,
+				   CH_UTF16LE, CH_UTF8,
+				   s, 1,
+				   &out, &out_len);
+	torture_assert(tctx, ! ok, "{\"s\", 1} to utf8 should have failed");
+
+	ok = convert_string_talloc(tctx,
+				   CH_UTF16LE, CH_UTF8,
+				   s, 3,
+				   &out, &out_len);
+	torture_assert(tctx, ! ok, "{\"s\\0\\0\", 3} to utf8 should have failed");
+
+	ok = convert_string_talloc(tctx,
+				   CH_UTF16LE, CH_UTF8,
+				   zeros, 1,
+				   &out, &out_len);
+	torture_assert(tctx, ! ok,
+		       "{\"\\0\", 1} to utf8 should have failed");
+
+	ok = convert_string_talloc(tctx,
+				   CH_UTF16LE, CH_UTF8,
+				   zeros, 5,
+				   &out, &out_len);
+	torture_assert(tctx, ! ok,
+		       "{\"\\0\\0\\0\\0\", 5} to utf8 should have failed");
+
+	return true;
+}
+
+
 static bool test_plato_latin(struct torture_context *tctx)
 {
 	DATA_BLOB plato_latin_utf8 = base64_decode_data_blob(plato_latin_utf8_base64);
@@ -2020,6 +2179,7 @@ struct torture_suite *torture_local_convert_string(TALLOC_CTX *mem_ctx)
 {
 	struct torture_suite *suite = torture_suite_create(mem_ctx, "convert_string");
 
+	torture_suite_add_simple_test(suite, "short_strings", test_short_strings);
 	torture_suite_add_simple_test(suite, "gd", test_gd);
 	torture_suite_add_simple_test(suite, "plato", test_plato);
 	torture_suite_add_simple_test(suite, "plato_latin", test_plato_latin);

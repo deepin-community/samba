@@ -42,6 +42,7 @@ COMMON = [
     'ccache',
     'curl',
     'chrpath',
+    'codespell',
     'flex',
     'gcc',
     'gdb',
@@ -58,10 +59,12 @@ COMMON = [
     'rng-tools',
     'rsync',
     'sed',
+    'shfmt',
     'sudo',  # docker images has no sudo by default
     'tar',
     'tree',
     'wget',
+    'cargo',
 ]
 
 
@@ -81,6 +84,9 @@ PKGS = [
     ('libcap-dev', 'libcap-devel'),
     ('libacl1-dev', 'libacl-devel'),
     ('libattr1-dev', 'libattr-devel'),
+    ('libutf8proc-dev', 'utf8proc-devel'),
+    ('libssl-dev', 'openssl-devel'),
+    ('libclang-dev', 'clang-devel'),
 
     # libNAME1-dev, NAME2-devel
     ('libpopt-dev', 'popt-devel'),
@@ -134,8 +140,7 @@ PKGS = [
     ('', 'rpcsvc-proto-devel'), # for <rpcsvc/rquota.h> header
     ('mawk', 'gawk'),
     ('', 'mold'),
-    ('', 'ShellCheck'),
-    ('', 'shfmt'),
+    ('shellcheck', 'ShellCheck'),
     ('', 'crypto-policies-scripts'),
 
     ('python3', 'python3'),
@@ -156,8 +161,6 @@ PKGS = [
 
     # perl
     ('libparse-yapp-perl', 'perl-Parse-Yapp'),
-    ('libjson-perl', 'perl-JSON'),
-    ('', 'perl-JSON-Parse'),
     ('perl-modules', ''),
     ('', 'perl-FindBin'),
     ('', 'perl-Archive-Tar'),
@@ -237,7 +240,7 @@ if [ ! -f /usr/bin/python3 ]; then
 fi
 """
 
-CENTOS8S_YUM_BOOTSTRAP = r"""
+ROCKY8_DNF_BOOTSTRAP = r"""
 #!/bin/bash
 {GENERATED_MARKER}
 set -xueo pipefail
@@ -245,6 +248,11 @@ set -xueo pipefail
 yum update -y
 yum install -y dnf-plugins-core
 yum install -y epel-release
+yum install -y centos-release-ceph-pacific
+
+sed -i 's/mirrorlist/#mirrorlist/g' /etc/yum.repos.d/CentOS-Ceph-*
+sed -i 's|#baseurl=http://mirror.centos.org|baseurl=http://vault.centos.org|g' /etc/yum.repos.d/CentOS-Ceph-*
+sed -i 's/$contentdir/centos/g' /etc/yum.repos.d/CentOS-Ceph-*
 
 yum -v repolist all
 yum config-manager --set-enabled powertools -y
@@ -253,9 +261,32 @@ yum update -y
 
 yum install -y \
     --setopt=install_weak_deps=False \
+    --setopt=centos-ceph-pacific.module_hotfixes=true \
     {pkgs}
 
 yum clean all
+"""
+
+CENTOS9S_DNF_BOOTSTRAP = r"""
+#!/bin/bash
+{GENERATED_MARKER}
+set -xueo pipefail
+
+dnf update -y
+dnf install -y dnf-plugins-core
+dnf install -y epel-release
+dnf install -y centos-release-gluster9
+
+dnf -v repolist all
+dnf config-manager --set-enabled crb -y
+
+dnf update -y
+
+dnf install -y \
+    --setopt=install_weak_deps=False \
+    {pkgs}
+
+dnf clean all
 """
 
 DNF_BOOTSTRAP = r"""
@@ -421,13 +452,17 @@ DEB_DISTS = {
         'vagrant_box': 'debian/bullseye64',
         'replace': {
             'language-pack-en': '',   # included in locales
+            'shfmt': '',
+            'cargo': '', # included cargo is broken
         }
     },
     'debian11-32bit': {
-        'docker_image': 'registry-1.docker.io/i386/debian:11',
+        'docker_image': 'debian:11',  # specify the platform in .gitlab-ci.yaml
         'vagrant_box': 'debian/bullseye32',
         'replace': {
             'language-pack-en': '',   # included in locales
+            'shfmt': '',
+            'cargo': '', # included cargo is broken
         }
     },
     'debian12': {
@@ -436,6 +471,7 @@ DEB_DISTS = {
         'replace': {
             'language-pack-en': '',   # included in locales
             'libtracker-sparql-2.0-dev': '',  # only tracker 3.x is available
+            'cargo': '', # included cargo is broken
         }
     },
     'debian12-32bit': {
@@ -444,6 +480,7 @@ DEB_DISTS = {
         'replace': {
             'language-pack-en': '',   # included in locales
             'libtracker-sparql-2.0-dev': '',  # only tracker 3.x is available
+            'cargo': '', # included cargo is broken
         }
     },
     'ubuntu1804': {
@@ -451,6 +488,7 @@ DEB_DISTS = {
         'vagrant_box': 'ubuntu/bionic64',
         'replace': {
             'liburing-dev': '',   # not available
+            'shfmt': '',
         }
     },
     'ubuntu1804-32bit': {
@@ -458,6 +496,7 @@ DEB_DISTS = {
         'vagrant_box': 'ubuntu/bionic32',
         'replace': {
             'liburing-dev': '',   # not available
+            'shfmt': '',
         }
     },
     'ubuntu2004': {
@@ -465,6 +504,7 @@ DEB_DISTS = {
         'vagrant_box': 'ubuntu/focal64',
         'replace': {
             'liburing-dev': '',   # not available
+            'shfmt': '',
         }
     },
     'ubuntu2204': {
@@ -478,50 +518,10 @@ DEB_DISTS = {
 
 
 RPM_DISTS = {
-    'centos7': {
-        'docker_image': 'centos:7',
-        'vagrant_box': 'centos/7',
-        'bootstrap': YUM_BOOTSTRAP,
-        'replace': {
-            'lsb-release': 'redhat-lsb',
-            'python3': 'python36',
-            'python3-cryptography': 'python36-cryptography',
-            'python3-devel': 'python36-devel',
-            'python3-dns': 'python36-dns',
-            'python3-pyasn1': 'python36-pyasn1',
-            'python3-gpg': 'python36-gpg',
-            'python3-iso8601' : 'python36-iso8601',
-            'python3-markdown': 'python36-markdown',
-            'python3-requests': 'python36-requests',
-            # although python36-devel is available
-            # after epel-release installed
-            # however, all other python3 pkgs are still python36-ish
-            'python2-gpg': 'pygpgme',
-            '@development-tools': '"@Development Tools"',  # add quotes
-            'glibc-langpack-en': '',  # included in glibc-common
-            'glibc-locale-source': '',  # included in glibc-common
-            # update perl core modules on centos
-            # fix: Can't locate Archive/Tar.pm in @INC
-            'perl': 'perl-core',
-            'perl-FindBin': '',
-            'rpcsvc-proto-devel': '',
-            'glusterfs-api-devel': '',
-            'glusterfs-devel': '',
-            'libcephfs-devel': '',
-            'gnutls-devel': 'compat-gnutls37-devel',
-            'gnutls-utils': 'compat-gnutls37-utils',
-            'liburing-devel': '',   # not available
-            'python3-setproctitle': 'python36-setproctitle',
-            'tracker-devel': '', # do not install
-            'mold': '',
-            'ShellCheck': '',
-            'shfmt': '',
-        }
-    },
-    'centos8s': {
-        'docker_image': 'quay.io/centos/centos:stream8',
-        'vagrant_box': 'centos/stream8',
-        'bootstrap': CENTOS8S_YUM_BOOTSTRAP,
+    'rocky8': {
+        'docker_image': 'docker.io/library/rockylinux:8',
+        'vagrant_box': 'rocky/8',
+        'bootstrap': ROCKY8_DNF_BOOTSTRAP,
         'replace': {
             'lsb-release': 'redhat-lsb',
             '@development-tools': '"@Development Tools"',  # add quotes
@@ -533,11 +533,31 @@ RPM_DISTS = {
             'mold': '',
             'ShellCheck': '',
             'shfmt': '',
+            'codespell': '',
         }
     },
-    'fedora38': {
-        'docker_image': 'quay.io/fedora/fedora:38',
-        'vagrant_box': 'fedora/38-cloud-base',
+    'centos9s': {
+        'docker_image': 'quay.io/centos/centos:stream9',
+        'vagrant_box': 'centos/stream9',
+        'bootstrap': CENTOS9S_DNF_BOOTSTRAP,
+        'replace': {
+            'lsb-release': 'lsb_release',
+            '@development-tools': '"@Development Tools"',  # add quotes
+            'lcov': '', # does not exist
+            'perl-JSON-Parse': '', # does not exist?
+            'perl-Test-Base': 'perl-Test-Simple',
+            'perl-FindBin': '',
+            'mold': '',
+            'ShellCheck': '',
+            'shfmt': '',
+            'codespell': '',
+            'libcephfs-devel': '',  # not available anymore
+            'curl': '',  # Use installed curl-minimal
+        }
+    },
+    'fedora41': {
+        'docker_image': 'quay.io/fedora/fedora:41',
+        'vagrant_box': 'fedora/41-cloud-base',
         'bootstrap': DNF_BOOTSTRAP,
         'replace': {
             'lsb-release': 'redhat-lsb',

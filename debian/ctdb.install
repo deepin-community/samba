@@ -3,17 +3,17 @@ ctdb/config/ctdb.conf etc/ctdb
 ctdb/config/ctdb.tunables etc/ctdb
 ctdb/config/script.options etc/ctdb
 etc/ctdb
-etc/sudoers.d
 usr/bin/ctdb
 usr/bin/ctdb_diagnostics
 usr/bin/ltdbtool
 usr/bin/onnode
 usr/bin/ping_pong
 usr/libexec/ctdb/
-usr/lib/*/samba/libctdb-event-client-samba4.so.0
-usr/lib/*/samba/libtalloc-report-samba4.so.0
+usr/lib/${DEB_HOST_MULTIARCH}/samba/libctdb-event-client-private-samba.so.0
+usr/lib/${DEB_HOST_MULTIARCH}/samba/libtalloc-report-private-samba.so.0
 usr/sbin/ctdbd
 usr/share/ctdb/events/legacy/*.script
+usr/share/ctdb/scripts/winbind_ctdb_updatekeytab.sh
 usr/share/man/man1/ctdb.1
 usr/share/man/man1/ctdb_diagnostics.1
 usr/share/man/man1/ctdbd.1

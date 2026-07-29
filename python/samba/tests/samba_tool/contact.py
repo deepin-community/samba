@@ -28,7 +28,7 @@ class ContactCmdTestCase(SambaToolCmdTest):
     samdb = None
 
     def setUp(self):
-        super(ContactCmdTestCase, self).setUp()
+        super().setUp()
         self.creds = "-U%s%%%s" % (os.environ["DC_USERNAME"],
                                    os.environ["DC_PASSWORD"])
         self.samdb = self.getSamDB("-H",
@@ -55,7 +55,7 @@ class ContactCmdTestCase(SambaToolCmdTest):
                                        "mobile": "12345"})
         self.contacts.append(contact)
 
-        # No 'name' is given here, so the name will be made from the the
+        # No 'name' is given here, so the name will be made from the
         # sn, initials and givenName attributes.
         contact = self._randomContact({"expectedname": "James T. Kirk",
                                        "sn": "Kirk",
@@ -83,7 +83,7 @@ class ContactCmdTestCase(SambaToolCmdTest):
                               contact["description"])
 
     def tearDown(self):
-        super(ContactCmdTestCase, self).tearDown()
+        super().tearDown()
         # clean up all the left over contacts, just in case
         for contact in self.contacts:
             if self._find_contact(contact["expectedname"]):

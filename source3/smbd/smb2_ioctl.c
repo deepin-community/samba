@@ -268,7 +268,8 @@ static bool smbd_smb2_ioctl_is_failure(uint32_t ctl_code, NTSTATUS status,
 	if (NT_STATUS_EQUAL(status, STATUS_BUFFER_OVERFLOW)
 	 && ((ctl_code == FSCTL_PIPE_TRANSCEIVE)
 	  || (ctl_code == FSCTL_PIPE_PEEK)
-	  || (ctl_code == FSCTL_DFS_GET_REFERRALS))) {
+	  || (ctl_code == FSCTL_DFS_GET_REFERRALS)
+	  || (ctl_code == FSCTL_QUERY_ALLOCATED_RANGES))) {
 		return false;
 	}
 
@@ -344,6 +345,7 @@ static void smbd_smb2_request_ioctl_done(struct tevent_req *subreq)
 		 * in:
 		 * - fsctl_dfs_get_refers()
 		 * - smbd_smb2_ioctl_pipe_read_done()
+		 * - fsctl_qar()
 		 */
 		status = NT_STATUS_BUFFER_TOO_SMALL;
 	}
@@ -454,19 +456,14 @@ static struct tevent_req *smbd_smb2_ioctl_send(TALLOC_CTX *mem_ctx,
 	switch (in_ctl_code & IOCTL_DEV_TYPE_MASK) {
 	case FSCTL_DFS:
 		return smb2_ioctl_dfs(in_ctl_code, ev, req, state);
-		break;
 	case FSCTL_FILESYSTEM:
 		return smb2_ioctl_filesys(in_ctl_code, ev, req, state);
-		break;
 	case FSCTL_NAMED_PIPE:
 		return smb2_ioctl_named_pipe(in_ctl_code, ev, req, state);
-		break;
 	case FSCTL_NETWORK_FILESYSTEM:
 		return smb2_ioctl_network_fs(in_ctl_code, ev, req, state);
-		break;
 	case FSCTL_SMBTORTURE:
 		return smb2_ioctl_smbtorture(in_ctl_code, ev, req, state);
-		break;
 	default:
 		if (IS_IPC(smbreq->conn)) {
 			tevent_req_nterror(req, NT_STATUS_FS_DRIVER_REQUIRED);
@@ -475,11 +472,7 @@ static struct tevent_req *smbd_smb2_ioctl_send(TALLOC_CTX *mem_ctx,
 		}
 
 		return tevent_req_post(req, ev);
-		break;
 	}
-
-	tevent_req_nterror(req, NT_STATUS_INTERNAL_ERROR);
-	return tevent_req_post(req, ev);
 }
 
 static NTSTATUS smbd_smb2_ioctl_recv(struct tevent_req *req,

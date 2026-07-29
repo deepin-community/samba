@@ -56,10 +56,13 @@
 #define ETHERTYPE_IP6 0x86dd
 #endif
 
+#include <talloc.h>
+
 #include "lib/util/debug.h"
 #include "lib/util/blocking.h"
 
 #include "protocol/protocol.h"
+#include "protocol/protocol_util.h"
 
 #include "common/logging.h"
 #include "common/system_socket.h"
@@ -84,10 +87,80 @@ static uint32_t uint16_checksum(uint8_t *data, size_t n)
 	return sum;
 }
 
-/*
- * See if the given IP is currently on an interface
- */
-bool ctdb_sys_have_ip(ctdb_sock_addr *_addr)
+struct ctdb_sys_local_ips_context {
+	struct ifaddrs *ifa;
+};
+
+static int ctdb_sys_local_ips_destructor(
+	struct ctdb_sys_local_ips_context *ips_ctx)
+{
+	freeifaddrs(ips_ctx->ifa);
+	ips_ctx->ifa = NULL;
+
+	return 0;
+}
+
+int ctdb_sys_local_ips_init(TALLOC_CTX *ctx,
+			    struct ctdb_sys_local_ips_context **ips_ctx)
+{
+	struct ctdb_sys_local_ips_context *t = NULL;
+	int ret = 0;
+
+	t = talloc(ctx, struct ctdb_sys_local_ips_context);
+	if (t == NULL) {
+		return ENOMEM;
+	}
+
+	ret = getifaddrs(&t->ifa);
+	if (ret != 0) {
+		ret = errno;
+		talloc_free(t);
+		return ret;
+	}
+
+	talloc_set_destructor(t, ctdb_sys_local_ips_destructor);
+	*ips_ctx = t;
+
+	return ret;
+}
+
+bool ctdb_sys_local_ip_check(const struct ctdb_sys_local_ips_context *ips_ctx,
+			     const ctdb_sock_addr *addr)
+{
+	struct ifaddrs *ifa = NULL;
+	int ret;
+
+	for (ifa = ips_ctx->ifa; ifa != NULL; ifa = ifa->ifa_next) {
+		ctdb_sock_addr sock_addr;
+		bool match;
+
+		if (ifa->ifa_addr == NULL)
+			continue;
+
+		/* Ignore non-IPv4/IPv6 interfaces */
+		switch (ifa->ifa_addr->sa_family) {
+		case AF_INET:
+		case AF_INET6:
+			break;
+		default:
+			continue;
+		}
+
+		ret = ctdb_sock_addr_from_sockaddr(ifa->ifa_addr, &sock_addr);
+		if (ret != 0) {
+			return false;
+		}
+
+		match = ctdb_sock_addr_same_ip(&sock_addr, addr);
+		if (match) {
+			return true;
+		}
+	}
+
+	return false;
+}
+
+bool ctdb_sys_bind_ip_check(const ctdb_sock_addr *_addr)
 {
 	int s;
 	int ret;
@@ -115,6 +188,28 @@ bool ctdb_sys_have_ip(ctdb_sock_addr *_addr)
 
 	close(s);
 	return ret == 0;
+}
+
+/*
+ * See if the given IP is currently on an interface
+ */
+bool ctdb_sys_have_ip(const ctdb_sock_addr *addr)
+{
+	struct ctdb_sys_local_ips_context *ips_ctx = NULL;
+	bool have_ip;
+	int ret;
+
+	ret = ctdb_sys_local_ips_init(NULL, &ips_ctx);
+	if (ret != 0) {
+		DBG_DEBUG("Failed to get local addresses, depending on bind\n");
+		have_ip = ctdb_sys_bind_ip_check(addr);
+		return have_ip;
+	}
+
+	have_ip = ctdb_sys_local_ip_check(ips_ctx, addr);
+	talloc_free(ips_ctx);
+
+	return have_ip;
 }
 
 /*

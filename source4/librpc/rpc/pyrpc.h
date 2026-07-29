@@ -50,11 +50,12 @@ typedef struct {
 	struct dcerpc_pipe *pipe;
 	struct dcerpc_binding_handle *binding_handle;
 	struct tevent_context *ev;
+	bool raise_result_exceptions;
 } dcerpc_InterfaceObject;
 
 
 #ifndef NDR_DCERPC_REQUEST_OBJECT_PRESENT
-#define NDR_DCERPC_REQUEST_OBJECT_PRESENT LIBNDR_FLAG_OBJECT_PRESENT
+#define NDR_DCERPC_REQUEST_OBJECT_PRESENT true
 #endif /* NDR_DCERPC_REQUEST_OBJECT_PRESENT */
 
 #endif /* _PYRPC_H_ */

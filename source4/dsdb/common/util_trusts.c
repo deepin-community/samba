@@ -20,6 +20,7 @@
 #include "includes.h"
 #include "ldb.h"
 #include "../lib/util/util_ldb.h"
+#include "../lib/util/dns_cmp.h"
 #include "dsdb/samdb/samdb.h"
 #include "libcli/security/security.h"
 #include "librpc/gen_ndr/ndr_security.h"
@@ -598,158 +599,6 @@ static NTSTATUS dsdb_trust_crossref_tdo_info(TALLOC_CTX *mem_ctx,
 	return NT_STATUS_OK;
 }
 
-#define DNS_CMP_FIRST_IS_CHILD -2
-#define DNS_CMP_FIRST_IS_LESS -1
-#define DNS_CMP_MATCH 0
-#define DNS_CMP_SECOND_IS_LESS 1
-#define DNS_CMP_SECOND_IS_CHILD 2
-
-#define DNS_CMP_IS_NO_MATCH(__cmp) \
-	((__cmp == DNS_CMP_FIRST_IS_LESS) || (__cmp == DNS_CMP_SECOND_IS_LESS))
-
-/*
- * this function assumes names are well formed DNS names.
- * it doesn't validate them
- *
- * It allows strings up to a length of UINT16_MAX - 1
- * with up to UINT8_MAX components. On overflow this
- * just returns the result of strcasecmp_m().
- *
- * Trailing dots (only one) are ignored.
- *
- * The DNS names are compared per component, starting from
- * the last one.
- */
-static int dns_cmp(const char *s1, const char *s2)
-{
-	size_t l1 = 0;
-	const char *p1 = NULL;
-	size_t num_comp1 = 0;
-	uint16_t comp1[UINT8_MAX] = {0};
-	size_t l2 = 0;
-	const char *p2 = NULL;
-	size_t num_comp2 = 0;
-	uint16_t comp2[UINT8_MAX] = {0};
-	size_t i;
-
-	if (s1 != NULL) {
-		l1 = strlen(s1);
-	}
-
-	if (s2 != NULL) {
-		l2 = strlen(s2);
-	}
-
-	/*
-	 * trailing '.' are ignored.
-	 */
-	if (l1 > 1 && s1[l1 - 1] == '.') {
-		l1--;
-	}
-	if (l2 > 1 && s2[l2 - 1] == '.') {
-		l2--;
-	}
-
-	for (i = 0; i < ARRAY_SIZE(comp1); i++) {
-		char *p;
-
-		if (i == 0) {
-			p1 = s1;
-
-			if (l1 == 0 || l1 >= UINT16_MAX) {
-				/* just use one single component on overflow */
-				break;
-			}
-		}
-
-		comp1[num_comp1++] = PTR_DIFF(p1, s1);
-
-		p = strchr_m(p1, '.');
-		if (p == NULL) {
-			p1 = NULL;
-			break;
-		}
-
-		p1 = p + 1;
-	}
-
-	if (p1 != NULL) {
-		/* just use one single component on overflow */
-		num_comp1 = 0;
-		comp1[num_comp1++] = 0;
-		p1 = NULL;
-	}
-
-	for (i = 0; i < ARRAY_SIZE(comp2); i++) {
-		char *p;
-
-		if (i == 0) {
-			p2 = s2;
-
-			if (l2 == 0 || l2 >= UINT16_MAX) {
-				/* just use one single component on overflow */
-				break;
-			}
-		}
-
-		comp2[num_comp2++] = PTR_DIFF(p2, s2);
-
-		p = strchr_m(p2, '.');
-		if (p == NULL) {
-			p2 = NULL;
-			break;
-		}
-
-		p2 = p + 1;
-	}
-
-	if (p2 != NULL) {
-		/* just use one single component on overflow */
-		num_comp2 = 0;
-		comp2[num_comp2++] = 0;
-		p2 = NULL;
-	}
-
-	for (i = 0; i < UINT8_MAX; i++) {
-		int cmp;
-
-		if (i < num_comp1) {
-			size_t idx = num_comp1 - (i + 1);
-			p1 = s1 + comp1[idx];
-		} else {
-			p1 = NULL;
-		}
-
-		if (i < num_comp2) {
-			size_t idx = num_comp2 - (i + 1);
-			p2 = s2 + comp2[idx];
-		} else {
-			p2 = NULL;
-		}
-
-		if (p1 == NULL && p2 == NULL) {
-			return DNS_CMP_MATCH;
-		}
-		if (p1 != NULL && p2 == NULL) {
-			return DNS_CMP_FIRST_IS_CHILD;
-		}
-		if (p1 == NULL && p2 != NULL) {
-			return DNS_CMP_SECOND_IS_CHILD;
-		}
-
-		cmp = strcasecmp_m(p1, p2);
-		if (cmp < 0) {
-			return DNS_CMP_FIRST_IS_LESS;
-		}
-		if (cmp > 0) {
-			return DNS_CMP_SECOND_IS_LESS;
-		}
-	}
-
-	smb_panic(__location__);
-	return -1;
-}
-
 static int dsdb_trust_find_tln_match_internal(const struct lsa_ForestTrustInformation *info,
 					      enum lsa_ForestTrustRecordType type,
 					      uint32_t disable_mask,
@@ -1286,7 +1135,7 @@ NTSTATUS dsdb_trust_normalize_forest_info_step1(TALLOC_CTX *mem_ctx,
 	 * First we copy every record and remove possible trailing dots
 	 * from dns names.
 	 *
-	 * We also NULL out dublicates. The first one wins and
+	 * We also NULL out duplicates. The first one wins and
 	 * we keep 'count' as is. This is required in order to
 	 * provide the correct index for collision records.
 	 */
@@ -2646,7 +2495,7 @@ NTSTATUS dsdb_trust_search_tdo_by_sid(struct ldb_context *sam_ctx,
 	return NT_STATUS_OK;
 }
 
-NTSTATUS dsdb_trust_get_incoming_passwords(struct ldb_message *msg,
+NTSTATUS dsdb_trust_get_incoming_passwords(const struct ldb_message *msg,
 					   TALLOC_CTX *mem_ctx,
 					   struct samr_Password **_current,
 					   struct samr_Password **_previous)
@@ -2746,15 +2595,15 @@ NTSTATUS dsdb_trust_get_incoming_passwords(struct ldb_message *msg,
 	}
 
 	if (_current != NULL) {
-		*_current = talloc(mem_ctx, struct samr_Password);
+		*_current = talloc_memdup(mem_ctx, current, sizeof(*current));
 		if (*_current == NULL) {
 			TALLOC_FREE(frame);
 			return NT_STATUS_NO_MEMORY;
 		}
-		**_current = *current;
 	}
 	if (_previous != NULL) {
-		*_previous = talloc(mem_ctx, struct samr_Password);
+		*_previous =
+			talloc_memdup(mem_ctx, previous, sizeof(*previous));
 		if (*_previous == NULL) {
 			if (_current != NULL) {
 				TALLOC_FREE(*_current);
@@ -2762,7 +2611,6 @@ NTSTATUS dsdb_trust_get_incoming_passwords(struct ldb_message *msg,
 			TALLOC_FREE(frame);
 			return NT_STATUS_NO_MEMORY;
 		}
-		**_previous = *previous;
 	}
 	ZERO_STRUCTP(current);
 	ZERO_STRUCTP(previous);
@@ -3039,7 +2887,7 @@ static void dsdb_trust_update_best_tln(
 		return;
 	}
 
-	cmp = dns_cmp(*best_tln, tln);
+	cmp = dns_cmp(tln, *best_tln);
 	if (cmp != DNS_CMP_FIRST_IS_CHILD) {
 		return;
 	}
@@ -3128,10 +2976,6 @@ const struct lsa_TrustDomainInfoInfoEx *dsdb_trust_routing_by_name(
 				continue;
 			}
 
-			if (!transitive) {
-				continue;
-			}
-
 			dsdb_trust_update_best_tln(&best_d, &best_tln, d,
 						   d->tdo->domain_name.string);
 			continue;
@@ -3213,15 +3057,19 @@ const struct lsa_TrustDomainInfoInfoEx *dsdb_trust_routing_by_name(
 			}
 
 			cmp = dns_cmp(name, fti_tln);
-			switch (cmp) {
-			case DNS_CMP_MATCH:
-			case DNS_CMP_FIRST_IS_CHILD:
-				dsdb_trust_update_best_tln(&best_d, &best_tln,
-							   d, fti_tln);
-				break;
-			default:
-				break;
+			if (cmp == DNS_CMP_MATCH) {
+				/*
+				 * exact match
+				 */
+				return d->tdo;
 			}
+			if (cmp != DNS_CMP_FIRST_IS_CHILD) {
+				continue;
+			}
+
+			dsdb_trust_update_best_tln(&best_d, &best_tln,
+						   d, fti_tln);
+			continue;
 		}
 	}
 

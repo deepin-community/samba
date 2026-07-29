@@ -35,6 +35,8 @@ from samba.common import normalise_int32
 from samba.common import get_bytes, cmp
 from samba.dcerpc import security
 from samba import is_ad_dc_built
+from samba import string_is_guid
+from samba import NTSTATUSError, ntstatus
 import binascii
 
 __docformat__ = "restructuredText"
@@ -53,7 +55,6 @@ class SamDB(samba.Ldb):
     """The SAM database."""
 
     hash_oid_name = {}
-    hash_well_known = {}
 
     class _CleanUpOnError:
         def __init__(self, samdb, dn):
@@ -87,9 +88,9 @@ class SamDB(samba.Ldb):
 
         self.url = url
 
-        super(SamDB, self).__init__(url=url, lp=lp, modules_dir=modules_dir,
-                                    session_info=session_info, credentials=credentials, flags=flags,
-                                    options=options)
+        super().__init__(url=url, lp=lp, modules_dir=modules_dir,
+                         session_info=session_info, credentials=credentials, flags=flags,
+                         options=options)
 
         if global_schema:
             dsdb._dsdb_set_global_schema(self)
@@ -98,35 +99,42 @@ class SamDB(samba.Ldb):
             dsdb._dsdb_set_am_rodc(self, am_rodc)
 
     def connect(self, url=None, flags=0, options=None):
-        '''connect to the database'''
+        """connect to the database"""
         if self.lp is not None and not os.path.exists(url):
             url = self.lp.private_path(url)
         self.url = url
 
-        super(SamDB, self).connect(url=url, flags=flags,
-                                   options=options)
+        super().connect(url=url, flags=flags, options=options)
+
+    def __repr__(self):
+        if self.url:
+            return f"<SamDB {id(self):x} ({self.url})>"
+
+        return f"<SamDB {id(self):x} (no connection)>"
+
+    __str__ = __repr__
 
     def am_rodc(self):
-        '''return True if we are an RODC'''
+        """return True if we are an RODC"""
         return dsdb._am_rodc(self)
 
     def am_pdc(self):
-        '''return True if we are an PDC emulator'''
+        """return True if we are an PDC emulator"""
         return dsdb._am_pdc(self)
 
     def domain_dn(self):
-        '''return the domain DN'''
+        """return the domain DN"""
         return str(self.get_default_basedn())
 
     def schema_dn(self):
-        '''return the schema partition dn'''
+        """return the schema partition dn"""
         return str(self.get_schema_basedn())
 
     def disable_account(self, search_filter):
         """Disables an account
 
         :param search_filter: LDAP filter to find the user (eg
-            samccountname=name)
+            sAMAccountName=name)
         """
 
         flags = samba.dsdb.UF_ACCOUNTDISABLE
@@ -136,7 +144,7 @@ class SamDB(samba.Ldb):
         """Enables an account
 
         :param search_filter: LDAP filter to find the user (eg
-            samccountname=name)
+            sAMAccountName=name)
         """
 
         flags = samba.dsdb.UF_ACCOUNTDISABLE | samba.dsdb.UF_PASSWD_NOTREQD
@@ -147,7 +155,7 @@ class SamDB(samba.Ldb):
         """Toggle_userAccountFlags
 
         :param search_filter: LDAP filter to find the user (eg
-            samccountname=name)
+            sAMAccountName=name)
         :param flags: samba.dsdb.UF_* flags
         :param on: on=True (default) => set, on=False => unset
         :param strict: strict=False (default) ignore if no action is needed
@@ -191,7 +199,7 @@ userAccountControl: %u
         """Forces a password change at next login
 
         :param search_filter: LDAP filter to find the user (eg
-            samccountname=name)
+            sAMAccountName=name)
         """
         res = self.search(base=self.domain_dn(), scope=ldb.SCOPE_SUBTREE,
                           expression=search_filter, attrs=[])
@@ -359,43 +367,123 @@ lockoutTime: 0
 
         return filter
 
-    def add_remove_group_members(self, groupname, members,
+    def add_remove_group_members(self, group, members,
                                  add_members_operation=True,
                                  member_types=None,
                                  member_base_dn=None):
         """Adds or removes group members
 
-        :param groupname: Name of the target group
+        :param group: sAMAccountName, DN, SID or GUID of the target group
         :param members: list of group members
         :param add_members_operation: Defines if its an add or remove
             operation
+        :param member_types: List of object types, used to filter the search
+            for the specified members
+        :param member_base_dn: Base dn for member search
         """
         if member_types is None:
             member_types = ['user', 'group', 'computer']
 
-        groupfilter = "(&(sAMAccountName=%s)(objectCategory=%s,%s))" % (
-            ldb.binary_encode(groupname), "CN=Group,CN=Schema,CN=Configuration", self.domain_dn())
+        if member_base_dn is None:
+            member_base_dn = self.domain_dn()
+
+        partial_groupfilter = None
+
+        # If <group> looks like a SID, GUID, or DN, we use it
+        # accordingly, otherwise as a name.
+        #
+        # Because misc.GUID() will read any 16 byte sequence as a
+        # binary guid, we need to be careful not to read 16 character
+        # names as GUIDs.
+
+        group_sid = None
+        try:
+            group_sid = security.dom_sid(group)
+        except ValueError:
+            pass
+        if group_sid is not None:
+            partial_groupfilter = "(objectClass=*)"
+
+        group_guid = None
+        if partial_groupfilter is None and string_is_guid(group):
+            try:
+                group_guid = misc.GUID(group)
+            except NTSTATUSError as e:
+                (status, _) = e.args
+                if status != ntstatus.NT_STATUS_INVALID_PARAMETER:
+                    raise e
+            if group_guid is not None:
+                partial_groupfilter = "(objectClass=*)"
+
+        if partial_groupfilter is None:
+            group_dn = None
+            try:
+                if isinstance(group, ldb.Dn):
+                    group_dn = ldb.Dn(self, group.extended_str(1))
+                else:
+                    group_dn = ldb.Dn(self, str(group))
+            except ValueError:
+                pass
+            if group_dn is not None:
+                group_b_sid = group_dn.get_extended_component("SID")
+                group_b_guid = group_dn.get_extended_component("GUID")
+                if group_b_sid is not None:
+                    group_sid = ndr_unpack(security.dom_sid, group_b_sid)
+                    partial_groupfilter = "(objectClass=*)"
+                elif group_b_guid is not None:
+                    group_guid = ndr_unpack(misc.GUID, group_b_guid)
+                    partial_groupfilter = "(objectClass=*)"
+                else:
+                    search_base = str(group_dn)
+                    search_scope = ldb.SCOPE_BASE
+
+        if group_sid is not None:
+            search_base = '<SID=%s>' % group_sid
+            search_scope = ldb.SCOPE_BASE
+
+        if group_guid is not None:
+            search_base = '<GUID=%s>' % group_guid
+            search_scope = ldb.SCOPE_BASE
+
+        if partial_groupfilter is None:
+            search_base = self.domain_dn()
+            search_scope = ldb.SCOPE_SUBTREE
+            partial_groupfilter = "(sAMAccountName=%s)" % (
+                ldb.binary_encode(group))
+
+        groupfilter = "(&%s(objectCategory=%s,%s))" % (
+            partial_groupfilter,
+            "CN=Group,CN=Schema,CN=Configuration",
+            self.domain_dn())
 
         self.transaction_start()
         try:
-            targetgroup = self.search(base=self.domain_dn(), scope=ldb.SCOPE_SUBTREE,
-                                      expression=groupfilter, attrs=['member'])
+            targetgroup = self.search(base=search_base,
+                                      scope=search_scope,
+                                      expression=groupfilter,
+                                      controls=["extended_dn:1:1"],
+                                      attrs=['member'])
             if len(targetgroup) == 0:
-                raise Exception('Unable to find group "%s"' % groupname)
+                raise Exception('Unable to find group "%s"' % group)
             assert(len(targetgroup) == 1)
 
             modified = False
 
+            if group_sid is not None:
+                targetgroup_dn = '<SID=%s>' % group_sid
+            elif group_guid is not None:
+                targetgroup_dn = '<GUID=%s>' % group_guid
+            else:
+                targetgroup_dn = str(targetgroup[0].dn)
+
             addtargettogroup = """
 dn: %s
 changetype: modify
-""" % (str(targetgroup[0].dn))
+""" % (targetgroup_dn)
 
             for member in members:
                 targetmember_dn = None
-                if member_base_dn is None:
-                    member_base_dn = self.domain_dn()
-
+                membersid = None
                 try:
                     membersid = security.dom_sid(member)
                     targetmember_dn = "<SID=%s>" % str(membersid)
@@ -414,10 +502,10 @@ changetype: modify
                         pass
 
                 if targetmember_dn is None:
-                    filter = self.group_member_filter(member, member_types)
+                    search_filter = self.group_member_filter(member, member_types)
                     targetmember = self.search(base=member_base_dn,
                                                scope=ldb.SCOPE_SUBTREE,
-                                               expression=filter,
+                                               expression=search_filter,
                                                attrs=[])
 
                     if len(targetmember) > 1:
@@ -430,13 +518,33 @@ changetype: modify
                         raise Exception('Unable to find "%s". Operation cancelled.' % member)
                     targetmember_dn = targetmember[0].dn.extended_str(1)
 
-                if add_members_operation is True and (targetgroup[0].get('member') is None or get_bytes(targetmember_dn) not in [str(x) for x in targetgroup[0]['member']]):
+                def _is_member(samdb, group, member_dn, member_sid):
+                    if group.get('member') is None:
+                        return False
+
+                    for m in group.get('member'):
+                        m_ext_dn = ldb.Dn(samdb, str(m))
+                        m_binary_sid = m_ext_dn.get_extended_component("SID")
+                        if m_binary_sid:
+                            m_sid = ndr_unpack(security.dom_sid, m_binary_sid)
+                            if member_sid == m_sid:
+                                return True
+                        if member_dn == str(m_ext_dn):
+                            return True
+
+                    return False
+
+                is_member = _is_member(self,
+                                       targetgroup[0],
+                                       targetmember_dn,
+                                       membersid)
+                if add_members_operation is True and not is_member:
                     modified = True
                     addtargettogroup += """add: member
 member: %s
 """ % (str(targetmember_dn))
 
-                elif add_members_operation is False and (targetgroup[0].get('member') is not None and get_bytes(targetmember_dn) in targetgroup[0]['member']):
+                elif add_members_operation is False and is_member:
                     modified = True
                     addtargettogroup += """delete: member
 member: %s
@@ -869,7 +977,7 @@ member: %s
         """Sets the password for a user
 
         :param search_filter: LDAP filter to find the user (eg
-            samccountname=name)
+            sAMAccountName=name)
         :param password: Password for the user
         :param force_change_at_next_login: Force password change
         """
@@ -912,7 +1020,7 @@ unicodePwd:: %s
         """Sets the account expiry for a user
 
         :param search_filter: LDAP filter to find the user (eg
-            samaccountname=name)
+            sAMAccountName=name)
         :param expiry_seconds: expiry time from now in seconds
         :param no_expiry_req: if set, then don't expire password
         """
@@ -964,6 +1072,14 @@ accountExpires: %u
     domain_sid = property(get_domain_sid, set_domain_sid,
                           doc="SID for the domain")
 
+    def get_connecting_user_sid(self):
+        """Returns the SID of the connected user."""
+        msg = self.search(base="", scope=ldb.SCOPE_BASE, attrs=["tokenGroups"])[0]
+        return str(ndr_unpack(security.dom_sid, msg["tokenGroups"][0]))
+
+    connecting_user_sid = property(get_connecting_user_sid,
+                                   doc="SID of the connecting user")
+
     def set_invocation_id(self, invocation_id):
         """Set the invocation id for this SamDB handle.
 
@@ -983,29 +1099,29 @@ accountExpires: %u
 
     def get_attid_from_lDAPDisplayName(self, ldap_display_name,
                                        is_schema_nc=False):
-        '''return the attribute ID for a LDAP attribute as an integer as found in DRSUAPI'''
+        """return the attribute ID for a LDAP attribute as an integer as found in DRSUAPI"""
         return dsdb._dsdb_get_attid_from_lDAPDisplayName(self,
                                                          ldap_display_name, is_schema_nc)
 
     def get_syntax_oid_from_lDAPDisplayName(self, ldap_display_name):
-        '''return the syntax OID for a LDAP attribute as a string'''
+        """return the syntax OID for a LDAP attribute as a string"""
         return dsdb._dsdb_get_syntax_oid_from_lDAPDisplayName(self, ldap_display_name)
 
     def get_systemFlags_from_lDAPDisplayName(self, ldap_display_name):
-        '''return the systemFlags for a LDAP attribute as a integer'''
+        """return the systemFlags for a LDAP attribute as a integer"""
         return dsdb._dsdb_get_systemFlags_from_lDAPDisplayName(self, ldap_display_name)
 
     def get_linkId_from_lDAPDisplayName(self, ldap_display_name):
-        '''return the linkID for a LDAP attribute as a integer'''
+        """return the linkID for a LDAP attribute as a integer"""
         return dsdb._dsdb_get_linkId_from_lDAPDisplayName(self, ldap_display_name)
 
     def get_lDAPDisplayName_by_attid(self, attid):
-        '''return the lDAPDisplayName from an integer DRS attribute ID'''
+        """return the lDAPDisplayName from an integer DRS attribute ID"""
         return dsdb._dsdb_get_lDAPDisplayName_by_attid(self, attid)
 
     def get_backlink_from_lDAPDisplayName(self, ldap_display_name):
-        '''return the attribute name of the corresponding backlink from the name
-        of a forward link attribute. If there is no backlink return None'''
+        """return the attribute name of the corresponding backlink from the name
+        of a forward link attribute. If there is no backlink return None"""
         return dsdb._dsdb_get_backlink_from_lDAPDisplayName(self, ldap_display_name)
 
     def set_ntds_settings_dn(self, ntds_settings_dn):
@@ -1090,11 +1206,11 @@ schemaUpdateNow: 1
         self.modify_ldif(ldif)
 
     def dsdb_DsReplicaAttribute(self, ldb, ldap_display_name, ldif_elements):
-        '''convert a list of attribute values to a DRSUAPI DsReplicaAttribute'''
+        """convert a list of attribute values to a DRSUAPI DsReplicaAttribute"""
         return dsdb._dsdb_DsReplicaAttribute(ldb, ldap_display_name, ldif_elements)
 
     def dsdb_normalise_attributes(self, ldb, ldap_display_name, ldif_elements):
-        '''normalise a list of attribute values'''
+        """normalise a list of attribute values"""
         return dsdb._dsdb_normalise_attributes(ldb, ldap_display_name, ldif_elements)
 
     def get_attribute_from_attid(self, attid):
@@ -1221,19 +1337,7 @@ schemaUpdateNow: 1
         return dsdb._dsdb_get_nc_root(self, dn)
 
     def get_wellknown_dn(self, nc_root, wkguid):
-        h_nc = self.hash_well_known.get(str(nc_root))
-        dn = None
-        if h_nc is not None:
-            dn = h_nc.get(wkguid)
-        if dn is None:
-            dn = dsdb._dsdb_get_wellknown_dn(self, nc_root, wkguid)
-            if dn is None:
-                return dn
-            if h_nc is None:
-                self.hash_well_known[str(nc_root)] = {}
-                h_nc = self.hash_well_known[str(nc_root)]
-            h_nc[wkguid] = dn
-        return dn
+        return dsdb._dsdb_get_wellknown_dn(self, nc_root, wkguid)
 
     def set_minPwdAge(self, value):
         if not isinstance(value, bytes):
@@ -1357,7 +1461,7 @@ schemaUpdateNow: 1
          """
         self.transaction_start()
         try:
-            seq = super(SamDB, self).sequence_number(seq_type)
+            seq = super().sequence_number(seq_type)
         except:
             self.transaction_cancel()
             raise
@@ -1366,17 +1470,17 @@ schemaUpdateNow: 1
         return seq
 
     def get_dsServiceName(self):
-        '''get the NTDS DN from the rootDSE'''
+        """get the NTDS DN from the rootDSE"""
         res = self.search(base="", scope=ldb.SCOPE_BASE, attrs=["dsServiceName"])
         return str(res[0]["dsServiceName"][0])
 
     def get_serverName(self):
-        '''get the server DN from the rootDSE'''
+        """get the server DN from the rootDSE"""
         res = self.search(base="", scope=ldb.SCOPE_BASE, attrs=["serverName"])
         return str(res[0]["serverName"][0])
 
     def dns_lookup(self, dns_name, dns_partition=None):
-        '''Do a DNS lookup in the database, returns the NDR database structures'''
+        """Do a DNS lookup in the database, returns the NDR database structures"""
         if dns_partition is None:
             return dsdb_dns.lookup(self, dns_name)
         else:
@@ -1384,31 +1488,31 @@ schemaUpdateNow: 1
                                    dns_partition=dns_partition)
 
     def dns_extract(self, el):
-        '''Return the NDR database structures from a dnsRecord element'''
+        """Return the NDR database structures from a dnsRecord element"""
         return dsdb_dns.extract(self, el)
 
     def dns_replace(self, dns_name, new_records):
-        '''Do a DNS modification on the database, sets the NDR database
+        """Do a DNS modification on the database, sets the NDR database
         structures on a DNS name
-        '''
+        """
         return dsdb_dns.replace(self, dns_name, new_records)
 
     def dns_replace_by_dn(self, dn, new_records):
-        '''Do a DNS modification on the database, sets the NDR database
+        """Do a DNS modification on the database, sets the NDR database
         structures on a LDB DN
 
         This routine is important because if the last record on the DN
         is removed, this routine will put a tombstone in the record.
-        '''
+        """
         return dsdb_dns.replace_by_dn(self, dn, new_records)
 
     def garbage_collect_tombstones(self, dn, current_time,
                                    tombstone_lifetime=None):
-        '''garbage_collect_tombstones(lp, samdb, [dn], current_time, tombstone_lifetime)
-        -> (num_objects_expunged, num_links_expunged)'''
+        """garbage_collect_tombstones(lp, samdb, [dn], current_time, tombstone_lifetime)
+        -> (num_objects_expunged, num_links_expunged)"""
 
         if not is_ad_dc_built():
-            raise SamDBError('Cannot garbage collect tombstones: ' \
+            raise SamDBError('Cannot garbage collect tombstones: '
                 'AD DC was not built')
 
         if tombstone_lifetime is None:
@@ -1420,33 +1524,33 @@ schemaUpdateNow: 1
                                                          tombstone_lifetime)
 
     def create_own_rid_set(self):
-        '''create a RID set for this DSA'''
+        """create a RID set for this DSA"""
         return dsdb._dsdb_create_own_rid_set(self)
 
     def allocate_rid(self):
-        '''return a new RID from the RID Pool on this DSA'''
+        """return a new RID from the RID Pool on this DSA"""
         return dsdb._dsdb_allocate_rid(self)
 
     def next_free_rid(self):
-        '''return the next free RID from the RID Pool on this DSA.
+        """return the next free RID from the RID Pool on this DSA.
 
         :note: This function is not intended for general use, and care must be
             taken if it is used to generate objectSIDs. The returned RID is not
             formally reserved for use, creating the possibility of duplicate
             objectSIDs.
-        '''
+        """
         rid, _ = self.free_rid_bounds()
         return rid
 
     def free_rid_bounds(self):
-        '''return the low and high bounds (inclusive) of RIDs that are
+        """return the low and high bounds (inclusive) of RIDs that are
             available for use in this DSA's current RID pool.
 
         :note: This function is not intended for general use, and care must be
             taken if it is used to generate objectSIDs. The returned range of
             RIDs is not formally reserved for use, creating the possibility of
             duplicate objectSIDs.
-        '''
+        """
         # Get DN of this server's RID Set
         server_name_dn = ldb.Dn(self, self.get_serverName())
         res = self.search(base=server_name_dn,
@@ -1533,13 +1637,13 @@ schemaUpdateNow: 1
         return next_rid, prev_pool_hi
 
     def normalize_dn_in_domain(self, dn):
-        '''return a new DN expanded by adding the domain DN
+        """return a new DN expanded by adding the domain DN
 
         If the dn is already a child of the domain DN, just
         return it as-is.
 
         :param dn: relative dn
-        '''
+        """
         domain_dn = ldb.Dn(self, self.domain_dn())
 
         if isinstance(dn, ldb.Dn):
@@ -1550,11 +1654,24 @@ schemaUpdateNow: 1
             full_dn.add_base(domain_dn)
         return full_dn
 
+    def new_gkdi_root_key(self, *args, **kwargs):
+        """ """
+        dn = dsdb._dsdb_create_gkdi_root_key(self, *args, **kwargs)
+        return dn
+
+    def get_admin_sid(self):
+        res = self.search(
+            base="", expression="", scope=ldb.SCOPE_BASE, attrs=["tokenGroups"])
+
+        return self.schema_format_value(
+            "tokenGroups", res[0]["tokenGroups"][0]).decode("utf8")
+
+
 class dsdb_Dn(object):
-    '''a class for binary DN'''
+    """a class for binary DN"""
 
     def __init__(self, samdb, dnstring, syntax_oid=None):
-        '''create a dsdb_Dn'''
+        """create a dsdb_Dn"""
         if syntax_oid is None:
             # auto-detect based on string
             if dnstring.startswith("B:"):
@@ -1582,7 +1699,7 @@ class dsdb_Dn(object):
         return self.prefix + str(self.dn.extended_str(mode=1))
 
     def __cmp__(self, other):
-        ''' compare dsdb_Dn values similar to parsed_dn_compare()'''
+        """ compare dsdb_Dn values similar to parsed_dn_compare()"""
         dn1 = self
         dn2 = other
         guid1 = dn1.dn.get_extended_component("GUID")
@@ -1614,11 +1731,11 @@ class dsdb_Dn(object):
         return self.__cmp__(other) >= 0
 
     def get_binary_integer(self):
-        '''return binary part of a dsdb_Dn as an integer, or None'''
+        """return binary part of a dsdb_Dn as an integer, or None"""
         if self.prefix == '':
             return None
         return int(self.binary, 16)
 
     def get_bytes(self):
-        '''return binary as a byte string'''
+        """return binary as a byte string"""
         return binascii.unhexlify(self.binary)

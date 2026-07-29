@@ -61,6 +61,16 @@
 		<arg choice="opt">-t|--timeout seconds</arg>
 		<arg choice="opt">--dns-ttl TTL-IN-SECONDS</arg>
 		<arg choice="opt">-i|--stdin</arg>
+		<arg choice="opt">--witness-registration=REGISTRATION_UUID</arg>
+		<arg choice="opt">--witness-net-name=REGEX</arg>
+		<arg choice="opt">--witness-share-name=REGEX</arg>
+		<arg choice="opt">--witness-ip-address=REGEX</arg>
+		<arg choice="opt">--witness-client-computer-name=REGEX</arg>
+		<arg choice="opt">--witness-apply-to-all</arg>
+		<arg choice="opt">--witness-new-node=NODEID</arg>
+		<arg choice="opt">--witness-new-ip=IPADDRESS</arg>
+		<arg choice="opt">--witness-forced-response=JSON</arg>
+
 	</cmdsynopsis>
 </refsynopsisdiv>
 
@@ -70,12 +80,12 @@
 	<para>This tool is part of the <citerefentry><refentrytitle>samba</refentrytitle>
 	<manvolnum>7</manvolnum></citerefentry> suite.</para>
 
-	<para>The Samba net utility is meant to work just like the net utility 
-	available for windows and DOS. The first argument should be used 
-	to specify the protocol to use when executing a certain command. 
-	ADS is used for ActiveDirectory, RAP is using for old (Win9x/NT3) 
-	clients and RPC can be used for NT4 and Windows 2000. If this 
-	argument is omitted, net will try to determine it automatically. 
+	<para>The Samba net utility is meant to work just like the net utility
+	available for windows and DOS. The first argument should be used
+	to specify the protocol to use when executing a certain command.
+	ADS is used for ActiveDirectory, RAP is using for old (Win9x/NT3)
+	clients and RPC can be used for NT4 and Windows 2000. If this
+	argument is omitted, net will try to determine it automatically.
 	Not all commands are available on all protocols.
 	</para>
 
@@ -88,7 +98,7 @@
 		<varlistentry>
 		<term>-w|--target-workgroup target-workgroup</term>
 		<listitem><para>
-		Sets target workgroup or domain. You have to specify 
+		Sets target workgroup or domain. You have to specify
 		either this option or the IP address or the name of a server.
 		</para></listitem>
 		</varlistentry>
@@ -105,7 +115,7 @@
 		<varlistentry>
 		<term>-p|--port port</term>
 		<listitem><para>
-		Port on the target server to connect to (usually 139 or 445). 
+		Port on the target server to connect to (usually 139 or 445).
 		Defaults to trying 445 first, then 139.
 		</para></listitem>
 		</varlistentry>
@@ -113,7 +123,7 @@
 		<varlistentry>
 		<term>-S|--server server</term>
 		<listitem><para>
-		Name of target server. You should specify either 
+		Name of target server. You should specify either
 		this option or a target workgroup or a target IP address.
 		</para></listitem>
 		</varlistentry>
@@ -402,6 +412,86 @@
 		</para></listitem>
 		</varlistentry>
 
+		<!-- Options for net witness subcommands -->
+
+		<varlistentry>
+		<term>--witness-registration=REGISTRATION_UUID</term>
+		<listitem><para>
+		This does a direct lookup for REGISTRATION_UUID
+		instead of doing a database traversal.
+		</para></listitem>
+		</varlistentry>
+
+		<varlistentry>
+		<term>--witness-net-name=REGEX</term>
+		<listitem><para>
+		This specifies the 'server name' the client
+		registered for monitoring.
+		</para></listitem>
+		</varlistentry>
+
+		<varlistentry>
+		<term>--witness-share-name=REGEX</term>
+		<listitem><para>
+		This specifies the 'share name' the client
+		registered for monitoring.
+		Note that the share name is optional in the
+		registration, otherwise an empty string is
+		matched.
+		</para></listitem>
+		</varlistentry>
+
+		<varlistentry>
+		<term>--witness-ip-address=REGEX</term>
+		<listitem><para>
+		This specifies the ip address the client
+		registered for monitoring.
+		</para></listitem>
+		</varlistentry>
+
+		<varlistentry>
+		<term>--witness-client-computer-name=REGEX</term>
+		<listitem><para>
+		This specifies the client computer name the client
+		specified in the registration.
+		Note it is just a string chosen by the client itself.
+		</para></listitem>
+		</varlistentry>
+
+		<varlistentry>
+		<term>--witness-apply-to-all</term>
+		<listitem><para>
+		This selects all registrations.
+		</para></listitem>
+		</varlistentry>
+
+		<varlistentry>
+		<term>--witness-new-node=NODEID</term>
+		<listitem><para>
+		By specifying a NODEID all ip addresses
+		currently available on the given node are
+		included in the response.
+		By specifying '-1' as NODEID all ip addresses
+		of the cluster are included in the response.
+		</para></listitem>
+		</varlistentry>
+
+		<varlistentry>
+		<term>--witness-new-ip=IPADDRESS</term>
+		<listitem><para>
+		By specifying an IPADDRESS only the specified
+		ip address is included in the response.
+		</para></listitem>
+		</varlistentry>
+
+		<varlistentry>
+		<term>--witness-forced-response=JSON</term>
+		<listitem><para>
+		This allows the generation of very complex
+		witness_notifyResponse structures.
+		</para></listitem>
+		</varlistentry>
+
 		&cmdline.common.samba.client;
 		&cmdline.common.connection;
 		&cmdline.common.credentials;
@@ -434,7 +524,7 @@ YOU HAVE BEEN WARNED.
 <refsect3>
 <title>TIME</title>
 
-<para>Without any options, the <command>NET TIME</command> command 
+<para>Without any options, the <command>NET TIME</command> command
 displays the time on the remote server. The remote server must be
 specified with the -S option.
 </para>
@@ -452,7 +542,7 @@ The remote server must be specified with the -S option.
 
 <refsect3>
 <title>TIME SET</title>
-<para>Tries to set the date and time of the local server to that on 
+<para>Tries to set the date and time of the local server to that on
 the remote server using <command>/bin/date</command>.
 The remote server must be specified with the -S option.
 </para>
@@ -475,8 +565,8 @@ The remote server must be specified with the -S option.
 [osName=string osVer=string] [options]</title>
 
 <para>
-Join a domain.  If the account already exists on the server, and 
-[TYPE] is MEMBER, the machine will attempt to join automatically. 
+Join a domain.  If the account already exists on the server, and
+[TYPE] is MEMBER, the machine will attempt to join automatically.
 (Assuming that the machine has been created in server manager)
 Otherwise, a password will be prompted for, and a new account may
 be created.</para>
@@ -500,7 +590,7 @@ format is host/netbiosname@REALM.
 [OU] (ADS only) Precreate the computer account in a specific OU.  The
 OU string reads from top to bottom without RDNs, and is delimited by
 a '/'.  Please note that '\' is used for escape by both the shell
-and ldap, so it may need to be doubled or quadrupled to pass through, 
+and ldap, so it may need to be doubled or quadrupled to pass through,
 and it is not used as a delimiter.
 </para>
 <para>
@@ -517,8 +607,8 @@ must be specified for either to take effect.
 <refsect2>
 <title>[RPC] OLDJOIN [options]</title>
 
-<para>Join a domain. Use the OLDJOIN option to join the domain 
-using the old style of domain joining - you need to create a trust 
+<para>Join a domain. Use the OLDJOIN option to join the domain
+using the old style of domain joining - you need to create a trust
 account in server manager first.</para>
 </refsect2>
 
@@ -602,8 +692,8 @@ account in server manager first.</para>
 <refsect3>
 <title>[RAP|RPC] SHARE ADD <replaceable>name=serverpath</replaceable> [-C comment] [-M maxusers] [targets]</title>
 
-<para>Adds a share from a server (makes the export active). Maxusers 
-specifies the number of users that can be connected to the 
+<para>Adds a share from a server (makes the export active). Maxusers
+specifies the number of users that can be connected to the
 share simultaneously.</para>
 
 </refsect3>
@@ -628,7 +718,7 @@ share simultaneously.</para>
 <refsect3>
 <title>[RPC|RAP] FILE CLOSE <replaceable>fileid</replaceable></title>
 
-<para>Close file with specified <replaceable>fileid</replaceable> on 
+<para>Close file with specified <replaceable>fileid</replaceable> on
 remote server.</para>
 
 </refsect3>
@@ -637,7 +727,7 @@ remote server.</para>
 <title>[RPC|RAP] FILE INFO <replaceable>fileid</replaceable></title>
 
 <para>
-Print information on specified <replaceable>fileid</replaceable>. 
+Print information on specified <replaceable>fileid</replaceable>.
 Currently listed are: file-id, username, locks, path, permissions.
 </para>
 
@@ -649,7 +739,7 @@ Currently listed are: file-id, username, locks, path, permissions.
 <para>
 List files opened by specified <replaceable>user</replaceable>.
 Please note that <command>net rap file user</command> does not work
-against Samba servers. 
+against Samba servers.
 </para>
 
 </refsect3>
@@ -662,7 +752,7 @@ against Samba servers.
 <refsect3>
 <title>RAP SESSION</title>
 
-<para>Without any other options, SESSION enumerates all active SMB/CIFS 
+<para>Without any other options, SESSION enumerates all active SMB/CIFS
 sessions on the target server.</para>
 
 </refsect3>
@@ -694,7 +784,7 @@ to local domain.</para>
 <refsect2>
 <title>RAP DOMAIN</title>
 
-<para>Lists all domains and workgroups visible on the 
+<para>Lists all domains and workgroups visible on the
 current network.</para>
 
 </refsect2>
@@ -706,7 +796,7 @@ current network.</para>
 <title>RAP PRINTQ INFO <replaceable>QUEUE_NAME</replaceable></title>
 
 <para>Lists the specified print queue and print jobs on the server.
-If the <replaceable>QUEUE_NAME</replaceable> is omitted, all 
+If the <replaceable>QUEUE_NAME</replaceable> is omitted, all
 queues are listed.</para>
 
 </refsect3>
@@ -724,9 +814,9 @@ queues are listed.</para>
 <title>RAP VALIDATE <replaceable>user</replaceable> [<replaceable>password</replaceable>]</title>
 
 <para>
-Validate whether the specified user can log in to the 
-remote server. If the password is not specified on the commandline, it 
-will be prompted. 
+Validate whether the specified user can log in to the
+remote server. If the password is not specified on the commandline, it
+will be prompted.
 </para>
 
 &not.implemented;
@@ -762,7 +852,7 @@ will be prompted.
 <refsect2>
 <title>RAP ADMIN <replaceable>command</replaceable></title>
 
-<para>Execute the specified <replaceable>command</replaceable> on 
+<para>Execute the specified <replaceable>command</replaceable> on
 the remote server. Only works with OS/2 servers.
 </para>
 
@@ -809,7 +899,7 @@ Change password of <replaceable>USER</replaceable> from <replaceable>OLDPASS</re
 <title>LOOKUP HOST <replaceable>HOSTNAME</replaceable> [<replaceable>TYPE</replaceable>]</title>
 
 <para>
-Lookup the IP address of the given host with the specified type (netbios suffix). 
+Lookup the IP address of the given host with the specified type (netbios suffix).
 The type defaults to 0x20 (workstation).
 </para>
 
@@ -875,7 +965,7 @@ or workgroup. Defaults to local domain.</para>
 <refsect2>
 <title>CACHE</title>
 
-<para>Samba uses a general caching interface called 'gencache'. It 
+<para>Samba uses a general caching interface called 'gencache'. It
 can be controlled using 'NET CACHE'.</para>
 
 <para>All the timeout parameters support the suffixes:
@@ -954,7 +1044,7 @@ omitted, the SID of the local server.</para>
 <refsect2>
 <title>GETDOMAINSID</title>
 
-<para>Prints the local machine SID and the SID of the current 
+<para>Prints the local machine SID and the SID of the current
 domain.</para>
 
 </refsect2>
@@ -1068,15 +1158,15 @@ such as domain name, domain sid and number of users and groups.
 <refsect3>
 <title>RPC TRUSTDOM ADD <replaceable>DOMAIN</replaceable></title>
 
-<para>Add a interdomain trust account for <replaceable>DOMAIN</replaceable>. 
-This is in fact a Samba account named <replaceable>DOMAIN$</replaceable> 
-with the account flag <constant>'I'</constant> (interdomain trust account). 
+<para>Add a interdomain trust account for <replaceable>DOMAIN</replaceable>.
+This is in fact a Samba account named <replaceable>DOMAIN$</replaceable>
+with the account flag <constant>'I'</constant> (interdomain trust account).
 This is required for incoming trusts to work. It makes Samba be a
 trusted domain of the foreign (trusting) domain.
 Users of the Samba domain will be made available in the foreign domain.
-If the command is used against localhost it has the same effect as 
+If the command is used against localhost it has the same effect as
 <command>smbpasswd -a -i DOMAIN</command>. Please note that both commands
-expect a appropriate UNIX account. 
+expect a appropriate UNIX account.
 </para>
 
 </refsect3>
@@ -1084,9 +1174,9 @@ expect a appropriate UNIX account.
 <refsect3>
 <title>RPC TRUSTDOM DEL <replaceable>DOMAIN</replaceable></title>
 
-<para>Remove interdomain trust account for 
-<replaceable>DOMAIN</replaceable>. If it is used against localhost 
-it has the same effect as <command>smbpasswd -x DOMAIN$</command>. 
+<para>Remove interdomain trust account for
+<replaceable>DOMAIN</replaceable>. If it is used against localhost
+it has the same effect as <command>smbpasswd -x DOMAIN$</command>.
 </para>
 
 </refsect3>
@@ -1095,7 +1185,7 @@ it has the same effect as <command>smbpasswd -x DOMAIN$</command>.
 <title>RPC TRUSTDOM ESTABLISH <replaceable>DOMAIN</replaceable></title>
 
 <para>
-Establish a trust relationship to a trusted domain. 
+Establish a trust relationship to a trusted domain.
 Interdomain account must already be created on the remote PDC.
 This is required for outgoing trusts to work. It makes Samba be a
 trusting domain of a foreign (trusted) domain.
@@ -1236,9 +1326,9 @@ net rpc trust delete \
 <refsect3>
 <title>RPC RIGHTS</title>
 
-<para>This subcommand is used to view and manage Samba's rights assignments (also 
-referred to as privileges).  There are three options currently available: 
-<parameter>list</parameter>, <parameter>grant</parameter>, and 
+<para>This subcommand is used to view and manage Samba's rights assignments (also
+referred to as privileges).  There are three options currently available:
+<parameter>list</parameter>, <parameter>grant</parameter>, and
 <parameter>revoke</parameter>.  More details on Samba's privilege model and its use
 can be found in the Samba-HOWTO-Collection.</para>
 
@@ -1277,14 +1367,14 @@ Force shutting down all applications.
 <varlistentry>
 <term>-t timeout</term>
 <listitem><para>
-Timeout before system will be shut down. An interactive 
+Timeout before system will be shut down. An interactive
 user of the system can use this time to cancel the shutdown.
 </para></listitem>
 </varlistentry>
 
 <varlistentry>
 <term>-C message</term>
-<listitem><para>Display the specified message on the screen to 
+<listitem><para>Display the specified message on the screen to
 announce the shutdown.</para></listitem>
 </varlistentry>
 </variablelist>
@@ -1301,8 +1391,8 @@ to run this against the PDC, from a Samba machine joined as a BDC. </para>
 <refsect2>
 <title>RPC VAMPIRE</title>
 
-<para>Export users, aliases and groups from remote server to 
-local server.  You need to run this against the PDC, from a Samba machine joined as a BDC. 
+<para>Export users, aliases and groups from remote server to
+local server.  You need to run this against the PDC, from a Samba machine joined as a BDC.
 This vampire command cannot be used against an Active Directory, only
 against an NT4 Domain Controller.
 </para>
@@ -1374,13 +1464,13 @@ against an NT4 Domain Controller.
 <title>ADS DNS</title>
 
 <refsect3>
-<title>ADS DNS REGISTER [HOSTNAME [IP [IP.....]]]</title>
-<para>Add host dns entry to Active Directory.</para>
+<title>ADS DNS REGISTER [FQDN [IP [IP.....]]]</title>
+<para>Add dns record to Active Directory. If FQDN is missing, <smbconfoption name="dns hostname"/> is used. If IP is missing, IPs from all network interfaces are added.</para>
 </refsect3>
 
 <refsect3>
-<title>ADS DNS UNREGISTER &lt;HOSTNAME&gt;</title>
-<para>Remove host dns entry from Active Directory.</para>
+<title>ADS DNS UNREGISTER &lt;FQDN&gt;</title>
+<para>Remove FQDN dns entry from Active Directory.</para>
 </refsect3>
 
 </refsect2>
@@ -1396,7 +1486,7 @@ against an NT4 Domain Controller.
 <title>ADS STATUS</title>
 
 <para>Print out status of machine account of the local machine in ADS.
-Prints out quite some debug info. Aimed at developers, regular 
+Prints out quite some debug info. Aimed at developers, regular
 users should use <command>NET ADS TESTJOIN</command>.</para>
 
 </refsect2>
@@ -1408,7 +1498,7 @@ users should use <command>NET ADS TESTJOIN</command>.</para>
 <title>ADS PRINTER INFO [<replaceable>PRINTER</replaceable>] [<replaceable>SERVER</replaceable>]</title>
 
 <para>
-Lookup info for <replaceable>PRINTER</replaceable> on <replaceable>SERVER</replaceable>. The printer name defaults to "*", the 
+Lookup info for <replaceable>PRINTER</replaceable> on <replaceable>SERVER</replaceable>. The printer name defaults to "*", the
 server name defaults to the local host.</para>
 
 </refsect3>
@@ -1432,8 +1522,8 @@ server name defaults to the local host.</para>
 <refsect2>
 <title>ADS SEARCH <replaceable>EXPRESSION</replaceable> <replaceable>ATTRIBUTES...</replaceable></title>
 
-<para>Perform a raw LDAP search on a ADS server and dump the results. The 
-expression is a standard LDAP search expression, and the 
+<para>Perform a raw LDAP search on a ADS server and dump the results. The
+expression is a standard LDAP search expression, and the
 attributes are a list of LDAP fields to show in the results.</para>
 
 <para>Example: <userinput>net ads search '(objectCategory=group)' sAMAccountName</userinput>
@@ -1445,9 +1535,9 @@ attributes are a list of LDAP fields to show in the results.</para>
 <title>ADS DN <replaceable>DN</replaceable> <replaceable>(attributes)</replaceable></title>
 
 <para>
-Perform a raw LDAP search on a ADS server and dump the results. The 
-DN standard LDAP DN, and the attributes are a list of LDAP fields 
-to show in the result. 
+Perform a raw LDAP search on a ADS server and dump the results. The
+DN standard LDAP DN, and the attributes are a list of LDAP fields
+to show in the result.
 </para>
 
 <para>Example: <userinput>net ads dn 'CN=administrator,CN=Users,DC=my,DC=domain' SAMAccountName</userinput></para>
@@ -1458,18 +1548,55 @@ to show in the result.
 <title>ADS KEYTAB <replaceable>CREATE</replaceable></title>
 
 <para>
-Creates a new keytab file if one doesn't exist with default entries. Default
-entries are kerberos principals created from the machinename of the
-client, the UPN (if it exists) and any Windows SPN(s) associated with the
-computer AD account for the client. If a keytab file already exists then only
-missing kerberos principals from the default entries are added. No changes
-are made to the computer AD account.
+Since Samba 4.21.0, keytab file is created as specified in <smbconfoption
+name="sync machine password to keytab"/> . The keytab can be created only when
+machine password is available in secrets.tdb, i.e. only for
+<smbconfoption name="kerberos method">secrets only</smbconfoption> and
+<smbconfoption name="kerberos method">secrets and keytab</smbconfoption>. With
+the smb.conf default values for <smbconfoption name="kerberos method"> secrets
+only</smbconfoption> and <smbconfoption name="sync machine password to keytab"/>
+(default is empty) the keytab is not generated at all.  Keytab with a default
+name containing: SPNs synced from AD, account name COMPUTER$ and principal
+host/dns_hostname is created for <smbconfoption name="kerberos method">secrets
+and keytab</smbconfoption> if <smbconfoption name="sync machine password to
+keytab"/> is missing.
+</para>
+<para>
+Till Samba 4.20, these entries were created by default: the account name
+COMPUTER$, 'host' principal and SPNs synced from AD. Example below generates
+such keytab:
+</para>
+<programlisting>
+<smbconfoption name="sync machine password to keytab">/etc/krb5.keytab:spn_prefixes=host:account_name:sync_spns:sync_kvno:machine_password</smbconfoption>
+</programlisting>
+<para>
+No changes are made to the computer AD account.
 </para>
 </refsect2>
 
 <refsect2>
-<title>ADS KEYTAB <replaceable>ADD</replaceable> <replaceable>(principal | machine | serviceclass | windows SPN</replaceable></title>
+<title>(Removed!) ADS KEYTAB <replaceable>ADD</replaceable> <replaceable>(principal | machine | serviceclass | windows SPN)</replaceable></title>
 
+<para>
+This command is no longer available in Samba 4.21.0 and newer. See <smbconfoption name="sync machine password to keytab"/> for replacement.
+</para>
+
+To replace e.g. call of
+<programlisting>
+net ads keytab add wurst/brot@REALM
+</programlisting>
+Add to smb.conf:
+<programlisting>
+sync machine password to keytab = /path/to/keytab1:spns=wurst/brot@REALM:machine_password
+</programlisting>
+and run:
+<programlisting>
+net ads keytab create
+</programlisting>
+
+<para>
+Original description of this command:
+</para>
 <para>
 Adds a new keytab entry, the entry can be either;
   <variablelist>
@@ -1504,17 +1631,58 @@ Adds a new keytab entry, the entry can be either;
 </para>
 <para>
 Unlike old versions no computer AD objects are modified by this command. To
-preserve the bevhaviour of older clients 'net ads keytab ad_update_ads' is
+preserve the behaviour of older clients 'net ads keytab ad_update_ads' is
 available.
 </para>
 </refsect2>
 
 <refsect2>
-<title>ADS KEYTAB <replaceable>ADD_UPDATE_ADS</replaceable> <replaceable>(principal | machine | serviceclass | windows SPN</replaceable></title>
+<title>(Removed!) ADS KEYTAB <replaceable>DELETE</replaceable> <replaceable>(principal | machine | serviceclass | windows SPN)</replaceable></title>
+
+<para>
+This command is no longer available in Samba 4.21.0 and newer. See <smbconfoption name="sync machine password to keytab"/> for replacement.
+</para>
+
+<para>
+To replace e.g. call of
+<programlisting>
+net ads keytab delete wurst/brot@REALM
+</programlisting>
+Delete from <smbconfoption name="sync machine password to keytab"/> principal "wurst/brot@REALM" and run:
+<programlisting>
+net ads keytab create
+</programlisting>
+
+</para>
+</refsect2>
+
+<refsect2>
+<title>(Removed!) ADS KEYTAB <replaceable>ADD_UPDATE_ADS</replaceable> <replaceable>(principal | machine | serviceclass | windows SPN)</replaceable></title>
+<para>
+This command is no longer available in Samba 4.21.0 and newer. See <smbconfoption name="sync machine password to keytab"/> for replacement.
+</para>
+
+To replace e.g. call of
+<programlisting>
+net ads keytab add_update_ads wurst/brot@REALM
+</programlisting>
+Add to smb.conf:
+<programlisting>
+sync machine password to keytab = /path/to/keytab2:sync_spns:machine_password
+</programlisting>
+and run:
+<programlisting>
+net ads setspn add wurst/brot@REALM
+net ads keytab create
+</programlisting>
+
+<para>
+Original description of this command:
+</para>
 
 <para>
 Adds a new keytab entry (see section for net ads keytab add). In addition to
-adding entries to the keytab file corrosponding Windows SPNs are created
+adding entries to the keytab file corresponding Windows SPNs are created
 from the entry passed to this command. These SPN(s) added to the AD computer
 account object associated with the client machine running this command for
 the following entry types;
@@ -1538,35 +1706,37 @@ the following entry types;
 </refsect2>
 
 <refsect2>
-<title>ADS setspn <replaceable>SETSPN LIST [machine]</replaceable></title>
+<title>ADS SETSPN LIST <replaceable>[machine]</replaceable></title>
 
 <para>
    Lists the Windows SPNs stored in the 'machine' Windows AD Computer object.
    If 'machine' is not specified then computer account for this client is used
    instead.
 </para>
+<para>Example: <userinput>net ads setspn list --machine-pass</userinput></para>
 </refsect2>
 
 <refsect2>
-<title>ADS setspn <replaceable>SETSPN ADD SPN [machine]</replaceable></title>
+<title>ADS SETSPN ADD <replaceable>[machine] SPN</replaceable></title>
 
 <para>
    Adds the specified Windows SPN to the 'machine' Windows AD Computer object.
    If 'machine' is not specified then computer account for this client is used
    instead.
 </para>
+<para>Example: <userinput>net ads setspn add computername host/computername.example.com -U Administrator%Passw0rd</userinput></para>
 </refsect2>
 
 
 <refsect2>
-<title>ADS setspn <replaceable>SETSPN DELETE SPN [machine]</replaceable></title>
+<title>ADS SETSPN DELETE <replaceable>[machine] SPN</replaceable></title>
 
 <para>
    DELETE the specified Window SPN from the 'machine' Windows AD Computer
    object. If 'machine' is not specified then computer account for this
-   client is used
-   instead.
+   client is used instead.
 </para>
+<para>Example: <userinput>net ads setspn delete computername host/computername.example.com -U Administrator%Passw0rd</userinput></para>
 
 </refsect2>
 
@@ -1593,6 +1763,8 @@ the following entry types;
 <para>0x00000004 RC4-HMAC</para>
 <para>0x00000008 AES128-CTS-HMAC-SHA1-96</para>
 <para>0x00000010 AES256-CTS-HMAC-SHA1-96</para>
+<para>0x00000020 AES256-CTS-HMAC-SHA1-96-SK</para>
+<para>0x00080000 RESOURCE-SID-COMPRESSION-DISABLED</para>
 
 </refsect2>
 
@@ -1600,10 +1772,10 @@ the following entry types;
 	<title>ADS ENCTYPES LIST <replaceable>&lt;ACCOUNTNAME&gt;</replaceable></title>
 
 <para>
-	List the value of the "msDS-SupportedEncryptionTypes" attribute of a given account.
+	List the value of the "msDS-SupportedEncryptionTypes" attribute of a given account. Computer account needs '$' at the end.
 </para>
 
-<para>Example: <userinput>net ads enctypes list Computername</userinput></para>
+<para>Example: <userinput>net ads enctypes list Computername$ --machine-pass</userinput></para>
 
 </refsect2>
 
@@ -1611,10 +1783,10 @@ the following entry types;
 	<title>ADS ENCTYPES SET <replaceable>&lt;ACCOUNTNAME&gt;</replaceable> <replaceable>[enctypes]</replaceable></title>
 
 <para>
-	Set the value of the "msDS-SupportedEncryptionTypes" attribute of the LDAP object of ACCOUNTNAME to a given value. If the value is omitted, the value is set to 31 which enables all the currently supported encryption types.
+	Set the value of the "msDS-SupportedEncryptionTypes" attribute of the LDAP object of ACCOUNTNAME to a given value. If the value is omitted, the value is set to 28 which enables RC4-HMAC, AES128-CTS-HMAC-SHA1-96 and AES256-CTS-HMAC-SHA1-96 encryption types.
 </para>
 
-<para>Example: <userinput>net ads enctypes set Computername 24</userinput></para>
+<para>Example: <userinput>net ads enctypes set Computername$ 24 --machine-pass</userinput></para>
 
 </refsect2>
 
@@ -1625,7 +1797,7 @@ the following entry types;
 	Deletes the "msDS-SupportedEncryptionTypes" attribute of the LDAP object of ACCOUNTNAME.
 </para>
 
-<para>Example: <userinput>net ads enctypes set Computername 24</userinput></para>
+<para>Example: <userinput>net ads enctypes delete Computername$ --machine-pass</userinput></para>
 
 </refsect2>
 
@@ -2191,7 +2363,7 @@ share (no creation of new files or directories or writing to files).
 </para>
 
 <para>
-The default if no "acl" is given is "Everyone:R", which means any 
+The default if no "acl" is given is "Everyone:R", which means any
 authenticated user has read-only access.
 </para>
 
@@ -2202,12 +2374,14 @@ defined share. This parameter is only allowed if the global parameter
 "usershare allow guests" has been set to true in the &smb.conf;.
 </para>
 
+<para>
 There is no separate command to modify an existing user defined share,
 just use the "net usershare add [sharename]" command using the same
 sharename as the one you wish to modify and specify the new options
 you wish. The Samba smbd daemon notices user defined share modifications
 at connect time so will see the change immediately, there is no need
 to restart smbd on adding, deleting or changing a user defined share.
+</para>
 </refsect3>
 
 <refsect3>
@@ -3087,7 +3261,484 @@ Requests an offline domain join by providing file-based provisioning data. This 
 
 <para>
 	Example:
-	net offlinejoin requestodj -U administrator%secret loadfile=provisioning.txt
+	net offlinejoin requestodj loadfile=provisioning.txt
+</para>
+
+</refsect3>
+
+</refsect2>
+
+<refsect2>
+<title>WITNESS</title>
+
+<para>Starting with version 4.20 Samba has support for the SMB Witness service in a cluster.
+</para>
+
+<para>The following witness commands are implemented:
+<simplelist>
+<member>
+net witness list             List witness registrations from rpcd_witness_registration.tdb.
+</member>
+<member>
+net witness client-move      Generate client move notifications for witness registrations to a new ip or node.
+</member>
+<member>
+net witness share-move       Generate share move notifications for witness registrations to a new ip or node.
+</member>
+<member>
+net witness force-unregister Force unregistrations for witness registrations.
+</member>
+<member>
+net witness force-response   Force an AsyncNotify response based on json input (mostly for testing).
+</member>
+
+</simplelist>
+</para>
+
+<refsect3>
+<title>WITNESS LIST</title>
+<para>
+    List witness registrations from rpcd_witness_registration.tdb
+</para>
+<para>
+    Note: Only supported with clustering=yes!
+</para>
+<para>
+    Machine readable output can be generated with the following option:
+</para>
+<para>
+        --json
+</para>
+<para>
+    The selection of registrations can be limited by the following options:
+</para>
+<para>
+        --witness-registration=REGISTRATION_UUID
+</para>
+<para>
+          This does a direct lookup for REGISTRATION_UUID
+          instead of doing a database traversal.
+</para>
+<para>
+    The following options all take a POSIX Extended Regular Expression,
+    which can further filter the selection of registrations.
+    These options are applied as logical AND, but each REGEX
+    allows specifying multiple strings using the pipe symbol.
+</para>
+<para>
+        --witness-net-name=REGEX
+</para>
+<para>
+          This specifies the 'server name' the client
+          registered for monitoring.
+</para>
+<para>
+        --witness-share-name=REGEX
+</para>
+<para>
+          This specifies the 'share name' the client
+          registered for monitoring.
+          Note that the share name is optional in the
+          registration, otherwise an empty string is
+          matched.
+</para>
+<para>
+        --witness-ip-address=REGEX
+</para>
+<para>
+          This specifies the ip address the client
+          registered for monitoring.
+</para>
+<para>
+        --witness-client-computer-name=REGEX
+</para>
+<para>
+          This specifies the client computer name the client
+          specified in the registration.
+          Note it is just a string chosen by the client itself.
+</para>
+
+</refsect3>
+
+<refsect3>
+<title>WITNESS CLIENT-MOVE</title>
+<para>
+    Generate client move notifications for witness registrations to a new ip or node
+</para>
+<para>
+    Note: Only supported with clustering=yes!
+</para>
+<para>
+    Machine readable output can be generated with the following option:
+</para>
+<para>
+        --json
+</para>
+<para>
+    The selection of registrations can be limited by the following options:
+</para>
+<para>
+        --witness-registration=REGISTRATION_UUID
+</para>
+<para>
+          This does a direct lookup for REGISTRATION_UUID
+          instead of doing a database traversal.
+</para>
+<para>
+    The following options all take a POSIX Extended Regular Expression,
+    which can further filter the selection of registrations.
+    These options are applied as logical AND, but each REGEX
+    allows specifying multiple strings using the pipe symbol.
+</para>
+<para>
+        --witness-net-name=REGEX
+</para>
+<para>
+          This specifies the 'server name' the client
+          registered for monitoring.
+</para>
+<para>
+        --witness-share-name=REGEX
+</para>
+<para>
+          This specifies the 'share name' the client
+          registered for monitoring.
+          Note that the share name is optional in the
+          registration, otherwise an empty string is
+          matched.
+</para>
+<para>
+        --witness-ip-address=REGEX
+</para>
+<para>
+          This specifies the ip address the client
+          registered for monitoring.
+</para>
+<para>
+        --witness-client-computer-name=REGEX
+</para>
+<para>
+          This specifies the client computer name the client
+          specified in the registration.
+          Note it is just a string chosen by the client itself.
+</para>
+<para>
+    If the update should be applied to all registrations
+    it needs to be explicitly specified:
+</para>
+<para>
+        --witness-apply-to-all
+</para>
+<para>
+          This selects all registrations.
+          Note: This is mutual exclusive to the above options.
+</para>
+<para>
+    The content of the CLIENT_MOVE notification contains ip addresses
+    specified by (exactly one) of the following options:
+</para>
+<para>
+        --witness-new-node=NODEID
+</para>
+<para>
+          By specifying a NODEID all ip addresses
+          currently available on the given node are
+          included in the response.
+          By specifying '-1' as NODEID all ip addresses
+          of the cluster are included in the response.
+</para>
+<para>
+        --witness-new-ip=IPADDRESS
+</para>
+<para>
+          By specifying an IPADDRESS only the specified
+          ip address is included in the response.
+</para>
+
+</refsect3>
+
+<refsect3>
+<title>WITNESS SHARE-MOVE</title>
+<para>
+    Generate share move notifications for witness registrations to a new ip or node
+</para>
+<para>
+    Note: Only supported with clustering=yes!
+</para>
+<para>
+    Machine readable output can be generated with the following option:
+</para>
+<para>
+        --json
+</para>
+<para>
+    The selection of registrations can be limited by the following options:
+</para>
+<para>
+        --witness-registration=REGISTRATION_UUID
+</para>
+<para>
+          This does a direct lookup for REGISTRATION_UUID
+          instead of doing a database traversal.
+</para>
+<para>
+    The following options all take a POSIX Extended Regular Expression,
+    which can further filter the selection of registrations.
+    These options are applied as logical AND, but each REGEX
+    allows specifying multiple strings using the pipe symbol.
+</para>
+<para>
+        --witness-net-name=REGEX
+</para>
+<para>
+          This specifies the 'server name' the client
+          registered for monitoring.
+</para>
+<para>
+        --witness-share-name=REGEX
+</para>
+<para>
+          This specifies the 'share name' the client
+          registered for monitoring.
+          Note that the share name is optional in the
+          registration, otherwise an empty string is
+          matched.
+</para>
+<para>
+        --witness-ip-address=REGEX
+</para>
+<para>
+          This specifies the ip address the client
+          registered for monitoring.
+</para>
+<para>
+        --witness-client-computer-name=REGEX
+</para>
+<para>
+          This specifies the client computer name the client
+          specified in the registration.
+          Note it is just a string chosen by the client itself.
+</para>
+<para>
+    If the update should be applied to all registrations
+    it needs to be explicitly specified:
+</para>
+<para>
+        --witness-apply-to-all
+</para>
+<para>
+          This selects all registrations.
+          Note: This is mutual exclusive to the above options.
+</para>
+<para>
+    Note: This only applies to registrations with a non empty share name!
+</para>
+<para>
+    The content of the SHARE_MOVE notification contains ip addresses
+    specified by (exactly one) of the following options:
+</para>
+<para>
+        --witness-new-node=NODEID
+</para>
+<para>
+          By specifying a NODEID all ip addresses
+          currently available on the given node are
+          included in the response.
+          By specifying '-1' as NODEID all ip addresses
+          of the cluster are included in the response.
+</para>
+<para>
+        --witness-new-ip=IPADDRESS
+</para>
+<para>
+          By specifying an IPADDRESS only the specified
+          ip address is included in the response.
+</para>
+
+</refsect3>
+
+<refsect3>
+<title>WITNESS FORCE-UNREGISTER</title>
+<para>
+    Force unregistrations for witness registrations
+</para>
+<para>
+    Note: Only supported with clustering=yes!
+</para>
+<para>
+    Machine readable output can be generated with the following option:
+</para>
+<para>
+        --json
+</para>
+<para>
+    The selection of registrations can be limited by the following options:
+</para>
+<para>
+        --witness-registration=REGISTRATION_UUID
+</para>
+<para>
+          This does a direct lookup for REGISTRATION_UUID
+          instead of doing a database traversal.
+</para>
+<para>
+    The following options all take a POSIX Extended Regular Expression,
+    which can further filter the selection of registrations.
+    These options are applied as logical AND, but each REGEX
+    allows specifying multiple strings using the pipe symbol.
+</para>
+<para>
+        --witness-net-name=REGEX
+</para>
+<para>
+          This specifies the 'server name' the client
+          registered for monitoring.
+</para>
+<para>
+        --witness-share-name=REGEX
+</para>
+<para>
+          This specifies the 'share name' the client
+          registered for monitoring.
+          Note that the share name is optional in the
+          registration, otherwise an empty string is
+          matched.
+</para>
+<para>
+        --witness-ip-address=REGEX
+</para>
+<para>
+          This specifies the ip address the client
+          registered for monitoring.
+</para>
+<para>
+        --witness-client-computer-name=REGEX
+</para>
+<para>
+          This specifies the client computer name the client
+          specified in the registration.
+          Note it is just a string chosen by the client itself.
+</para>
+<para>
+    If the update should be applied to all registrations
+    it needs to be explicitly specified:
+</para>
+<para>
+        --witness-apply-to-all
+</para>
+<para>
+          This selects all registrations.
+          Note: This is mutual exclusive to the above options.
+</para>
+<para>
+    The selected registrations are removed on the server and
+    any pending AsyncNotify request will get a NOT_FOUND error.
+</para>
+<para>
+    Typically this triggers a clean re-registration on the client.
+</para>
+
+</refsect3>
+
+<refsect3>
+<title>WITNESS FORCE-RESPONSE</title>
+<para>
+    Force an AsyncNotify response based on json input (mostly for testing)
+</para>
+<para>
+    Note: Only supported with clustering=yes!
+</para>
+<para>
+    Machine readable output can be generated with the following option:
+</para>
+<para>
+        --json
+</para>
+<para>
+    The selection of registrations can be limited by the following options:
+</para>
+<para>
+        --witness-registration=REGISTRATION_UUID
+</para>
+<para>
+          This does a direct lookup for REGISTRATION_UUID
+          instead of doing a database traversal.
+</para>
+<para>
+    The following options all take a POSIX Extended Regular Expression,
+    which can further filter the selection of registrations.
+    These options are applied as logical AND, but each REGEX
+    allows specifying multiple strings using the pipe symbol.
+</para>
+<para>
+        --witness-net-name=REGEX
+</para>
+<para>
+          This specifies the 'server name' the client
+          registered for monitoring.
+</para>
+<para>
+        --witness-share-name=REGEX
+</para>
+<para>
+          This specifies the 'share name' the client
+          registered for monitoring.
+          Note that the share name is optional in the
+          registration, otherwise an empty string is
+          matched.
+</para>
+<para>
+        --witness-ip-address=REGEX
+</para>
+<para>
+          This specifies the ip address the client
+          registered for monitoring.
+</para>
+<para>
+        --witness-client-computer-name=REGEX
+</para>
+<para>
+          This specifies the client computer name the client
+          specified in the registration.
+          Note it is just a string chosen by the client itself.
+</para>
+<para>
+    If the update should be applied to all registrations
+    it needs to be explicitly specified:
+</para>
+<para>
+        --witness-apply-to-all
+</para>
+<para>
+          This selects all registrations.
+          Note: This is mutual exclusive to the above options.
+</para>
+<para>
+    Note this is designed for testing and debugging!
+</para>
+<para>
+    In short it is not designed to be used by administrators,
+    but developers and automated tests.
+</para>
+<para>
+    By default an empty response with WERR_OK is generated,
+    but basically any valid response can be specified by a
+    specifying a JSON string:
+</para>
+<para>
+        --witness-forced-response=JSON
+</para>
+<para>
+          This allows the generation of very complex
+          witness_notifyResponse structures.
+</para>
+<para>
+    As this is for developers, please read the code
+    in order to understand all possible values
+    of the JSON string format...
+</para>
+<para>
+    See 'net help witness force-response' for further details.
 </para>
 
 </refsect3>
@@ -3106,20 +3757,20 @@ Requests an offline domain join by providing file-based provisioning data. This 
 <refsect1>
 	<title>VERSION</title>
 
-	<para>This man page is complete for version 3 of the Samba 
+	<para>This man page is complete for version 3 of the Samba
 	suite.</para>
 </refsect1>
 
 <refsect1>
 	<title>AUTHOR</title>
-	
-	<para>The original Samba software and related utilities 
+
+	<para>The original Samba software and related utilities
 	were created by Andrew Tridgell. Samba is now developed
-	by the Samba Team as an Open Source project similar 
+	by the Samba Team as an Open Source project similar
 	to the way the Linux kernel is developed.</para>
 
 	<para>The net manpage was written by Jelmer Vernooij.</para>
-	
+
 </refsect1>
 
 </refentry>

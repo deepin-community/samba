@@ -24,6 +24,7 @@
 
 #include "includes.h"
 #include "rpc_client/rpc_client.h"
+#include "rpc_client/cli_pipe.h"
 #include "../librpc/gen_ndr/ndr_lsa_c.h"
 #include "rpc_client/cli_lsarpc.h"
 #include "rpc_client/init_lsa.h"
@@ -126,30 +127,98 @@ NTSTATUS dcerpc_lsa_open_policy2(struct dcerpc_binding_handle *h,
 				      result);
 }
 
-/** Open a LSA policy handle
-  *
-  * @param cli Handle on an initialised SMB connection
-  */
-
-NTSTATUS rpccli_lsa_open_policy2(struct rpc_pipe_client *cli,
-				 TALLOC_CTX *mem_ctx, bool sec_qos,
-				 uint32_t des_access, struct policy_handle *pol)
+NTSTATUS dcerpc_lsa_open_policy3(struct dcerpc_binding_handle *h,
+				 TALLOC_CTX *mem_ctx,
+				 const char *srv_name_slash,
+				 bool sec_qos,
+				 uint32_t des_access,
+				 uint32_t *out_version,
+				 union lsa_revision_info *out_revision_info,
+				 struct policy_handle *pol,
+				 NTSTATUS *result)
 {
-	NTSTATUS status;
-	NTSTATUS result = NT_STATUS_UNSUCCESSFUL;
+	struct lsa_ObjectAttribute attr = { .len = 0x18, };
+	struct lsa_QosInfo qos;
+	union lsa_revision_info in_revision_info = {
+		.info1 = {
+			.revision = 1,
+		},
+	};
+	uint32_t in_version = 1;
 
-	status = dcerpc_lsa_open_policy2(cli->binding_handle,
-					 mem_ctx,
-					 cli->srv_name_slash,
-					 sec_qos,
-					 des_access,
-					 pol,
-					 &result);
-	if (!NT_STATUS_IS_OK(status)) {
-		return status;
+	if (sec_qos) {
+		qos.len			= 0xc;
+		qos.impersonation_level	= 2;
+		qos.context_mode	= 1;
+		qos.effective_only	= 0;
+
+		attr.sec_qos		= &qos;
 	}
 
-	return result;
+	return dcerpc_lsa_OpenPolicy3(h,
+				      mem_ctx,
+				      srv_name_slash,
+				      &attr,
+				      des_access,
+				      in_version,
+				      &in_revision_info,
+				      out_version,
+			              out_revision_info,
+				      pol,
+				      result);
+}
+
+NTSTATUS dcerpc_lsa_open_policy_fallback(struct rpc_pipe_client *rpccli,
+					 TALLOC_CTX *mem_ctx,
+					 const char *srv_name_slash,
+					 bool sec_qos,
+					 uint32_t desired_access,
+					 uint32_t *out_version,
+					 union lsa_revision_info *out_revision_info,
+					 struct policy_handle *pol,
+					 NTSTATUS *result)
+{
+	struct dcerpc_binding_handle *h = rpccli->binding_handle;
+	NTSTATUS status;
+	bool policy2 = false;
+
+	status = dcerpc_lsa_open_policy3(h,
+					 mem_ctx,
+					 srv_name_slash,
+					 sec_qos,
+					 desired_access,
+					 out_version,
+					 out_revision_info,
+					 pol,
+					 result);
+	if (NT_STATUS_EQUAL(status, NT_STATUS_RPC_PROCNUM_OUT_OF_RANGE)) {
+		policy2 = true;
+	} else if (NT_STATUS_EQUAL(status, NT_STATUS_ACCESS_DENIED)) {
+		status = cli_rpc_pipe_reopen_np_noauth(rpccli);
+		if (!NT_STATUS_IS_OK(status)) {
+			return status;
+		}
+		policy2 = true;
+	}
+
+	if (policy2) {
+		*out_version = 1;
+		*out_revision_info = (union lsa_revision_info) {
+			.info1 = {
+				.revision = 1,
+			}
+		};
+
+		status = dcerpc_lsa_open_policy2(h,
+						 mem_ctx,
+						 srv_name_slash,
+						 sec_qos,
+						 desired_access,
+						 pol,
+						 result);
+	}
+
+	return status;
 }
 
 /* Lookup a list of sids
@@ -695,12 +764,23 @@ NTSTATUS dcerpc_lsa_lookup_names_generic(struct dcerpc_binding_handle *h,
 		}
 
 		if (use_lookupnames4) {
-			sid_copy(sid, sid_array3.sids[i].sid);
+			if (sid_array3.sids[i].sid != NULL) {
+				sid_copy(sid, sid_array3.sids[i].sid);
+			} else {
+				ZERO_STRUCTP(sid);
+				(*types)[i] = SID_NAME_UNKNOWN;
+			}
 		} else {
-			sid_copy(sid, domains->domains[dom_idx].sid);
+			if (domains->domains[dom_idx].sid != NULL) {
+				sid_copy(sid, domains->domains[dom_idx].sid);
 
-			if (sid_array.sids[i].rid != 0xffffffff) {
-				sid_append_rid(sid, sid_array.sids[i].rid);
+				if (sid_array.sids[i].rid != 0xffffffff) {
+					sid_append_rid(sid,
+						       sid_array.sids[i].rid);
+				}
+			} else {
+				ZERO_STRUCTP(sid);
+				(*types)[i] = SID_NAME_UNKNOWN;
 			}
 		}
 

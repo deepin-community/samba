@@ -1,0 +1,2 @@
+usr/lib/${DEB_HOST_MULTIARCH}/libpytalloc-util.cpython-*.so.*
+usr/lib/python3/dist-packages/talloc.cpython-*.so

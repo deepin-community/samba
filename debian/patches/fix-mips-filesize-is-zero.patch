@@ -2,10 +2,8 @@ Description: fix mips filesize is zero
 Author: caitongxun <caitongxun@deepin.com>
 Forwarded: not-needed
 ---
-Index: samba-4.17.12.2/source3/libsmb/libsmb_stat.c
-===================================================================
---- samba-4.17.12.2.orig/source3/libsmb/libsmb_stat.c
-+++ samba-4.17.12.2/source3/libsmb/libsmb_stat.c
+--- a/source3/libsmb/libsmb_stat.c
++++ b/source3/libsmb/libsmb_stat.c
 @@ -22,6 +22,10 @@
     along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */

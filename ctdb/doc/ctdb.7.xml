@@ -1,4 +1,4 @@
-<?xml version="1.0" encoding="iso-8859-1"?>
+<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE refentry
 	PUBLIC "-//OASIS//DTD DocBook XML V4.5//EN"
 	"http://www.oasis-open.org/docbook/xml/4.5/docbookx.dtd">
@@ -233,8 +233,8 @@
 
       <para>
 	Some users like to put this configuration file in their
-	cluster filesystem.  A symbolic link should be used in this
-	case.
+	cluster filesystem.  A symbolic link or the
+	<parameter>nodes list</parameter> parameter can be used.
       </para>
 
       <para>

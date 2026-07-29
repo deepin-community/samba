@@ -37,6 +37,7 @@
 #include "cmdline_contexts.h"
 #include "../librpc/gen_ndr/ndr_samr.h"
 #include "lib/cmdline/cmdline.h"
+#include "lib/param/param.h"
 
 enum pipe_auth_type_spnego {
 	PIPE_AUTH_TYPE_SPNEGO_NONE = 0,
@@ -331,7 +332,8 @@ static NTSTATUS cmd_debuglevel(struct rpc_pipe_client *cli, TALLOC_CTX *mem_ctx,
 	}
 
 	if (argc == 2) {
-		lp_set_cmdline("log level", argv[1]);
+		struct loadparm_context *lp_ctx = samba_cmdline_get_lp_ctx();
+		lpcfg_set_cmdline(lp_ctx, "log level", argv[1]);
 	}
 
 	printf("debuglevel is %d\n", DEBUGLEVEL);
@@ -360,16 +362,23 @@ static NTSTATUS cmd_set_ss_level(struct dcerpc_binding *binding)
         	struct cmd_set *tmp_set;
 
 		for (tmp_set = tmp->cmd_set; tmp_set->name; tmp_set++) {
+			struct dcerpc_binding_handle *tmp_b = NULL;
+			enum dcerpc_AuthType tmp_auth_type;
+			enum dcerpc_AuthLevel tmp_auth_level;
+
 			if (tmp_set->rpc_pipe == NULL) {
 				continue;
 			}
 
-			if ((tmp_set->rpc_pipe->auth->auth_type
-			     != auth_type)
-			    || (tmp_set->rpc_pipe->auth->auth_level
-				!= auth_level)) {
+			tmp_b = tmp_set->rpc_pipe->binding_handle;
+			dcerpc_binding_handle_auth_info(tmp_b,
+							&tmp_auth_type,
+							&tmp_auth_level);
+
+			if (tmp_auth_type != auth_type ||
+			    tmp_auth_level != auth_level)
+			{
 				TALLOC_FREE(tmp_set->rpc_pipe);
-				tmp_set->rpc_pipe = NULL;
 			}
 		}
 	}
@@ -387,13 +396,17 @@ static NTSTATUS cmd_set_transport(struct dcerpc_binding *b)
 		struct cmd_set *tmp_set;
 
 		for (tmp_set = tmp->cmd_set; tmp_set->name; tmp_set++) {
+			struct dcerpc_binding_handle *tmp_b = NULL;
+			enum dcerpc_transport_t tmp_t;
+
 			if (tmp_set->rpc_pipe == NULL) {
 				continue;
 			}
 
-			if (tmp_set->rpc_pipe->transport->transport != t) {
+			tmp_b = tmp_set->rpc_pipe->binding_handle;
+			tmp_t = dcerpc_binding_handle_get_transport(tmp_b);
+			if (tmp_t != t) {
 				TALLOC_FREE(tmp_set->rpc_pipe);
-				tmp_set->rpc_pipe = NULL;
 			}
 		}
 	}
@@ -945,6 +958,7 @@ static NTSTATUS do_cmd(struct cli_state *cli,
 					transport,
 					auth_type,
 					auth_level,
+					NULL, /* target_service */
 					remote_name,
 					remote_sockaddr,
 					creds,
@@ -1004,6 +1018,11 @@ static NTSTATUS do_cmd(struct cli_state *cli,
 					return ntresult;
 				}
 
+				cli_credentials_add_gensec_features(
+					trust_creds,
+					GENSEC_FEATURE_NO_DELEGATION,
+					CRED_SPECIFIED);
+
 				ntresult = rpccli_create_netlogon_creds_ctx(
 					trust_creds,
 					dc_name,
@@ -1022,6 +1041,8 @@ static NTSTATUS do_cmd(struct cli_state *cli,
 				ntresult = rpccli_setup_netlogon_creds(
 					cli,
 					NCACN_NP,
+					remote_name,
+					remote_sockaddr,
 					rpcclient_netlogon_creds,
 					false, /* force_reauth */
 					trust_creds);
@@ -1164,6 +1185,7 @@ out_free:
 	const char *binding_string = NULL;
 	const char *host;
 	struct cli_credentials *creds = NULL;
+	struct loadparm_context *lp_ctx = NULL;
 	bool ok;
 
 	/* make sure the vars that get altered (4th field) are in
@@ -1194,7 +1216,8 @@ out_free:
 	if (!ok) {
 		DBG_ERR("Failed to init cmdline parser!\n");
 	}
-	lp_set_cmdline("log level", "0");
+	lp_ctx = samba_cmdline_get_lp_ctx();
+	lpcfg_set_cmdline(lp_ctx, "log level", "0");
 
 	/* Parse options */
 	pc = samba_popt_get_context(getprogname(),
@@ -1301,16 +1324,17 @@ out_free:
 	}
 
 	if (transport == NCACN_NP) {
-		nt_status = cli_full_connection_creds(
-			&cli,
-			lp_netbios_name(),
-			host,
-			opt_ipaddr ? &server_ss : NULL,
-			opt_port,
-			"IPC$",
-			"IPC",
-			creds,
-			flags);
+		nt_status = cli_full_connection_creds(frame,
+						      &cli,
+						      lp_netbios_name(),
+						      host,
+						      opt_ipaddr ? &server_ss
+								 : NULL,
+						      opt_port,
+						      "IPC$",
+						      "IPC",
+						      creds,
+						      flags);
 
 		if (!NT_STATUS_IS_OK(nt_status)) {
 			DEBUG(0, ("Cannot connect to server.  Error was %s\n",

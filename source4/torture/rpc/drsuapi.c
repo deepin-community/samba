@@ -690,7 +690,7 @@ bool test_QuerySitesByCost(struct torture_context *tctx,
 					 "dcerpc_drsuapi_QuerySitesByCost");
 		torture_assert_int_equal(tctx,
 					 r.out.ctr->ctr1.info[1].site_cost, -1,
-					 "dcerpc_drsuapi_QuerySitesByCost exptected site cost");
+					 "dcerpc_drsuapi_QuerySitesByCost expected site cost");
 	}
 
 	return true;
@@ -863,6 +863,7 @@ static bool __test_DsBind_assoc_group(struct torture_context *tctx,
 	struct dcerpc_pipe *p2 = NULL;
 	TALLOC_CTX *mem_ctx = priv;
 	struct dcerpc_binding *binding = NULL;
+	const struct dcerpc_binding *binding2 = NULL;
 	struct policy_handle ds_bind_handle = { .handle_type = 0, };
 
 	torture_comment(tctx, "%s: starting...\n", testname);
@@ -881,10 +882,12 @@ static bool __test_DsBind_assoc_group(struct torture_context *tctx,
 							 tctx->lp_ctx),
 				   "connect p1");
 
+	binding2 = dcerpc_binding_handle_get_binding(p1->binding_handle);
+
 	torture_assert_ntstatus_ok(tctx,
 				   dcerpc_pipe_connect_b(tctx,
 							 &p2,
-							 p1->binding,
+							 binding2,
 							 &ndr_table_drsuapi,
 							 creds,
 							 tctx->ev,

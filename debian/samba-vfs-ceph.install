@@ -1,0 +1,6 @@
+usr/lib/${DEB_HOST_MULTIARCH}/samba/vfs/ceph.so
+usr/lib/${DEB_HOST_MULTIARCH}/samba/vfs/ceph_new.so
+usr/lib/${DEB_HOST_MULTIARCH}/samba/vfs/ceph_snapshots.so
+usr/share/man/man8/vfs_ceph.8
+usr/share/man/man8/vfs_ceph_new.8
+usr/share/man/man8/vfs_ceph_snapshots.8

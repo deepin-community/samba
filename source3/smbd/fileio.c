@@ -80,7 +80,7 @@ static ssize_t real_write_file(struct smb_request *req,
 	ssize_t ret;
 	bool ok;
 
-	ok = vfs_valid_pwrite_range(pos, n);
+	ok = vfs_valid_pwrite_range(fsp, pos, n);
 	if (!ok) {
 		errno = EINVAL;
 		return -1;
@@ -148,7 +148,7 @@ void trigger_write_time_update(struct files_struct *fsp)
 {
 	int delay;
 
-	if (fsp->posix_flags & FSP_POSIX_FLAGS_OPEN) {
+	if (fsp->fsp_flags.posix_open) {
 		/* Don't use delayed writes on POSIX files. */
 		return;
 	}
@@ -195,7 +195,7 @@ void trigger_write_time_update_immediate(struct files_struct *fsp)
 
 	init_smb_file_time(&ft);
 
-	if (fsp->posix_flags & FSP_POSIX_FLAGS_OPEN) {
+	if (fsp->fsp_flags.posix_open) {
 		/* Don't use delayed writes on POSIX files. */
 		return;
 	}
@@ -237,16 +237,13 @@ void mark_file_modified(files_struct *fsp)
 
 	fsp->fsp_flags.modified = true;
 
-	if (fsp->posix_flags & FSP_POSIX_FLAGS_OPEN) {
-		return;
-	}
 	if (!(lp_store_dos_attributes(SNUM(fsp->conn)) ||
 	      MAP_ARCHIVE(fsp->conn))) {
 		return;
 	}
 
 	dosmode = fdos_mode(fsp);
-	if (IS_DOS_ARCHIVE(dosmode)) {
+	if (dosmode & FILE_ATTRIBUTE_ARCHIVE) {
 		return;
 	}
 	file_set_dosmode(fsp->conn, fsp->fsp_name,

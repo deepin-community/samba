@@ -27,6 +27,7 @@
 #include <regex.h>
 
 #include "lib/util/access.h"
+#include "nsswitch/libwbclient/wbclient.h"
 
 /* The following definitions come from lib/adt_tree.c  */
 
@@ -81,9 +82,6 @@ struct file_id vfs_file_id_from_sbuf(connection_struct *conn, const SMB_STRUCT_S
 NTSTATUS vfs_at_fspcwd(TALLOC_CTX *mem_ctx,
 		       struct connection_struct *conn,
 		       struct files_struct **_fsp);
-
-NTSTATUS vfs_fget_dos_attributes(struct files_struct *fsp,
-				 uint32_t *dosmode);
 
 #include "source3/lib/interface.h"
 
@@ -176,6 +174,8 @@ void update_stat_ex_mtime(struct stat_ex *dst, struct timespec write_ts);
 void update_stat_ex_create_time(struct stat_ex *dst, struct timespec create_time);
 void update_stat_ex_from_saved_stat(struct stat_ex *dst,
 				    const struct stat_ex *src);
+void copy_stat_ex_timestamps(struct stat_ex *st,
+			     const struct smb_file_time *ft);
 int sys_stat(const char *fname, SMB_STRUCT_STAT *sbuf,
 	     bool fake_dir_create_times);
 int sys_fstat(int fd, SMB_STRUCT_STAT *sbuf,
@@ -208,8 +208,11 @@ char *sys_realpath(const char *path);
 int sys_get_number_of_cores(void);
 #endif
 
+struct sys_proc_fd_path_buf {
+	char buf[35]; /* "/proc/self/fd/" + strlen(2^64) + 0-terminator */
+};
 bool sys_have_proc_fds(void);
-const char *sys_proc_fd_path(int fd, char *buf, size_t bufsize);
+char *sys_proc_fd_path(int fd, struct sys_proc_fd_path_buf *buf);
 
 struct stat;
 void init_stat_ex_from_stat (struct stat_ex *dst,
@@ -222,16 +225,8 @@ bool getgroups_unix_user(TALLOC_CTX *mem_ctx, const char *user,
 			 gid_t primary_gid,
 			 gid_t **ret_groups, uint32_t *p_ngroups);
 
-/* The following definitions come from lib/tallocmsg.c  */
-
-void register_msg_pool_usage(TALLOC_CTX *mem_ctx,
-			     struct messaging_context *msg_ctx);
-
 /* The following definitions come from lib/time.c  */
 
-void push_dos_date(uint8_t *buf, int offset, time_t unixdate, int zone_offset);
-void push_dos_date2(uint8_t *buf,int offset,time_t unixdate, int zone_offset);
-void push_dos_date3(uint8_t *buf,int offset,time_t unixdate, int zone_offset);
 uint32_t convert_time_t_to_uint32_t(time_t t);
 time_t convert_uint32_t_to_time_t(uint32_t u);
 bool nt_time_is_zero(const NTTIME *nt);
@@ -241,7 +236,7 @@ int set_server_zone_offset(time_t t);
 char *timeval_string(TALLOC_CTX *ctx, const struct timeval *tp, bool hires);
 char *current_timestring(TALLOC_CTX *ctx, bool hires);
 void srv_put_dos_date(char *buf,int offset,time_t unixdate);
-void srv_put_dos_date2(char *buf,int offset, time_t unixdate);
+void srv_put_dos_date2_ts(char *buf, int offset, struct timespec unix_ts);
 void srv_put_dos_date3(char *buf,int offset,time_t unixdate);
 void round_timespec(enum timestamp_set_resolution res, struct timespec *ts);
 void put_long_date_timespec(enum timestamp_set_resolution res, char *p, struct timespec ts);
@@ -257,7 +252,7 @@ time_t make_unix_date3(const void *date_ptr, int zone_offset);
 time_t srv_make_unix_date(const void *date_ptr);
 time_t srv_make_unix_date2(const void *date_ptr);
 time_t srv_make_unix_date3(const void *date_ptr);
-struct timespec interpret_long_date(const char *p);
+struct timespec interpret_long_date(NTTIME nt);
 void TimeInit(void);
 void get_process_uptime(struct timeval *ret_time);
 void get_startup_time(struct timeval *ret_time);
@@ -280,7 +275,6 @@ bool is_allowed_domain(const char *domain_name);
 
 /* The following definitions come from lib/util.c  */
 
-enum protocol_types get_Protocol(void);
 void set_Protocol(enum protocol_types  p);
 void gfree_all( void );
 bool file_exist_stat(const char *fname,SMB_STRUCT_STAT *sbuf,
@@ -320,10 +314,24 @@ char *gidtoname(gid_t gid);
 uid_t nametouid(const char *name);
 gid_t nametogid(const char *name);
 void smb_panic_s3(const char *why);
+void log_panic_action(const char *msg);
 const char *readdirname(DIR *p);
-bool is_in_path(const char *name, name_compare_entry *namelist, bool case_sensitive);
-void set_namearray(name_compare_entry **ppname_array, const char *namelist);
-void free_namearray(name_compare_entry *name_array);
+bool is_in_path(const char *name,
+		struct name_compare_entry *namelist,
+		bool case_sensitive);
+bool token_contains_name(TALLOC_CTX *mem_ctx,
+			 const char *username,
+			 const char *domain,
+			 const char *sharename,
+			 const struct security_token *token,
+			 const char *name,
+			 bool *match);
+bool append_to_namearray(TALLOC_CTX *mem_ctx,
+			 const char *namelist_in,
+			 struct name_compare_entry **_name_array);
+bool set_namearray(TALLOC_CTX *mem_ctx,
+		   const char *namelist,
+		   struct name_compare_entry **_name_array);
 bool fcntl_lock(int fd, int op, off_t offset, off_t count, int type);
 bool fcntl_getlock(int fd, int op, off_t *poffset, off_t *pcount, int *ptype, pid_t *ppid);
 int map_process_lock_to_ofd_lock(int op);
@@ -347,10 +355,8 @@ bool parent_dirname(TALLOC_CTX *mem_ctx, const char *dir, char **parent,
 bool ms_has_wild(const char *s);
 bool ms_has_wild_w(const smb_ucs2_t *s);
 bool mask_match(const char *string, const char *pattern, bool is_case_sensitive);
-bool mask_match_search(const char *string, const char *pattern, bool is_case_sensitive);
 bool mask_match_list(const char *string, char **list, int listLen, bool is_case_sensitive);
 #include "lib/util/unix_match.h"
-bool name_to_fqdn(fstring fqdn, const char *name);
 
 #include "lib/util_procid.h"
 
@@ -394,11 +400,9 @@ void smb_nscd_flush_group_cache(void);
 
 /* The following definitions come from lib/util_nttoken.c  */
 
-struct security_token *dup_nt_token(TALLOC_CTX *mem_ctx, const struct security_token *ptoken);
-NTSTATUS merge_nt_token(TALLOC_CTX *mem_ctx,
-			const struct security_token *token_1,
-			const struct security_token *token_2,
-			struct security_token **token_out);
+NTSTATUS merge_with_system_token(TALLOC_CTX *mem_ctx,
+				 const struct security_token *token_1,
+				 struct security_token **token_out);
 bool token_sid_in_ace(const struct security_token *token, const struct security_ace *ace);
 
 /* The following definitions come from lib/util_sec.c  */
@@ -536,15 +540,8 @@ char *realloc_string_sub(char *string,
 			const char *insert);
 void all_string_sub(char *s,const char *pattern,const char *insert, size_t len);
 char *string_truncate(char *s, unsigned int length);
-char *strchr_m(const char *src, char c);
-char *strrchr_m(const char *s, char c);
-char *strnrchr_m(const char *s, char c, unsigned int n);
-char *strstr_m(const char *src, const char *findstr);
 bool strlower_m(char *s);
 bool strupper_m(char *s);
-size_t strlen_m(const char *s);
-size_t strlen_m_term(const char *s);
-size_t strlen_m_term_null(const char *s);
 int fstr_sprintf(fstring s, const char *fmt, ...);
 
 uint64_t STR_TO_SMB_BIG_UINT(const char *nptr, const char **entptr);
@@ -579,16 +576,6 @@ bool wins_server_tag_ips(const char *tag, TALLOC_CTX *mem_ctx,
 			 struct in_addr **pservers, size_t *pnum_servers);
 unsigned wins_srv_count_tag(const char *tag);
 
-#ifndef ASN1_MAX_OIDS
-#define ASN1_MAX_OIDS 20
-#endif
-bool spnego_parse_negTokenInit(TALLOC_CTX *ctx,
-			       DATA_BLOB blob,
-			       char *OIDs[ASN1_MAX_OIDS],
-			       char **principal,
-			       DATA_BLOB *secblob);
-DATA_BLOB spnego_gen_krb5_wrap(TALLOC_CTX *ctx, const DATA_BLOB ticket, const uint8_t tok_id[2]);
-
 /* The following definitions come from libsmb/conncache.c  */
 
 NTSTATUS check_negative_conn_cache( const char *domain, const char *server);
@@ -598,6 +585,7 @@ void flush_negative_conn_cache_for_domain(const char *domain);
 /* The following definitions come from libsmb/errormap.c  */
 
 NTSTATUS dos_to_ntstatus(uint8_t eclass, uint32_t ecode);
+NTSTATUS map_nt_error_from_wbcErr(wbcErr wbc_err);
 
 /* The following definitions come from libsmb/namecache.c  */
 
@@ -725,6 +713,27 @@ NTSTATUS safe_symlink_target_path(TALLOC_CTX *mem_ctx,
 				  const char *target,
 				  size_t unparsed,
 				  char **_relative);
+struct reparse_data_buffer;
+NTSTATUS
+filename_convert_dirfsp_nosymlink(TALLOC_CTX *mem_ctx,
+				  connection_struct *conn,
+				  struct files_struct *basedir,
+				  const char *name_in,
+				  uint32_t ucf_flags,
+				  NTTIME twrp,
+				  struct files_struct **_dirfsp,
+				  struct smb_filename **_smb_fname,
+				  struct smb_filename **_smb_fname_rel,
+				  struct reparse_data_buffer **_symlink_err);
+NTSTATUS filename_convert_dirfsp_rel(TALLOC_CTX *mem_ctx,
+				     connection_struct *conn,
+				     struct files_struct *basedir,
+				     const char *name_in,
+				     uint32_t ucf_flags,
+				     NTTIME twrp,
+				     struct files_struct **_dirfsp,
+				     struct smb_filename **_smb_fname,
+				     struct smb_filename **_smb_fname_rel);
 NTSTATUS filename_convert_dirfsp(
 	TALLOC_CTX *ctx,
 	connection_struct *conn,
@@ -770,7 +779,6 @@ void unbecome_root(void);
 int find_service(TALLOC_CTX *ctx, const char *service_in, char **p_service_out);
 bool lp_allow_local_address(
 	int snum, const struct tsocket_address *local_address);
-NTSTATUS can_delete_directory_fsp(files_struct *fsp);
 bool change_to_root_user(void);
 bool become_authenticated_pipe_user(struct auth_session_info *session_info);
 bool unbecome_authenticated_pipe_user(void);

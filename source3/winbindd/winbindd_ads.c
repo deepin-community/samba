@@ -44,8 +44,6 @@
 extern struct winbindd_methods reconnect_methods;
 extern struct winbindd_methods msrpc_methods;
 
-#define WINBIND_CCACHE_NAME "MEMORY:winbind_ccache"
-
 /**
  * Check if cached connection can be reused. If the connection cannot
  * be reused the ADS_STRUCT is freed and the pointer is set to NULL.
@@ -59,60 +57,88 @@ static void ads_cached_connection_reuse(ADS_STRUCT **adsp)
 		time_t expire;
 		time_t now = time(NULL);
 
-		expire = MIN(ads->auth.tgt_expire, ads->auth.tgs_expire);
+		expire = nt_time_to_unix(ads->auth.expire_time);
 
-		DEBUG(7, ("Current tickets expire in %d seconds (at %d, time "
-			  "is now %d)\n", (uint32_t)expire - (uint32_t)now,
-			  (uint32_t) expire, (uint32_t) now));
+		DBG_INFO("Current tickets expire in %" PRIu64 " seconds "
+			 "(at %" PRIu64 ", time is now %" PRIu64 ")\n",
+			 (uint64_t)expire - (uint64_t)now,
+			 (uint64_t)expire,
+			 (uint64_t)now);
 
 		if ( ads->config.realm && (expire > now)) {
 			return;
 		} else {
 			/* we own this ADS_STRUCT so make sure it goes away */
-			DEBUG(7,("Deleting expired krb5 credential cache\n"));
+			DEBUG(7,("Deleting expired ads struct\n"));
 			TALLOC_FREE(ads);
-			ads_kdestroy(WINBIND_CCACHE_NAME);
 			*adsp = NULL;
 		}
 	}
+}
+
+
+static NTSTATUS ads_cached_connection_reconnect_creds(struct ads_struct *ads,
+						      void *private_data,
+						      TALLOC_CTX *mem_ctx,
+						      struct cli_credentials **creds)
+{
+	struct winbindd_domain *target_domain = NULL;
+
+	if (ads->server.realm != NULL) {
+		target_domain = find_domain_from_name_noinit(ads->server.realm);
+	}
+	if (target_domain == NULL && ads->server.workgroup != NULL) {
+		target_domain = find_domain_from_name_noinit(ads->server.workgroup);
+	}
+
+	if (target_domain == NULL) {
+		return NT_STATUS_CANT_ACCESS_DOMAIN_INFO;
+	}
+
+	return winbindd_get_trust_credentials(target_domain,
+					      mem_ctx,
+					      false, /* netlogon */
+					      false, /* ipc_fallback */
+					      creds);
 }
 
 /**
  * @brief Establish a connection to a DC
  *
  * @param[out]   adsp             ADS_STRUCT that will be created
- * @param[in]    target_realm     Realm of domain to connect to
- * @param[in]    target_dom_name  'workgroup' name of domain to connect to
+ * @param[in]    target_domain    target domain
  * @param[in]    ldap_server      DNS name of server to connect to
- * @param[in]    password         Our machine account secret
+ * @param[in]    creds            credentials to use
  * @param[in]    auth_realm       Realm of local domain for creating krb token
- * @param[in]    renewable        Renewable ticket time
  *
  * @return ADS_STATUS
  */
-static ADS_STATUS ads_cached_connection_connect(const char *target_realm,
-						const char *target_dom_name,
+static ADS_STATUS ads_cached_connection_connect(struct winbindd_domain *target_domain,
 						const char *ldap_server,
-						char *password,
-						char *auth_realm,
-						time_t renewable,
 						TALLOC_CTX *mem_ctx,
 						ADS_STRUCT **adsp)
 {
 	TALLOC_CTX *tmp_ctx = talloc_stackframe();
+	const char *target_realm = target_domain->alt_name;
+	const char *target_dom_name = target_domain->name;
+	struct cli_credentials *creds = NULL;
 	ADS_STRUCT *ads;
 	ADS_STATUS status;
+	NTSTATUS ntstatus;
 	struct sockaddr_storage dc_ss;
 	fstring dc_name;
-	enum credentials_use_kerberos krb5_state;
 
-	if (auth_realm == NULL) {
-		TALLOC_FREE(tmp_ctx);
-		return ADS_ERROR_NT(NT_STATUS_UNSUCCESSFUL);
+	/* the machine acct password might have change - fetch it every time */
+
+	ntstatus = winbindd_get_trust_credentials(target_domain,
+						  tmp_ctx,
+						  false, /* netlogon */
+						  false, /* ipc_fallback */
+						  &creds);
+	if (!NT_STATUS_IS_OK(ntstatus)) {
+		status = ADS_ERROR_NT(ntstatus);
+		goto out;
 	}
-
-	/* we don't want this to affect the users ccache */
-	setenv("KRB5CCNAME", WINBIND_CCACHE_NAME, 1);
 
 	ads = ads_init(tmp_ctx,
 		       target_realm,
@@ -125,45 +151,14 @@ static ADS_STATUS ads_cached_connection_connect(const char *target_realm,
 		goto out;
 	}
 
-	ADS_TALLOC_CONST_FREE(ads->auth.password);
-	ADS_TALLOC_CONST_FREE(ads->auth.realm);
-
-	ads->auth.renewable = renewable;
-	ads->auth.password = talloc_strdup(ads, password);
-	if (ads->auth.password == NULL) {
-		status = ADS_ERROR_NT(NT_STATUS_NO_MEMORY);
-		goto out;
-	}
-
-	/* In FIPS mode, client use kerberos is forced to required. */
-	krb5_state = lp_client_use_kerberos();
-	switch (krb5_state) {
-	case CRED_USE_KERBEROS_REQUIRED:
-		ads->auth.flags &= ~ADS_AUTH_DISABLE_KERBEROS;
-		ads->auth.flags &= ~ADS_AUTH_ALLOW_NTLMSSP;
-		break;
-	case CRED_USE_KERBEROS_DESIRED:
-		ads->auth.flags &= ~ADS_AUTH_DISABLE_KERBEROS;
-		ads->auth.flags |= ADS_AUTH_ALLOW_NTLMSSP;
-		break;
-	case CRED_USE_KERBEROS_DISABLED:
-		ads->auth.flags |= ADS_AUTH_DISABLE_KERBEROS;
-		ads->auth.flags |= ADS_AUTH_ALLOW_NTLMSSP;
-		break;
-	}
-
-	ads->auth.realm = talloc_asprintf_strupper_m(ads, "%s", auth_realm);
-	if (ads->auth.realm == NULL) {
-		status = ADS_ERROR_NT(NT_STATUS_INTERNAL_ERROR);
-		goto out;
-	}
+	ads_set_reconnect_fn(ads, ads_cached_connection_reconnect_creds, NULL);
 
 	/* Setup the server affinity cache.  We don't reaally care
 	   about the name.  Just setup affinity and the KRB5_CONFIG
 	   file. */
 	get_dc_name(ads->server.workgroup, ads->server.realm, dc_name, &dc_ss);
 
-	status = ads_connect(ads);
+	status = ads_connect_creds(ads, creds);
 	if (!ADS_ERR_OK(status)) {
 		DEBUG(1,("ads_connect for domain %s failed: %s\n",
 			 target_dom_name, ads_errstr(status)));
@@ -182,8 +177,6 @@ ADS_STATUS ads_idmap_cached_connection(const char *dom_name,
 {
 	TALLOC_CTX *tmp_ctx = talloc_stackframe();
 	char *ldap_server = NULL;
-	char *realm = NULL;
-	char *password = NULL;
 	struct winbindd_domain *wb_dom = NULL;
 	ADS_STATUS status;
 
@@ -215,56 +208,20 @@ ADS_STATUS ads_idmap_cached_connection(const char *dom_name,
 	wb_dom = find_domain_from_name(dom_name);
 	if (wb_dom == NULL) {
 		DBG_DEBUG("could not find domain '%s'\n", dom_name);
-		status = ADS_ERROR_NT(NT_STATUS_UNSUCCESSFUL);
-		goto out;
+		TALLOC_FREE(tmp_ctx);
+		return ADS_ERROR_NT(NT_STATUS_UNSUCCESSFUL);
 	}
 
 	DBG_DEBUG("find_domain_from_name found realm '%s' for "
 		  " domain '%s'\n", wb_dom->alt_name, dom_name);
 
-	if (!get_trust_pw_clear(dom_name, &password, NULL, NULL)) {
-		status = ADS_ERROR_NT(NT_STATUS_CANT_ACCESS_DOMAIN_INFO);
-		goto out;
-	}
-
-	if (IS_DC) {
-		SMB_ASSERT(wb_dom->alt_name != NULL);
-		realm = talloc_strdup(tmp_ctx, wb_dom->alt_name);
-	} else {
-		struct winbindd_domain *our_domain = wb_dom;
-
-		/* always give preference to the alt_name in our
-		   primary domain if possible */
-
-		if (!wb_dom->primary) {
-			our_domain = find_our_domain();
-		}
-
-		if (our_domain->alt_name != NULL) {
-			realm = talloc_strdup(tmp_ctx, our_domain->alt_name);
-		} else {
-			realm = talloc_strdup(tmp_ctx, lp_realm());
-		}
-	}
-
-	if (realm == NULL) {
-		status = ADS_ERROR_NT(NT_STATUS_NO_MEMORY);
-		goto out;
-	}
-
 	status = ads_cached_connection_connect(
-		wb_dom->alt_name,	/* realm to connect to. */
-		dom_name,		/* 'workgroup' name for ads_init */
+		wb_dom,
 		ldap_server,		/* DNS name to connect to. */
-		password,		/* password for auth realm. */
-		realm,			/* realm used for krb5 ticket. */
-		0,			/* renewable ticket time. */
 		mem_ctx,		/* memory context for ads struct */
 		adsp);			/* Returns ads struct. */
 
-out:
 	TALLOC_FREE(tmp_ctx);
-	SAFE_FREE(password);
 
 	return status;
 }
@@ -278,8 +235,6 @@ static ADS_STATUS ads_cached_connection(struct winbindd_domain *domain,
 {
 	TALLOC_CTX *tmp_ctx = talloc_stackframe();
 	ADS_STATUS status;
-	char *password = NULL;
-	char *realm = NULL;
 
 	if (IS_AD_DC) {
 		/*
@@ -299,44 +254,9 @@ static ADS_STATUS ads_cached_connection(struct winbindd_domain *domain,
 		return ADS_SUCCESS;
 	}
 
-	/* the machine acct password might have change - fetch it every time */
-
-	if (!get_trust_pw_clear(domain->name, &password, NULL, NULL)) {
-		status = ADS_ERROR_NT(NT_STATUS_CANT_ACCESS_DOMAIN_INFO);
-		goto out;
-	}
-
-	if ( IS_DC ) {
-		SMB_ASSERT(domain->alt_name != NULL);
-		realm = talloc_strdup(tmp_ctx, domain->alt_name);
-	} else {
-		struct winbindd_domain *our_domain = domain;
-
-
-		/* always give preference to the alt_name in our
-		   primary domain if possible */
-
-		if ( !domain->primary )
-			our_domain = find_our_domain();
-
-		if (our_domain->alt_name != NULL) {
-			realm = talloc_strdup(tmp_ctx, our_domain->alt_name );
-		} else {
-			realm = talloc_strdup(tmp_ctx, lp_realm() );
-		}
-	}
-
-	if (realm == NULL) {
-		status = ADS_ERROR_NT(NT_STATUS_NO_MEMORY);
-		goto out;
-	}
-
 	status = ads_cached_connection_connect(
-					domain->alt_name,
-					domain->name, NULL,
-					password,
-					realm,
-					WINBINDD_PAM_AUTH_KRB5_RENEW_TIME,
+					domain,
+					NULL,
 					domain,
 					&domain->backend_data.ads_conn);
 	if (!ADS_ERR_OK(status)) {
@@ -349,15 +269,13 @@ static ADS_STATUS ads_cached_connection(struct winbindd_domain *domain,
 				   domain->name);
 			domain->backend = &reconnect_methods;
 		}
-		goto out;
+		TALLOC_FREE(tmp_ctx);
+		return status;
 	}
 
 	*adsp = domain->backend_data.ads_conn;
-out:
 	TALLOC_FREE(tmp_ctx);
-	SAFE_FREE(password);
-
-	return status;
+	return ADS_SUCCESS;
 }
 
 /* Query display info for a realm. This is the basic user list fn */
@@ -449,6 +367,8 @@ static NTSTATUS query_user_list(struct winbindd_domain *domain,
 	rids = talloc_realloc(mem_ctx, rids, uint32_t, count);
 	if (prids != NULL) {
 		*prids = rids;
+	} else {
+		TALLOC_FREE(rids);
 	}
 
 	status = NT_STATUS_OK;
@@ -648,6 +568,20 @@ static NTSTATUS rids_to_names(struct winbindd_domain *domain,
 					   domain_name, names, types);
 }
 
+static NTSTATUS winbindd_domain_verify_sid(struct winbindd_domain *domain,
+					   const struct dom_sid *extra_sid)
+{
+	bool ret;
+
+	ret = sid_check_is_in_builtin(extra_sid);
+	if (ret) {
+		/* don't allow Builtin groups from ADS */
+		return NT_STATUS_INVALID_SUB_AUTHORITY;
+	}
+
+	return NT_STATUS_OK;
+}
+
 /* Lookup groups a user is a member of - alternate method, for when
    tokenGroups are not available. */
 static NTSTATUS lookup_usergroups_member(struct winbindd_domain *domain,
@@ -717,8 +651,10 @@ static NTSTATUS lookup_usergroups_member(struct winbindd_domain *domain,
 	num_groups = 0;
 
 	/* always add the primary group to the sid array */
-	status = add_sid_to_array(mem_ctx, primary_group, user_sids,
-				  &num_groups);
+	status = add_sid_to_array_unique(mem_ctx,
+					 primary_group,
+					 user_sids,
+					 &num_groups);
 	if (!NT_STATUS_IS_OK(status)) {
 		goto done;
 	}
@@ -733,13 +669,16 @@ static NTSTATUS lookup_usergroups_member(struct winbindd_domain *domain,
 				continue;
 			}
 
-			/* ignore Builtin groups from ADS - Guenther */
-			if (sid_check_is_in_builtin(&group_sid)) {
+			/* filter unexpected sids */
+			status = winbindd_domain_verify_sid(domain, &group_sid);
+			if (!NT_STATUS_IS_OK(status)) {
 				continue;
 			}
 
-			status = add_sid_to_array(mem_ctx, &group_sid,
-						  user_sids, &num_groups);
+			status = add_sid_to_array_unique(mem_ctx,
+							 &group_sid,
+							 user_sids,
+							 &num_groups);
 			if (!NT_STATUS_IS_OK(status)) {
 				goto done;
 			}
@@ -806,8 +745,10 @@ static NTSTATUS lookup_usergroups_memberof(struct winbindd_domain *domain,
 	num_groups = 0;
 
 	/* always add the primary group to the sid array */
-	status = add_sid_to_array(mem_ctx, primary_group, user_sids,
-				  &num_groups);
+	status = add_sid_to_array_unique(mem_ctx,
+					 primary_group,
+					 user_sids,
+					 &num_groups);
 	if (!NT_STATUS_IS_OK(status)) {
 		goto done;
 	}
@@ -844,13 +785,16 @@ static NTSTATUS lookup_usergroups_memberof(struct winbindd_domain *domain,
 
 	for (i=0; i<num_sids; i++) {
 
-		/* ignore Builtin groups from ADS - Guenther */
-		if (sid_check_is_in_builtin(&group_sids[i])) {
+		/* filter unexpected sids */
+		status = winbindd_domain_verify_sid(domain, &group_sids[i]);
+		if (!NT_STATUS_IS_OK(status)) {
 			continue;
 		}
 
-		status = add_sid_to_array(mem_ctx, &group_sids[i], user_sids,
-					  &num_groups);
+		status = add_sid_to_array_unique(mem_ctx,
+						 &group_sids[i],
+						 user_sids,
+						 &num_groups);
 		if (!NT_STATUS_IS_OK(status)) {
 			goto done;
 		}
@@ -995,16 +939,19 @@ static NTSTATUS lookup_usergroups(struct winbindd_domain *domain,
 	*user_sids = NULL;
 	num_groups = 0;
 
-	status = add_sid_to_array(mem_ctx, &primary_group, user_sids,
-				  &num_groups);
+	status = add_sid_to_array_unique(mem_ctx,
+					 &primary_group,
+					 user_sids,
+					 &num_groups);
 	if (!NT_STATUS_IS_OK(status)) {
 		goto done;
 	}
 
 	for (i=0;i<count;i++) {
 
-		/* ignore Builtin groups from ADS - Guenther */
-		if (sid_check_is_in_builtin(&sids[i])) {
+		/* filter unexpected sids */
+		status = winbindd_domain_verify_sid(domain, &sids[i]);
+		if (!NT_STATUS_IS_OK(status)) {
 			continue;
 		}
 
@@ -1037,7 +984,7 @@ static NTSTATUS lookup_useraliases(struct winbindd_domain *domain,
 }
 
 static NTSTATUS add_primary_group_members(
-	ADS_STRUCT *ads, TALLOC_CTX *mem_ctx, uint32_t rid,
+	ADS_STRUCT *ads, TALLOC_CTX *mem_ctx, uint32_t rid, const char *domname,
 	char ***all_members, size_t *num_all_members)
 {
 	char *filter;
@@ -1049,10 +996,13 @@ static NTSTATUS add_primary_group_members(
 	char **members;
 	size_t num_members;
 	ads_control args;
+	bool all_groupmem = idmap_config_bool(domname, "all_groupmem", false);
 
 	filter = talloc_asprintf(
-		mem_ctx, "(&(objectCategory=user)(primaryGroupID=%u))",
-		(unsigned)rid);
+		mem_ctx,
+		"(&(objectCategory=user)(primaryGroupID=%u)%s)",
+		(unsigned)rid,
+		all_groupmem ? "" : "(uidNumber=*)(!(uidNumber=0))");
 	if (filter == NULL) {
 		goto done;
 	}
@@ -1204,7 +1154,7 @@ static NTSTATUS lookup_groupmem(struct winbindd_domain *domain,
 
 	DEBUG(10, ("ads lookup_groupmem: got %d sids via extended dn call\n", (int)num_members));
 
-	status = add_primary_group_members(ads, mem_ctx, rid,
+	status = add_primary_group_members(ads, mem_ctx, rid, domain->name,
 					   &members, &num_members);
 	if (!NT_STATUS_IS_OK(status)) {
 		DEBUG(10, ("%s: add_primary_group_members failed: %s\n",
@@ -1583,20 +1533,21 @@ static NTSTATUS trusted_domains(struct winbindd_domain *domain,
 
 /* the ADS backend methods are exposed via this structure */
 struct winbindd_methods ads_methods = {
-	True,
-	query_user_list,
-	enum_dom_groups,
-	enum_local_groups,
-	name_to_sid,
-	sid_to_name,
-	rids_to_names,
-	lookup_usergroups,
-	lookup_useraliases,
-	lookup_groupmem,
-	lookup_aliasmem,
-	lockout_policy,
-	password_policy,
-	trusted_domains,
+	.consistent		= true,
+
+	.query_user_list	= query_user_list,
+	.enum_dom_groups	= enum_dom_groups,
+	.enum_local_groups	= enum_local_groups,
+	.name_to_sid		= name_to_sid,
+	.sid_to_name		= sid_to_name,
+	.rids_to_names		= rids_to_names,
+	.lookup_usergroups	= lookup_usergroups,
+	.lookup_useraliases	= lookup_useraliases,
+	.lookup_groupmem	= lookup_groupmem,
+	.lookup_aliasmem	= lookup_aliasmem,
+	.lockout_policy		= lockout_policy,
+	.password_policy	= password_policy,
+	.trusted_domains	= trusted_domains,
 };
 
 #endif

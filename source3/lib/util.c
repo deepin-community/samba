@@ -30,6 +30,7 @@
 #include "system/passwd.h"
 #include "system/filesys.h"
 #include "lib/util/server_id.h"
+#include "lib/util/memcache.h"
 #include "util_tdb.h"
 #include "ctdbd_conn.h"
 #include "../lib/util/util_pw.h"
@@ -43,6 +44,7 @@
 #include "lib/dbwrap/dbwrap_ctdb.h"
 #include "lib/gencache.h"
 #include "lib/util/string_wrappers.h"
+#include "lib/util/strv.h"
 
 #ifdef HAVE_SYS_PRCTL_H
 #include <sys/prctl.h>
@@ -52,11 +54,6 @@
 #define MAX_ALLOC_SIZE (1024*1024*256)
 
 static enum protocol_types Protocol = PROTOCOL_COREPLUS;
-
-enum protocol_types get_Protocol(void)
-{
-	return Protocol;
-}
 
 void set_Protocol(enum protocol_types  p)
 {
@@ -71,6 +68,8 @@ void gfree_all( void )
 	gfree_charcnv();
 	gfree_interfaces();
 	gfree_debugsyms();
+	gfree_memcache();
+
 }
 
 /*******************************************************************
@@ -141,42 +140,55 @@ bool check_same_stat(const SMB_STRUCT_STAT *sbuf1,
 
 void show_msg(const char *buf)
 {
+	char *msg = NULL;
 	int i;
 	int bcc=0;
 
 	if (!DEBUGLVL(5))
 		return;
 
-	DEBUG(5,("size=%d\nsmb_com=0x%x\nsmb_rcls=%d\nsmb_reh=%d\nsmb_err=%d\nsmb_flg=%d\nsmb_flg2=%d\n",
-			smb_len(buf),
-			(int)CVAL(buf,smb_com),
-			(int)CVAL(buf,smb_rcls),
-			(int)CVAL(buf,smb_reh),
-			(int)SVAL(buf,smb_err),
-			(int)CVAL(buf,smb_flg),
-			(int)SVAL(buf,smb_flg2)));
-	DEBUGADD(5,("smb_tid=%d\nsmb_pid=%d\nsmb_uid=%d\nsmb_mid=%d\n",
-			(int)SVAL(buf,smb_tid),
-			(int)SVAL(buf,smb_pid),
-			(int)SVAL(buf,smb_uid),
-			(int)SVAL(buf,smb_mid)));
-	DEBUGADD(5,("smt_wct=%d\n",(int)CVAL(buf,smb_wct)));
+	msg = talloc_asprintf(
+		talloc_tos(),
+		"size=%d\nsmb_com=0x%x\nsmb_rcls=%d\n"
+		"smb_reh=%d\nsmb_err=%d\nsmb_flg=%d\nsmb_flg2=%d\n"
+		"smb_tid=%d\nsmb_pid=%d\nsmb_uid=%d\nsmb_mid=%d\n"
+		"smt_wct=%d\n",
+		smb_len(buf),
+		(int)CVAL(buf, smb_com),
+		(int)CVAL(buf, smb_rcls),
+		(int)CVAL(buf, smb_reh),
+		(int)SVAL(buf, smb_err),
+		(int)CVAL(buf, smb_flg),
+		(int)SVAL(buf, smb_flg2),
+		(int)SVAL(buf, smb_tid),
+		(int)SVAL(buf, smb_pid),
+		(int)SVAL(buf, smb_uid),
+		(int)SVAL(buf, smb_mid),
+		(int)CVAL(buf, smb_wct));
 
-	for (i=0;i<(int)CVAL(buf,smb_wct);i++)
-		DEBUGADD(5,("smb_vwv[%2d]=%5d (0x%X)\n",i,
-			SVAL(buf,smb_vwv+2*i),SVAL(buf,smb_vwv+2*i)));
+	for (i=0;i<(int)CVAL(buf,smb_wct);i++) {
+		talloc_asprintf_addbuf(&msg,
+				       "smb_vwv[%2d]=%5d (0x%X)\n",
+				       i,
+				       SVAL(buf, smb_vwv + 2 * i),
+				       SVAL(buf, smb_vwv + 2 * i));
+	}
 
 	bcc = (int)SVAL(buf,smb_vwv+2*(CVAL(buf,smb_wct)));
 
-	DEBUGADD(5,("smb_bcc=%d\n",bcc));
+	talloc_asprintf_addbuf(&msg, "smb_bcc=%d\n", bcc);
 
-	if (DEBUGLEVEL < 10)
-		return;
+	if (DEBUGLEVEL >= 10) {
+		if (DEBUGLEVEL < 50) {
+			bcc = MIN(bcc, 512);
+		}
+		dump_data_addbuf((const uint8_t *)smb_buf_const(buf),
+				 bcc,
+				 &msg);
+	}
 
-	if (DEBUGLEVEL < 50)
-		bcc = MIN(bcc, 512);
-
-	dump_data(10, (const uint8_t *)smb_buf_const(buf), bcc);
+	DEBUG(5, ("%s", msg));
+	TALLOC_FREE(msg);
 }
 
 /*******************************************************************
@@ -483,6 +495,7 @@ NTSTATUS reinit_after_fork(struct messaging_context *msg_ctx,
 		if (!NT_STATUS_IS_OK(status)) {
 			DEBUG(0,("messaging_reinit() failed: %s\n",
 				 nt_errstr(status)));
+			goto done;
 		}
 
 		if (lp_clustering()) {
@@ -672,12 +685,19 @@ gid_t nametogid(const char *name)
  Something really nasty happened - panic !
 ********************************************************************/
 
-void smb_panic_s3(const char *why)
+static void call_panic_action(const char *why, bool as_root)
 {
 	const struct loadparm_substitution *lp_sub =
 		loadparm_s3_global_substitution();
 	char *cmd;
 	int result;
+
+	cmd = lp_panic_action(talloc_tos(), lp_sub);
+	if (cmd == NULL || cmd[0] == '\0') {
+		return;
+	}
+
+	DBG_ERR("Calling panic action [%s]\n", cmd);
 
 #if defined(HAVE_PRCTL) && defined(PR_SET_PTRACER)
 	/*
@@ -686,20 +706,34 @@ void smb_panic_s3(const char *why)
 	prctl(PR_SET_PTRACER, getpid(), 0, 0, 0);
 #endif
 
-	cmd = lp_panic_action(talloc_tos(), lp_sub);
-	if (cmd && *cmd) {
-		DEBUG(0, ("smb_panic(): calling panic action [%s]\n", cmd));
-		result = system(cmd);
-
-		if (result == -1)
-			DEBUG(0, ("smb_panic(): fork failed in panic action: %s\n",
-					  strerror(errno)));
-		else
-			DEBUG(0, ("smb_panic(): action returned status %d\n",
-					  WEXITSTATUS(result)));
+	if (as_root) {
+		become_root();
 	}
 
+	result = system(cmd);
+
+	if (as_root) {
+		unbecome_root();
+	}
+
+	if (result == -1)
+		DBG_ERR("fork failed in panic action: %s\n",
+			strerror(errno));
+	else
+		DBG_ERR("action returned status %d\n",
+			WEXITSTATUS(result));
+}
+
+void smb_panic_s3(const char *why)
+{
+	call_panic_action(why, false);
 	dump_core();
+}
+
+void log_panic_action(const char *msg)
+{
+	DBG_ERR("%s", msg);
+	call_panic_action(msg, true);
 }
 
 /*******************************************************************
@@ -728,12 +762,14 @@ const char *readdirname(DIR *p)
  of a path matches a (possibly wildcarded) entry in a namelist.
 ********************************************************************/
 
-bool is_in_path(const char *name, name_compare_entry *namelist, bool case_sensitive)
+bool is_in_path(const char *name,
+		struct name_compare_entry *namelist,
+		bool case_sensitive)
 {
 	const char *last_component;
 
 	/* if we have no list it's obviously not in the path */
-	if((namelist == NULL ) || ((namelist != NULL) && (namelist[0].name == NULL))) {
+	if ((namelist == NULL) || (namelist[0].name == NULL)) {
 		return False;
 	}
 
@@ -768,120 +804,6 @@ bool is_in_path(const char *name, name_compare_entry *namelist, bool case_sensit
 	}
 	DEBUG(8,("is_in_path: match not found\n"));
 	return False;
-}
-
-/*******************************************************************
- Strip a '/' separated list into an array of
- name_compare_enties structures suitable for
- passing to is_in_path(). We do this for
- speed so we can pre-parse all the names in the list
- and don't do it for each call to is_in_path().
- We also check if the entry contains a wildcard to
- remove a potentially expensive call to mask_match
- if possible.
-********************************************************************/
-
-void set_namearray(name_compare_entry **ppname_array, const char *namelist_in)
-{
-	char *name_end;
-	char *namelist;
-	char *namelist_end;
-	char *nameptr;
-	int num_entries = 0;
-	int i;
-
-	(*ppname_array) = NULL;
-
-	if((namelist_in == NULL ) || ((namelist_in != NULL) && (*namelist_in == '\0')))
-		return;
-
-	namelist = talloc_strdup(talloc_tos(), namelist_in);
-	if (namelist == NULL) {
-		DEBUG(0,("set_namearray: talloc fail\n"));
-		return;
-	}
-	nameptr = namelist;
-
-	namelist_end = &namelist[strlen(namelist)];
-
-	/* We need to make two passes over the string. The
-		first to count the number of elements, the second
-		to split it.
-	*/
-
-	while(nameptr <= namelist_end) {
-		if ( *nameptr == '/' ) {
-			/* cope with multiple (useless) /s) */
-			nameptr++;
-			continue;
-		}
-		/* anything left? */
-		if ( *nameptr == '\0' )
-			break;
-
-		/* find the next '/' or consume remaining */
-		name_end = strchr_m(nameptr, '/');
-		if (name_end == NULL) {
-			/* Point nameptr at the terminating '\0' */
-			nameptr += strlen(nameptr);
-		} else {
-			/* next segment please */
-			nameptr = name_end + 1;
-		}
-		num_entries++;
-	}
-
-	if(num_entries == 0) {
-		talloc_free(namelist);
-		return;
-	}
-
-	if(( (*ppname_array) = SMB_MALLOC_ARRAY(name_compare_entry, num_entries + 1)) == NULL) {
-		DEBUG(0,("set_namearray: malloc fail\n"));
-		talloc_free(namelist);
-		return;
-	}
-
-	/* Now copy out the names */
-	nameptr = namelist;
-	i = 0;
-	while(nameptr <= namelist_end) {
-		if ( *nameptr == '/' ) {
-			/* cope with multiple (useless) /s) */
-			nameptr++;
-			continue;
-		}
-		/* anything left? */
-		if ( *nameptr == '\0' )
-			break;
-
-		/* find the next '/' or consume remaining */
-		name_end = strchr_m(nameptr, '/');
-		if (name_end != NULL) {
-			*name_end = '\0';
-		}
-
-		(*ppname_array)[i].is_wild = ms_has_wild(nameptr);
-		if(((*ppname_array)[i].name = SMB_STRDUP(nameptr)) == NULL) {
-			DEBUG(0,("set_namearray: malloc fail (1)\n"));
-			talloc_free(namelist);
-			return;
-		}
-
-		if (name_end == NULL) {
-			/* Point nameptr at the terminating '\0' */
-			nameptr += strlen(nameptr);
-		} else {
-			/* next segment please */
-			nameptr = name_end + 1;
-		}
-		i++;
-	}
-
-	(*ppname_array)[i].name = NULL;
-
-	talloc_free(namelist);
-	return;
 }
 
 #undef DBGC_CLASS
@@ -1051,7 +973,7 @@ const char *get_remote_arch_str(void)
 
 enum remote_arch_types get_remote_arch_from_str(const char *remote_arch_string)
 {
-	int i;
+	size_t i;
 
 	for (i = 0; i < ARRAY_SIZE(remote_arch_strings); i++) {
 		if (strcmp(remote_arch_string, remote_arch_strings[i]) == 0) {
@@ -1479,22 +1401,6 @@ bool mask_match(const char *string, const char *pattern, bool is_case_sensitive)
 }
 
 /*******************************************************************
- A wrapper that handles case sensitivity and the special handling
- of the ".." name. Variant that is only called by old search code which requires
- pattern translation.
-*******************************************************************/
-
-bool mask_match_search(const char *string, const char *pattern, bool is_case_sensitive)
-{
-	if (ISDOTDOT(string))
-		string = ".";
-	if (ISDOT(pattern))
-		return False;
-
-	return ms_fnmatch(pattern, string, True, is_case_sensitive) == 0;
-}
-
-/*******************************************************************
  A wrapper that handles a list of patterns and calls mask_match()
  on each.  Returns True if any of the patterns match.
 *******************************************************************/
@@ -1506,65 +1412,6 @@ bool mask_match_list(const char *string, char **list, int listLen, bool is_case_
                        return True;
        }
        return False;
-}
-
-/**********************************************************************
-  Converts a name to a fully qualified domain name.
-  Returns true if lookup succeeded, false if not (then fqdn is set to name)
-  Uses getaddrinfo() with AI_CANONNAME flag to obtain the official
-  canonical name of the host. getaddrinfo() may use a variety of sources
-  including /etc/hosts to obtain the domainname. It expects aliases in
-  /etc/hosts to NOT be the FQDN. The FQDN should come first.
-************************************************************************/
-
-bool name_to_fqdn(fstring fqdn, const char *name)
-{
-	char *full = NULL;
-	struct addrinfo hints;
-	struct addrinfo *result;
-	int s;
-
-	/* Configure hints to obtain canonical name */
-
-	memset(&hints, 0, sizeof(struct addrinfo));
-	hints.ai_family = AF_UNSPEC;    /* Allow IPv4 or IPv6 */
-	hints.ai_socktype = SOCK_DGRAM; /* Datagram socket */
-	hints.ai_flags = AI_CANONNAME;  /* Get host's FQDN */
-	hints.ai_protocol = 0;          /* Any protocol */
-
-	s = getaddrinfo(name, NULL, &hints, &result);
-	if (s != 0) {
-		DBG_WARNING("getaddrinfo lookup for %s failed: %s\n",
-			name,
-			gai_strerror(s));
-		fstrcpy(fqdn, name);
-		return false;
-	}
-	full = result->ai_canonname;
-
-	/* Find out if the FQDN is returned as an alias
-	 * to cope with /etc/hosts files where the first
-	 * name is not the FQDN but the short name.
-	 * getaddrinfo provides no easy way of handling aliases
-	 * in /etc/hosts. Users should make sure the FQDN
-	 * comes first in /etc/hosts. */
-	if (full && (! strchr_m(full, '.'))) {
-		DEBUG(1, ("WARNING: your /etc/hosts file may be broken!\n"));
-		DEBUGADD(1, ("    Full qualified domain names (FQDNs) should not be specified\n"));
-		DEBUGADD(1, ("    as an alias in /etc/hosts. FQDN should be the first name\n"));
-		DEBUGADD(1, ("    prior to any aliases.\n"));
-	}
-	if (full && (strcasecmp_m(full, "localhost.localdomain") == 0)) {
-		DEBUG(1, ("WARNING: your /etc/hosts file may be broken!\n"));
-		DEBUGADD(1, ("    Specifying the machine hostname for address 127.0.0.1 may lead\n"));
-		DEBUGADD(1, ("    to Kerberos authentication problems as localhost.localdomain\n"));
-		DEBUGADD(1, ("    may end up being used instead of the real machine FQDN.\n"));
-	}
-
-	DEBUG(10,("name_to_fqdn: lookup for %s -> %s.\n", name, full));
-	fstrcpy(fqdn, full);
-	freeaddrinfo(result);           /* No longer needed */
-	return true;
 }
 
 struct server_id interpret_pid(const char *pid_string)
@@ -1899,9 +1746,12 @@ struct security_unix_token *copy_unix_token(TALLOC_CTX *ctx, const struct securi
 		return NULL;
 	}
 
-	cpy->uid = tok->uid;
-	cpy->gid = tok->gid;
-	cpy->ngroups = tok->ngroups;
+	*cpy = (struct security_unix_token){
+		.uid = tok->uid,
+		.gid = tok->gid,
+		.ngroups = tok->ngroups,
+	};
+
 	if (tok->ngroups) {
 		/* Make this a talloc child of cpy. */
 		cpy->groups = (gid_t *)talloc_memdup(
@@ -1910,8 +1760,6 @@ struct security_unix_token *copy_unix_token(TALLOC_CTX *ctx, const struct securi
 			TALLOC_FREE(cpy);
 			return NULL;
 		}
-	} else {
-		cpy->groups = NULL;
 	}
 	return cpy;
 }

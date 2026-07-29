@@ -282,7 +282,7 @@ bool torture_bind_authcontext(struct torture_context *torture)
 	torture_assert(torture, smbXcli_conn_is_connected(cli->transport->conn),
 		       "smb still connected");
 	torture_assert(torture, !dcerpc_binding_handle_is_connected(lsa_handle),
-		       "dcerpc disonnected");
+		       "dcerpc disconnected");
 
 	if (NT_STATUS_EQUAL(status, NT_STATUS_INVALID_HANDLE)) {
 		torture_comment(torture, "dcerpc_lsa_OpenPolicy2 with wrong vuid gave %s, "
@@ -668,9 +668,11 @@ static bool create_user(struct torture_context *tctx,
 		encode_pw_buffer(u_info.info23.password.data, password,
 				 STR_UNICODE);
 
-		status = dcerpc_fetch_session_key(samr_pipe, &session_key);
+		status = dcerpc_binding_handle_transport_session_key(samr_handle,
+								     tctx,
+								     &session_key);
 		if (!NT_STATUS_IS_OK(status)) {
-			torture_comment(tctx, "dcerpc_fetch_session_key failed\n");
+			torture_comment(tctx, "transport_session_key failed\n");
 			goto done;
 		}
 
@@ -890,9 +892,11 @@ static bool join3(struct torture_context *tctx,
 		i21->password_expired = 1;
 		*/
 
-		status = dcerpc_fetch_session_key(samr_pipe, &session_key);
+		status = dcerpc_binding_handle_transport_session_key(samr_handle,
+								     tctx,
+								     &session_key);
 		if (!NT_STATUS_IS_OK(status)) {
-			torture_comment(tctx, "dcerpc_fetch_session_key failed: %s\n",
+			torture_comment(tctx, "transport_session_key failed: %s\n",
 				 nt_errstr(status));
 			goto done;
 		}
@@ -928,9 +932,11 @@ static bool join3(struct torture_context *tctx,
 		/* just to make this test pass */
 		u_info.info24.password_expired = 1;
 
-		status = dcerpc_fetch_session_key(samr_pipe, &session_key);
+		status = dcerpc_binding_handle_transport_session_key(samr_handle,
+								     tctx,
+								     &session_key);
 		if (!NT_STATUS_IS_OK(status)) {
-			torture_comment(tctx, "dcerpc_fetch_session_key failed\n");
+			torture_comment(tctx, "transport_session_key failed\n");
 			goto done;
 		}
 
@@ -1091,7 +1097,9 @@ static bool auth2(struct torture_context *tctx,
 						 a.in.secure_channel_type,
 						 r.in.credentials,
 						 r.out.return_credentials, &mach_pw,
-						 &netr_cred, negotiate_flags);
+						 &netr_cred,
+						 negotiate_flags,
+						 negotiate_flags);
 	torture_assert(tctx, (creds_state != NULL), "memory allocation failed");
 
 	status = dcerpc_netr_ServerAuthenticate2_r(net_handle, mem_ctx, &a);
@@ -1151,7 +1159,6 @@ static bool schan(struct torture_context *tctx,
 				    "\\netlogon", &ndr_table_netlogon, &net_pipe);
 	torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
 					"pipe_bind_smb_auth failed");
-	net_pipe->conn->flags |= (DCERPC_SIGN | DCERPC_SEAL);
 #else
 	status = pipe_bind_smb(tctx, mem_ctx, cli->tree,
 			       "\\netlogon", &ndr_table_netlogon, &net_pipe);
@@ -1271,7 +1278,9 @@ static bool schan(struct torture_context *tctx,
 		 *
 		 * in order to detect bugs
 		 */
+#undef netlogon_creds_aes_encrypt
 		netlogon_creds_aes_encrypt(creds_state, pinfo.ntpassword.hash, 16);
+#define netlogon_creds_aes_encrypt __DO_NOT_USE_netlogon_creds_aes_encrypt
 
 		r.in.logon_level = NetlogonInteractiveInformation;
 		r.in.logon = &logon;
@@ -1303,6 +1312,8 @@ static bool schan(struct torture_context *tctx,
 		struct netlogon_creds_CredentialState *creds_state;
 		struct netr_Authenticator credential, return_authenticator;
 		struct samr_Password new_password;
+		enum dcerpc_AuthType auth_type;
+		enum dcerpc_AuthLevel auth_level;
 
 		s.in.server_name = talloc_asprintf(
 			mem_ctx, "\\\\%s", dcerpc_server_name(net_pipe));
@@ -1317,7 +1328,14 @@ static bool schan(struct torture_context *tctx,
 		E_md4hash(password, new_password.hash);
 
 		creds_state = cli_credentials_get_netlogon_creds(wks_creds);
-		netlogon_creds_des_encrypt(creds_state, &new_password);
+		dcerpc_binding_handle_auth_info(net_handle,
+						&auth_type,
+						&auth_level);
+		status = netlogon_creds_encrypt_samr_Password(creds_state,
+							      &new_password,
+							      auth_type,
+							      auth_level);
+		torture_assert_ntstatus_ok(tctx, status, "encrypt_samr_Password");
 		netlogon_creds_client_authenticator(creds_state, &credential);
 
 		status = dcerpc_netr_ServerPasswordSet_r(net_handle, mem_ctx, &s);
@@ -1525,18 +1543,6 @@ static bool torture_samba3_sessionkey(struct torture_context *torture)
 	}
 
 	cli_credentials_set_workstation(anon_creds, wks_name, CRED_SPECIFIED);
-
-
-	if (!torture_setting_bool(torture, "samba3", false)) {
-
-		/* Samba3 in the build farm right now does this happily. Need
-		 * to fix :-) */
-
-		if (test_join3(torture, false, anon_creds, NULL, wks_name)) {
-			torture_fail(torture, "join using anonymous bind on an anonymous smb "
-				 "connection succeeded -- HUH??\n");
-		}
-	}
 
 	torture_assert(torture,
 		test_join3(torture, false, samba_cmdline_get_creds(),
@@ -1913,7 +1919,7 @@ static bool test_NetShareGetInfo(struct torture_context *tctx,
 	struct srvsvc_NetShareGetInfo r;
 	union srvsvc_NetShareInfo info;
 	uint32_t levels[] = { 0, 1, 2, 501, 502, 1004, 1005, 1006, 1007, 1501 };
-	int i;
+	size_t i;
 	bool ret = true;
 	struct dcerpc_binding_handle *b = p->binding_handle;
 
@@ -1966,7 +1972,7 @@ static bool test_NetShareEnum(struct torture_context *tctx,
 	struct srvsvc_NetShareCtr1007 c1007;
 	uint32_t totalentries = 0;
 	uint32_t levels[] = { 0, 1, 2, 501, 502, 1004, 1005, 1006, 1007 };
-	int i;
+	size_t i;
 	bool ret = true;
 	struct dcerpc_binding_handle *b = p->binding_handle;
 
@@ -2076,7 +2082,7 @@ static bool torture_samba3_rpc_randomauth2(struct torture_context *torture)
 	TALLOC_CTX *mem_ctx;
 	struct dcerpc_pipe *net_pipe;
 	struct dcerpc_binding_handle *net_handle;
-	char *wksname;
+	char wksname[15];
 	bool result = false;
 	NTSTATUS status;
 	struct netr_ServerReqChallenge r;
@@ -2094,11 +2100,9 @@ static bool torture_samba3_rpc_randomauth2(struct torture_context *torture)
 		return false;
 	}
 
-	if (!(wksname = generate_random_str_list(
-		      mem_ctx, 14, "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"))) {
-		torture_comment(torture, "generate_random_str_list failed\n");
-		goto done;
-	}
+	generate_random_str_list_buf(wksname,
+				     sizeof(wksname),
+				     "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789");
 
 	if (!(torture_open_connection_share(
 		      mem_ctx, &cli,
@@ -2158,7 +2162,9 @@ static bool torture_samba3_rpc_randomauth2(struct torture_context *torture)
 						 a.in.secure_channel_type,
 						 r.in.credentials,
 						 r.out.return_credentials, &mach_pw,
-						 &netr_cred, negotiate_flags);
+						 &netr_cred,
+						 negotiate_flags,
+						 negotiate_flags);
 	torture_assert(torture, (creds_state != NULL), "memory allocation failed");
 
 	status = dcerpc_netr_ServerAuthenticate2_r(net_handle, mem_ctx, &a);
@@ -2562,7 +2568,7 @@ static bool torture_samba3_rpc_lsa(struct torture_context *torture)
 	}
 
 	{
-		int i;
+		size_t i;
 		int levels[] = { 2,3,5,6 };
 
 		for (i=0; i<ARRAY_SIZE(levels); i++) {
@@ -2638,7 +2644,7 @@ static bool find_printers(struct torture_context *tctx,
 	struct srvsvc_NetShareCtr1 c1_in;
 	struct srvsvc_NetShareCtr1 *c1;
 	uint32_t totalentries = 0;
-	int i;
+	uint32_t i;
 	struct dcerpc_binding_handle *b = p->binding_handle;
 
 	ZERO_STRUCT(c1_in);

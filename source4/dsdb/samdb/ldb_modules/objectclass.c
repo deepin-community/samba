@@ -1,4 +1,4 @@
-/* 
+/*
    ldb database library
 
    Copyright (C) Simo Sorce  2006-2008
@@ -9,12 +9,12 @@
    it under the terms of the GNU General Public License as published by
    the Free Software Foundation; either version 3 of the License, or
    (at your option) any later version.
-   
+
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
    GNU General Public License for more details.
-   
+
    You should have received a copy of the GNU General Public License
    along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
@@ -24,7 +24,7 @@
  *
  *  Component: objectClass sorting and constraint checking module
  *
- *  Description: 
+ *  Description:
  *  - sort the objectClass attribute into the class
  *    hierarchy and perform constraint checks (correct RDN name,
  *    valid parent),
@@ -198,12 +198,12 @@ static int get_search_callback(struct ldb_request *req, struct ldb_reply *ares)
    The resulting DN should be:
 
     CN=Admins,CN=Users,DC=samba,DC=example,DC=com
-   
+
  */
 static int fix_dn(struct ldb_context *ldb,
 		  TALLOC_CTX *mem_ctx,
-		  struct ldb_dn *newdn, struct ldb_dn *parent_dn, 
-		  struct ldb_dn **fixed_dn) 
+		  struct ldb_dn *newdn, struct ldb_dn *parent_dn,
+		  struct ldb_dn **fixed_dn)
 {
 	char *upper_rdn_attr;
 	const struct ldb_val *rdn_val;
@@ -216,7 +216,7 @@ static int fix_dn(struct ldb_context *ldb,
 	}
 
 	/* We need the attribute name in upper case */
-	upper_rdn_attr = strupper_talloc(*fixed_dn, 
+	upper_rdn_attr = strupper_talloc(*fixed_dn,
 					 ldb_dn_get_rdn_name(newdn));
 	if (upper_rdn_attr == NULL) {
 		return ldb_oom(ldb);
@@ -385,7 +385,7 @@ static int objectclass_do_add(struct oc_context *ac)
 		instanceType = ldb_msg_find_attr_as_uint(msg, "instanceType",
 							 0);
 		if (!(instanceType & INSTANCE_TYPE_IS_NC_HEAD)) {
-			ldb_asprintf_errstring(ldb, "objectclass: Cannot add %s, parent does not exist!", 
+			ldb_asprintf_errstring(ldb, "objectclass: Cannot add %s, parent does not exist!",
 					       ldb_dn_get_linearized(msg->dn));
 			return LDB_ERR_NO_SUCH_OBJECT;
 		}
@@ -781,7 +781,7 @@ static int oc_modify_callback(struct ldb_request *req, struct ldb_reply *ares)
 				   ac, ac->req->op.mod.message->dn,
 				   LDB_SCOPE_BASE,
 				   "(objectClass=*)",
-				   attrs, NULL, 
+				   attrs, NULL,
 				   ac, get_search_callback,
 				   ac->req);
 	LDB_REQ_SET_LOCATION(search_req);
@@ -1410,14 +1410,14 @@ static int objectclass_do_delete(struct oc_context *ac)
 								   "isCriticalSystemObject", false);
 		if (isCriticalSystemObject) {
 			/*
-			 * Following the explaination from Microsoft
+			 * Following the explanation from Microsoft
 			 * https://lists.samba.org/archive/cifs-protocol/2011-August/002046.html
 			 * "I finished the investigation on this behavior.
 			 * As per MS-ADTS 3.1.5.5.7.2 , when a tree deletion is performed ,
 			 * every object in the tree will be checked to see if it has isCriticalSystemObject
 			 * set to TRUE, including the root node on which the delete operation is performed
 			 * But there is an exception  if the root object is a SAM specific objects(3.1.1.5.2.3 MS-ADTS)
-			 * Its deletion is done through SAM manger and isCriticalSystemObject attribute is not checked
+			 * Its deletion is done through SAM manager and isCriticalSystemObject attribute is not checked
 			 * The root node of the tree delete in your case is CN=ARES,OU=Domain Controllers,DC=w2k8r2,DC=home,DC=matws,DC=net
 			 * which is a SAM object  with  user class.  Therefore the tree deletion is performed without any error
 			 */
@@ -1447,7 +1447,7 @@ static int objectclass_init(struct ldb_module *module)
 	if (ret != LDB_SUCCESS) {
 		return ret;
 	}
-	
+
 	/* Look for the opaque to indicate we might have to cut down the DN of defaultObjectCategory */
 	ldb_module_set_private(module, ldb_get_opaque(ldb, DSDB_EXTENDED_DN_STORE_FORMAT_OPAQUE_NAME));
 

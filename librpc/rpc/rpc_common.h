@@ -27,6 +27,8 @@
 #include "gen_ndr/dcerpc.h"
 #include "lib/util/attr.h"
 
+#include "librpc/ndr/libndr.h"
+
 struct dcerpc_binding_handle;
 struct GUID;
 struct ndr_interface_table;
@@ -112,6 +114,8 @@ struct dcerpc_binding;
 
 #define DCERPC_SMB1                    (1<<27)
 
+#define DCERPC_SCHANNEL_KRB5           (1<<28)
+
 /* The following definitions come from ../librpc/rpc/dcerpc_error.c  */
 
 const char *dcerpc_errstr(TALLOC_CTX *mem_ctx, uint32_t fault_code);
@@ -160,7 +164,7 @@ uint32_t dcerpc_binding_get_flags(const struct dcerpc_binding *b);
 NTSTATUS dcerpc_binding_set_flags(struct dcerpc_binding *b,
 				  uint32_t additional,
 				  uint32_t clear);
-NTSTATUS dcerpc_floor_get_lhs_data(const struct epm_floor *epm_floor, struct ndr_syntax_id *syntax);
+NTSTATUS dcerpc_floor_get_uuid_full(const struct epm_floor *epm_floor, struct ndr_syntax_id *syntax);
 const char *derpc_transport_string_by_transport(enum dcerpc_transport_t t);
 enum dcerpc_transport_t dcerpc_transport_by_name(const char *name);
 enum dcerpc_transport_t dcerpc_transport_by_tower(const struct epm_tower *tower);
@@ -170,13 +174,23 @@ enum dcerpc_transport_t dcerpc_transport_by_tower(const struct epm_tower *tower)
 struct dcerpc_binding_handle_ops {
 	const char *name;
 
+	const struct dcerpc_binding *(*get_binding)(struct dcerpc_binding_handle *h);
+
 	bool (*is_connected)(struct dcerpc_binding_handle *h);
 	uint32_t (*set_timeout)(struct dcerpc_binding_handle *h,
 				uint32_t timeout);
 
+	bool (*transport_encrypted)(struct dcerpc_binding_handle *h);
+	NTSTATUS (*transport_session_key)(struct dcerpc_binding_handle *h,
+					  TALLOC_CTX *mem_ctx,
+					  DATA_BLOB *session_key);
+
 	void (*auth_info)(struct dcerpc_binding_handle *h,
 			  enum dcerpc_AuthType *auth_type,
 			  enum dcerpc_AuthLevel *auth_level);
+	NTSTATUS (*auth_session_key)(struct dcerpc_binding_handle *h,
+				     TALLOC_CTX *mem_ctx,
+				     DATA_BLOB *session_key);
 
 	struct tevent_req *(*raw_call_send)(TALLOC_CTX *mem_ctx,
 					    struct tevent_context *ev,
@@ -202,7 +216,7 @@ struct dcerpc_binding_handle_ops {
 	bool (*ref_alloc)(struct dcerpc_binding_handle *h);
 	bool (*use_ndr64)(struct dcerpc_binding_handle *h);
 	void (*do_ndr_print)(struct dcerpc_binding_handle *h,
-			     int ndr_flags,
+			     ndr_flags_type ndr_flags,
 			     const void *struct_ptr,
 			     const struct ndr_interface_call *call);
 	void (*ndr_push_failed)(struct dcerpc_binding_handle *h,
@@ -243,14 +257,30 @@ void *_dcerpc_binding_handle_data(struct dcerpc_binding_handle *h);
 _DEPRECATED_ void dcerpc_binding_handle_set_sync_ev(struct dcerpc_binding_handle *h,
 						    struct tevent_context *ev);
 
+const struct dcerpc_binding *dcerpc_binding_handle_get_binding(struct dcerpc_binding_handle *h);
+
+enum dcerpc_transport_t dcerpc_binding_handle_get_transport(struct dcerpc_binding_handle *h);
+
 bool dcerpc_binding_handle_is_connected(struct dcerpc_binding_handle *h);
 
 uint32_t dcerpc_binding_handle_set_timeout(struct dcerpc_binding_handle *h,
 					   uint32_t timeout);
 
+bool dcerpc_binding_handle_transport_encrypted(struct dcerpc_binding_handle *h);
+
+NTSTATUS dcerpc_binding_handle_transport_session_key(
+		struct dcerpc_binding_handle *h,
+		TALLOC_CTX *mem_ctx,
+		DATA_BLOB *session_key);
+
 void dcerpc_binding_handle_auth_info(struct dcerpc_binding_handle *h,
 				     enum dcerpc_AuthType *auth_type,
 				     enum dcerpc_AuthLevel *auth_level);
+
+NTSTATUS dcerpc_binding_handle_auth_session_key(
+		struct dcerpc_binding_handle *h,
+		TALLOC_CTX *mem_ctx,
+		DATA_BLOB *session_key);
 
 struct tevent_req *dcerpc_binding_handle_raw_call_send(TALLOC_CTX *mem_ctx,
 						struct tevent_context *ev,
@@ -327,7 +357,7 @@ bool dcerpc_sec_vt_header2_equal(const struct dcerpc_sec_vt_header2 *v1,
  *
  * @param[in] vt a pointer to the security verification trailer.
  * @param[in] bitmask1 which flags were negotiated on the connection.
- * @param[in] pcontext the syntaxes negotiatied for the presentation context.
+ * @param[in] pcontext the syntaxes negotiated for the presentation context.
  * @param[in] header2 some fields from the PDU header.
  *
  * @retval true on success.
@@ -382,7 +412,7 @@ NTSTATUS dcerpc_ncacn_push_auth(DATA_BLOB *blob,
 
 void dcerpc_log_packet(const char *packet_log_dir,
 		       const char *interface_name,
-		       uint32_t opnum, uint32_t flags,
+		       uint32_t opnum, ndr_flags_type flags,
 		       const DATA_BLOB *pkt,
 		       const char *why);
 
@@ -391,7 +421,7 @@ void dcerpc_save_ndr_fuzz_seed(TALLOC_CTX *mem_ctx,
 			       DATA_BLOB raw_blob,
 			       const char *dump_dir,
 			       const char *iface_name,
-			       int flags,
+			       ndr_flags_type flags,
 			       int opnum,
 			       bool ndr64);
 #else
@@ -399,7 +429,7 @@ static inline void dcerpc_save_ndr_fuzz_seed(TALLOC_CTX *mem_ctx,
 					     DATA_BLOB raw_blob,
 					     const char *dump_dir,
 					     const char *iface_name,
-					     int flags,
+					     ndr_flags_type flags,
 					     int opnum,
 					     bool ndr64)
 {

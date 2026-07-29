@@ -158,6 +158,18 @@ struct dcesrv_call_state {
 	struct dcerpc_auth in_auth_info;
 	struct dcerpc_auth _out_auth_info;
 	struct dcerpc_auth *out_auth_info;
+
+	/*
+	 * Optional subreq for pending calls,
+	 * will be used to call tevent_req_cancel()
+	 * if the connection terminates,
+	 * we got an ORPHANED PDU
+	 * or got a CO_CANCEL PDU
+	 */
+	bool got_disconnect;
+	bool got_orphaned;
+	bool got_co_cancel;
+	struct tevent_req *subreq;
 };
 
 /*
@@ -232,6 +244,7 @@ struct dcesrv_connection_context {
 
 	/* the negotiated transfer syntax */
 	struct ndr_syntax_id transfer_syntax;
+	bool ndr64;
 };
 
 
@@ -259,6 +272,7 @@ struct dcesrv_connection {
 	struct dcesrv_call_state *call_list;
 
 	/* the maximum size the client wants to receive */
+	uint16_t transport_max_recv_frag;
 	uint16_t max_recv_frag;
 	uint16_t max_xmit_frag;
 
@@ -292,6 +306,7 @@ struct dcesrv_connection {
 	struct dcesrv_auth *default_auth_state;
 	size_t max_auth_states;
 	struct dcesrv_auth *auth_states;
+	bool got_explicit_auth_level_non_connect;
 	bool got_explicit_auth_level_connect;
 	struct dcesrv_auth *default_auth_level_connect;
 	bool client_hdr_signing;
@@ -436,12 +451,28 @@ struct dcesrv_context {
 		bool use_single_process;
 	} *endpoint_list;
 
+	/*
+	 * registered auth_type/principals
+	 * for dcesrv_mgmt_inq_princ_name()
+	 */
+	struct dcesrv_ctx_principal {
+		struct dcesrv_ctx_principal *next, *prev;
+		enum dcerpc_AuthType auth_type;
+		const char *principal_name;
+	} *principal_list;
+
 	/* loadparm context to use for this connection */
 	struct loadparm_context *lp_ctx;
 
 	struct idr_context *assoc_groups_idr;
+	uint32_t assoc_groups_num;
 
 	struct dcesrv_connection *broken_connections;
+
+	/*
+	 * Our preferred transfer syntax.
+	 */
+	const struct ndr_syntax_id *preferred_transfer;
 
 	struct dcesrv_context_callbacks *callbacks;
 };
@@ -460,6 +491,14 @@ struct dcesrv_critical_sizes {
 	int sizeof_dcesrv_handle;
 };
 
+NTSTATUS dcesrv_auth_type_principal_register(struct dcesrv_context *dce_ctx,
+					     enum dcerpc_AuthType auth_type,
+					     const char *principal_name);
+const char *dcesrv_auth_type_principal_find(struct dcesrv_context *dce_ctx,
+					    enum dcerpc_AuthType auth_type);
+NTSTATUS dcesrv_register_default_auth_types(struct dcesrv_context *dce_ctx,
+					    const char *principal);
+NTSTATUS dcesrv_register_default_auth_types_machine_principal(struct dcesrv_context *dce_ctx);
 NTSTATUS dcesrv_interface_register(struct dcesrv_context *dce_ctx,
 				   const char *ep_name,
 				   const char *ncacn_np_secondary_endpoint,
@@ -489,7 +528,16 @@ void dcesrv_context_set_callbacks(
 	struct dcesrv_context *dce_ctx,
 	struct dcesrv_context_callbacks *cb);
 
+/*
+ * Use dcesrv_async_reply() in async code
+ */
 NTSTATUS dcesrv_reply(struct dcesrv_call_state *call);
+void _dcesrv_async_reply(struct dcesrv_call_state *call,
+			 const char *func,
+			 const char *location);
+#define dcesrv_async_reply(__call) \
+	_dcesrv_async_reply(__call, __func__, __location__)
+
 struct dcesrv_handle *dcesrv_handle_create(struct dcesrv_call_state *call,
 					   uint8_t handle_type);
 
@@ -518,6 +566,9 @@ NTSTATUS dcesrv_auth_session_key(struct dcesrv_call_state *call,
 NTSTATUS dcesrv_transport_session_key(struct dcesrv_call_state *call,
 				      DATA_BLOB *session_key);
 
+void dcesrv_call_disconnect_after(struct dcesrv_call_state *call,
+				  const char *reason);
+
 /* a useful macro for generating a RPC fault in the backend code */
 #define DCESRV_FAULT(code) do { \
 	dce_call->fault_code = code; \
@@ -529,6 +580,14 @@ NTSTATUS dcesrv_transport_session_key(struct dcesrv_call_state *call,
 	dce_call->fault_code = code; \
 	return; \
 } while(0)
+
+#define DCESRV_NOT_USED_ON_WIRE(__opname) \
+static void dcesrv_## __opname(struct dcesrv_call_state *dce_call,\
+			       TALLOC_CTX *mem_ctx, \
+			       struct __opname *r) \
+{ \
+        DCESRV_FAULT_VOID(DCERPC_FAULT_OP_RNG_ERROR); \
+}
 
 /* a useful macro for checking the validity of a dcerpc policy handle
    and giving the right fault code if invalid */
@@ -590,6 +649,8 @@ _PUBLIC_ NTSTATUS dcesrv_interface_bind_reject_connect(struct dcesrv_connection_
 						       const struct dcesrv_interface *iface);
 _PUBLIC_ NTSTATUS dcesrv_interface_bind_allow_connect(struct dcesrv_connection_context *context,
 						      const struct dcesrv_interface *iface);
+
+_PUBLIC_ void dcesrv_assoc_group_common_destructor(struct dcesrv_assoc_group *assoc_group);
 
 _PUBLIC_ NTSTATUS _dcesrv_iface_state_store_assoc(
 		struct dcesrv_call_state *call,
@@ -655,7 +716,7 @@ _PUBLIC_ const struct dcesrv_interface *find_interface_by_syntax_id(
 
 void _dcesrv_save_ndr_fuzz_seed(DATA_BLOB call_blob,
 				struct dcesrv_call_state *call,
-				int flags);
+				ndr_flags_type flags);
 
 #if DEVELOPER
 #define  dcesrv_save_ndr_fuzz_seed(stub, call, flags) \

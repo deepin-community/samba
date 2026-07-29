@@ -142,12 +142,6 @@ NTSTATUS gensec_ntlmssp_resume_ccache(struct gensec_security *gensec_security,
 
 	/* parse the NTLMSSP packet */
 
-	if (in.length > UINT16_MAX) {
-		DEBUG(1, ("%s: reject large request of length %u\n",
-			__func__, (unsigned int)in.length));
-		return NT_STATUS_INVALID_PARAMETER;
-	}
-
 	ok = msrpc_parse(ntlmssp_state, &in, "Cdd",
 			 "NTLMSSP",
 			 &ntlmssp_command,
@@ -416,7 +410,6 @@ NTSTATUS ntlmssp_client_challenge(struct gensec_security *gensec_security,
 		nt_hash = cli_credentials_get_nt_hash(gensec_security->credentials,
 						      mem_ctx);
 		if (nt_hash != NULL) {
-			ZERO_STRUCTP(nt_hash);
 			TALLOC_FREE(nt_hash);
 			ntlmssp_state->use_ccache = false;
 		}
@@ -599,6 +592,8 @@ NTSTATUS ntlmssp_client_challenge(struct gensec_security *gensec_security,
 			SingleHost->Value.AvSingleHost.remaining = data_blob_null;
 		}
 
+		if (!(gensec_security->want_features & GENSEC_FEATURE_CB_OPTIONAL)
+		    || gensec_security->channel_bindings != NULL)
 		{
 			struct AV_PAIR *ChannelBindings = NULL;
 
@@ -607,13 +602,12 @@ NTSTATUS ntlmssp_client_challenge(struct gensec_security *gensec_security,
 			count++;
 			*eol = *ChannelBindings;
 
-			/*
-			 * gensec doesn't support channel bindings yet,
-			 * but we want to match Windows on the wire
-			 */
 			ChannelBindings->AvId = MsvChannelBindings;
-			memset(ChannelBindings->Value.ChannelBindings, 0,
-			       sizeof(ChannelBindings->Value.ChannelBindings));
+			nt_status = ntlmssp_hash_channel_bindings(gensec_security,
+					ChannelBindings->Value.ChannelBindings);
+			if (!NT_STATUS_IS_OK(nt_status)) {
+				return nt_status;
+			}
 		}
 
 		service = gensec_get_target_service(gensec_security);

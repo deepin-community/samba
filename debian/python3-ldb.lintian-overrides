@@ -1,2 +1,0 @@
-python3-ldb: package-name-doesnt-match-sonames libpyldb-util.cpython-*
-python3-ldb: library-not-linked-against-libc */libpyldb-util.*.so.*

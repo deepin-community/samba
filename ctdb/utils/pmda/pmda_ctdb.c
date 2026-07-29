@@ -15,8 +15,7 @@
  * for more details.
  *
  * You should have received a copy of the GNU General Public License along
- * with this program; if not, write to the Free Software Foundation, Inc.,
- * 59 Temple Place, Suite 330, Boston, MA  02111-1307 USA
+ * with this program; if not, see <https://www.gnu.org/licenses/>.
  */
 
 #include "replace.h"
@@ -28,6 +27,8 @@
 
 #include "lib/util/time.h"
 #include "lib/util/blocking.h"
+
+#include "common/path.h"
 
 #include "client/client.h"
 #include "client/client_sync.h"
@@ -50,9 +51,7 @@
  * CTDB PMDA
  *
  * This PMDA connects to the locally running ctdbd daemon and pulls
- * statistics for export via PCP. The ctdbd Unix domain socket path can be
- * specified with the CTDB_SOCKET environment variable, otherwise the default
- * path is used.
+ * statistics for export via PCP.
  */
 
 /*
@@ -192,7 +191,7 @@ pmda_ctdb_disconnected(void *args)
 static int
 pmda_ctdb_daemon_connect(void)
 {
-	const char *socket_name;
+	char *socket_name = NULL;
 	int ret;
 
 	ev = tevent_context_init(NULL);
@@ -201,9 +200,9 @@ pmda_ctdb_daemon_connect(void)
 		return -1;
 	}
 
-	socket_name = getenv("CTDB_SOCKET");
+	socket_name = path_socket(ev, "ctdbd");
 	if (socket_name == NULL) {
-		socket_name = CTDB_SOCKET;
+		goto err_ev;
 	}
 
 	ret = ctdb_client_init(ev, ev, socket_name, &client);
@@ -216,6 +215,7 @@ pmda_ctdb_daemon_connect(void)
 	ctdb_client_set_disconnect_callback(client, pmda_ctdb_disconnected,
 					    NULL);
 
+	talloc_free(socket_name);
 	return 0;
 
 err_ev:

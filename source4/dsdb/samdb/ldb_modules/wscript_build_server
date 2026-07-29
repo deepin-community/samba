@@ -195,7 +195,7 @@ bld.SAMBA_MODULE('ldb_password_hash',
 	init_function='ldb_password_hash_module_init',
 	module_init_name='ldb_init_module',
 	internal_module=False,
-	deps='talloc samdb LIBCLI_AUTH NDR_DRSBLOBS authkrb5 krb5 gpgme DSDB_MODULE_HELPERS crypt db-glue'
+	deps='talloc samdb LIBCLI_AUTH NDR_DRSBLOBS authkrb5 krb5 gpgme DSDB_MODULE_HELPERS util_crypt db-glue'
 	)
 
 
@@ -345,7 +345,7 @@ bld.SAMBA_MODULE('ldb_anr',
 	init_function='ldb_anr_module_init',
 	module_init_name='ldb_init_module',
 	internal_module=False,
-	deps='talloc samba-util samdb'
+	deps='talloc samba-util samdb ldbsamba'
 	)
 
 
@@ -360,12 +360,12 @@ bld.SAMBA_MODULE('ldb_instancetype',
 
 
 bld.SAMBA_MODULE('ldb_operational',
-	source='operational.c',
+	source='operational.c managed_pwd.c',
 	subsystem='ldb',
 	init_function='ldb_operational_module_init',
 	module_init_name='ldb_init_module',
 	internal_module=False,
-	deps='talloc samba-util samdb-common DSDB_MODULE_HELPERS samdb'
+	deps='talloc samba-util samdb-common DSDB_MODULE_HELPERS samdb gkdi gmsa NDR_GKDI NDR_GMSA'
 	)
 
 
@@ -385,7 +385,7 @@ bld.SAMBA_MODULE('ldb_resolve_oids',
 	init_function='ldb_resolve_oids_module_init',
 	module_init_name='ldb_init_module',
 	internal_module=False,
-	deps='samdb talloc ndr'
+	deps='samdb talloc ndr ldbsamba'
 	)
 
 

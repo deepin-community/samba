@@ -5,12 +5,16 @@
 
 import sys
 import os
-import optparse
-from waflib import Scripting, Options, Utils
-from waflib.ConfigSet import ConfigSet as Environment
+from waflib import Options, Utils
 
-from samba_utils import *
-from samba_autoconf import *
+from samba_utils import (
+    ADD_LD_LIBRARY_PATH,
+    CHECK_MAKEFLAGS,
+    EXPAND_VARIABLES,
+    LOAD_ENVIRONMENT,
+    RUN_COMMAND,
+)
+from samba_autoconf import CONFIG_GET, CONFIG_SET
 import types
 
 DEFAULT_SELFTEST_PREFIX="./st"
@@ -139,6 +143,7 @@ def cmd_testonly(opt):
     env.FILTER_XFAIL = ('${PYTHON} -u ${srcdir}/selftest/filter-subunit '
                         '--expected-failures=${srcdir}/selftest/knownfail '
                         '--expected-failures=${srcdir}/selftest/knownfail.d '
+                        '--expected-failures=${srcdir}/selftest/expectedfail.d '
                         '--flapping=${srcdir}/selftest/flapping '
                         '--flapping=${srcdir}/selftest/flapping.d')
 
@@ -248,6 +253,8 @@ def cmd_testonly(opt):
     env.OPTIONS += " --nss_wrapper_so_path=" + CONFIG_GET(opt, 'LIBNSS_WRAPPER_SO_PATH')
     env.OPTIONS += " --resolv_wrapper_so_path=" + CONFIG_GET(opt, 'LIBRESOLV_WRAPPER_SO_PATH')
     env.OPTIONS += " --uid_wrapper_so_path=" + CONFIG_GET(opt, 'LIBUID_WRAPPER_SO_PATH')
+    env.OPTIONS += " --pam_wrapper_so_path=" + CONFIG_GET(opt, 'LIBPAM_WRAPPER_SO_PATH')
+    env.OPTIONS += " --pam_matrix_so_path=" + CONFIG_GET(opt, 'PAM_MATRIX_SO_PATH')
 
     # selftest can optionally use kernel namespaces instead of socket-wrapper
     if os.environ.get('USE_NAMESPACES') is None:
@@ -261,20 +268,19 @@ def cmd_testonly(opt):
 
     if CONFIG_GET(opt, 'USING_SYSTEM_KRB5') and CONFIG_GET(opt, 'MIT_KDC_PATH'):
         env.OPTIONS += " --exclude=${srcdir}/selftest/skip_mit_kdc"
-        if CONFIG_GET(opt, 'HAVE_MIT_KRB5_PRE_1_20'):
-            env.OPTIONS += " --exclude=${srcdir}/selftest/skip_mit_kdc_pre_1_20"
-
-        env.FILTER_XFAIL += " --expected-failures=${srcdir}/selftest/"\
-                            "knownfail_mit_kdc"
-
-        if CONFIG_GET(opt, 'HAVE_MIT_KRB5_PRE_1_20'):
-            env.FILTER_XFAIL += ' --expected-failures=${srcdir}/selftest/knownfail_mit_kdc_pre_1_20'
-
-        if CONFIG_GET(opt, 'HAVE_MIT_KRB5_1_20'):
-            env.FILTER_XFAIL += ' --expected-failures=${srcdir}/selftest/knownfail_mit_kdc_1_20'
+        env.FILTER_XFAIL += (
+            " --expected-failures=${srcdir}/selftest/knownfail_mit_kdc"
+            " --expected-failures=${srcdir}/selftest/knownfail_mit_kdc.d"
+        )
     else:
+        env.FILTER_XFAIL += (
+            " --expected-failures=${srcdir}/selftest/knownfail_heimdal_kdc"
+            " --expected-failures=${srcdir}/selftest/knownfail_heimdal_kdc.d"
+        )
+
+    if CONFIG_SET(opt, 'USING_EMBEDDED_HEIMDAL'):
         env.FILTER_XFAIL += " --expected-failures=${srcdir}/selftest/"\
-                            "knownfail_heimdal_kdc"
+                            "expectedfail_heimdal"
 
     if CONFIG_GET(opt, 'SIZEOF_VOID_P') == 4:
         env.FILTER_XFAIL += " --expected-failures=${srcdir}/selftest/knownfail-32bit"
@@ -327,9 +333,8 @@ def cmd_testonly(opt):
         asan_options += ":suppressions=${srcdir}/selftest/sanitizer/asan.supp"
         asan_options += " "
 
-        # And we need to disable RTLD_DEEPBIND in ldb and socket wrapper
-        no_leak_check = "LDB_MODULES_DISABLE_DEEPBIND=1 "
-        no_leak_check += "SOCKET_WRAPPER_DISABLE_DEEP_BIND=1"
+        # We need to disable RTLD_DEEPBIND in socket wrapper
+        no_leak_check = "SOCKET_WRAPPER_DISABLE_DEEP_BIND=1"
         no_leak_check += " "
         env.CORE_COMMAND = asan_options + no_leak_check + env.CORE_COMMAND
 

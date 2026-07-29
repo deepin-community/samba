@@ -11,11 +11,9 @@ Author: rong wang <wangrong@uniontech.com>
 Bug: https://pms.uniontech.com/bug-view-259307.html
 Forwarded: not-needed
 ---
-Index: samba-4.17.12.4/source3/librpc/crypto/gse.c
-===================================================================
---- samba-4.17.12.4.orig/source3/librpc/crypto/gse.c
-+++ samba-4.17.12.4/source3/librpc/crypto/gse.c
-@@ -594,7 +594,7 @@ init_sec_context_done:
+--- a/source3/librpc/crypto/gse.c
++++ b/source3/librpc/crypto/gse.c
+@@ -621,7 +621,7 @@
  			DBG_ERR("gss_init_sec_context failed with [%s](%u)\n",
  				gse_errstr(talloc_tos(), gss_maj, gss_min),
  				gss_min);

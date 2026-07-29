@@ -62,7 +62,7 @@ static void forall_domain_children(bool (*fn)(struct winbindd_child *c,
 	for (d = domain_list(); d != NULL; d = d->next) {
 		int i;
 
-		for (i = 0; i < lp_winbind_max_domain_connections(); i++) {
+		for (i = 0; i < talloc_array_length(d->children); i++) {
 			struct winbindd_child *c = &d->children[i];
 			bool ok;
 
@@ -434,7 +434,7 @@ static struct winbindd_child *choose_domain_child(struct winbindd_domain *domain
 	struct winbindd_child *current;
 	int i;
 
-	for (i=0; i<lp_winbind_max_domain_connections(); i++) {
+	for (i=0; i<talloc_array_length(domain->children); i++) {
 		size_t shortest_len, current_len;
 
 		current = &domain->children[i];
@@ -532,6 +532,7 @@ static void wb_domain_request_trigger(struct tevent_req *req,
 	struct wb_domain_request_state *state = tevent_req_data(
 		req, struct wb_domain_request_state);
 	struct winbindd_domain *domain = state->domain;
+	const char *domain_name = NULL;
 	struct tevent_req *subreq = NULL;
 	size_t shortest_queue_length;
 
@@ -604,8 +605,11 @@ static void wb_domain_request_trigger(struct tevent_req *req,
 	 * which is indicated by DS_RETURN_DNS_NAME.
 	 * For NT4 domains we still get the netbios name.
 	 */
+
+	domain_name = find_dns_domain_name(state->domain->name);
+
 	subreq = wb_dsgetdcname_send(state, state->ev,
-				     state->domain->name,
+				     domain_name,
 				     NULL, /* domain_guid */
 				     NULL, /* site_name */
 				     DS_RETURN_DNS_NAME); /* flags */
@@ -701,8 +705,6 @@ static void wb_domain_request_initialized(struct tevent_req *subreq)
 		}
 	}
 
-	state->domain->native_mode =
-			(*state->r.out.flags & WB_DOMINFO_DOMAIN_NATIVE);
 	state->domain->active_directory =
 			(*state->r.out.flags & WB_DOMINFO_DOMAIN_AD);
 	state->domain->initialized = true;
@@ -922,14 +924,18 @@ void winbind_disconnect_dc_parent(struct messaging_context *msg_ctx,
 	forall_children(winbind_msg_relay_fn, &state);
 }
 
-static void winbindd_msg_reload_services_child(struct messaging_context *msg,
-					       void *private_data,
-					       uint32_t msg_type,
-					       struct server_id server_id,
-					       DATA_BLOB *data)
+static bool winbindd_child_msg_filter(struct messaging_rec *rec,
+				      void *private_data)
 {
-	DBG_DEBUG("Got reload-config message\n");
-	winbindd_reload_services_file((const char *)private_data);
+	struct winbindd_child *child = talloc_get_type_abort(private_data,
+			struct winbindd_child);
+
+	if (rec->msg_type == MSG_SMB_CONF_UPDATED) {
+		DBG_DEBUG("Got reload-config message\n");
+		winbindd_reload_services_file(child->logfilename);
+	}
+
+	return false;
 }
 
 /* React on 'smbcontrol winbindd reload-config' in the same way as on SIGHUP*/
@@ -944,6 +950,7 @@ void winbindd_msg_reload_services_parent(struct messaging_context *msg,
 		.msg_type = msg_type,
 		.data = data,
 	};
+	bool ok;
 
 	DBG_DEBUG("Got reload-config message\n");
 
@@ -957,6 +964,11 @@ void winbindd_msg_reload_services_parent(struct messaging_context *msg,
 		tevent_thread_call_depth_set_callback(winbind_call_flow, NULL);
 	} else {
 		tevent_thread_call_depth_set_callback(NULL, NULL);
+	}
+
+	ok = add_trusted_domains_dc();
+	if (!ok) {
+		DBG_ERR("add_trusted_domains_dc() failed\n");
 	}
 
 	forall_children(winbind_msg_relay_fn, &state);
@@ -1252,7 +1264,7 @@ static bool calculate_next_machine_pwd_change(const char *domain,
 					    NULL);
 
 	if (pw == NULL) {
-		DEBUG(0,("cannot fetch own machine password ????"));
+		DEBUG(0,("cannot fetch own machine password ????\n"));
 		return false;
 	}
 
@@ -1275,7 +1287,7 @@ static bool calculate_next_machine_pwd_change(const char *domain,
 		next_change = pass_last_set_time + timeout;
 		DEBUG(10,("machine password still valid until: %s\n",
 			http_timestring(talloc_tos(), next_change)));
-		*t = timeval_set(next_change, 0);
+		*t = tevent_timeval_set(next_change, 0);
 
 		if (lp_clustering()) {
 			uint8_t randbuf;
@@ -1667,6 +1679,7 @@ static bool fork_domain_child(struct winbindd_child *child)
 	NTSTATUS status;
 	ssize_t nwritten;
 	struct tevent_fd *fde;
+	struct tevent_req *req = NULL;
 
 	if (child->domain) {
 		DEBUG(10, ("fork_domain_child called for domain '%s'\n",
@@ -1779,6 +1792,8 @@ static bool fork_domain_child(struct winbindd_child *child)
 		process_set_title("wb[%s]", "domain child [%s]", child_domain->name);
 	} else if (is_idmap_child(child)) {
 		process_set_title("wb-idmap", "idmap child");
+	} else if (is_locator_child(child)) {
+		process_set_title("wb-locator", "locator child");
 	}
 
 	/* Handle online/offline messages. */
@@ -1794,11 +1809,16 @@ static bool fork_domain_child(struct winbindd_child *child)
 	messaging_register(global_messaging_context(), NULL,
 			   MSG_WINBIND_DISCONNECT_DC,
 			   winbind_msg_disconnect_dc);
-	messaging_register(
-		global_messaging_context(),
-		child->logfilename,
-		MSG_SMB_CONF_UPDATED,
-		winbindd_msg_reload_services_child);
+
+	req = messaging_filtered_read_send(global_event_context(),
+					   global_event_context(),
+					   global_messaging_context(),
+					   winbindd_child_msg_filter,
+					   child);
+	if (req == NULL) {
+		DBG_ERR("messaging_filtered_read_send failed\n");
+		_exit(1);
+	}
 
 	primary_domain = find_our_domain();
 
@@ -1984,7 +2004,7 @@ bool winbindd_setup_sig_term_handler(bool parent)
 			       winbindd_sig_term_handler,
 			       is_parent);
 	if (!se) {
-		DEBUG(0,("failed to setup SIGTERM handler"));
+		DEBUG(0,("failed to setup SIGTERM handler\n"));
 		talloc_free(is_parent);
 		return false;
 	}
@@ -1995,7 +2015,7 @@ bool winbindd_setup_sig_term_handler(bool parent)
 			       winbindd_sig_term_handler,
 			       is_parent);
 	if (!se) {
-		DEBUG(0,("failed to setup SIGINT handler"));
+		DEBUG(0,("failed to setup SIGINT handler\n"));
 		talloc_free(is_parent);
 		return false;
 	}
@@ -2006,7 +2026,7 @@ bool winbindd_setup_sig_term_handler(bool parent)
 			       winbindd_sig_term_handler,
 			       is_parent);
 	if (!se) {
-		DEBUG(0,("failed to setup SIGINT handler"));
+		DEBUG(0,("failed to setup SIGINT handler\n"));
 		talloc_free(is_parent);
 		return false;
 	}
@@ -2046,7 +2066,7 @@ static void winbindd_sig_hup_handler(struct tevent_context *ev,
 {
 	const char *file = (const char *)private_data;
 
-	DEBUG(1,("Reloading services after SIGHUP\n"));
+	DBG_NOTICE("Reloading services after SIGHUP\n");
 	flush_caches_noinit();
 	winbindd_reload_services_file(file);
 }

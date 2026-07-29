@@ -1,0 +1,2 @@
+usr/lib/${DEB_HOST_MULTIARCH}/libsmbclient.so.0*
+usr/share/man/man7/libsmbclient.7

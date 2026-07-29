@@ -20,6 +20,8 @@
    along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
+#define SOURCE4_LIBRPC_INTERNALS 1
+
 #include "lib/replace/system/python.h"
 #include "python/py3compat.h"
 #include "includes.h"
@@ -51,7 +53,7 @@ bool py_check_dcerpc_type(PyObject *obj, const char *module, const char *type_na
 	Py_DECREF(mod);
 	if (type == NULL) {
 		PyErr_Format(PyExc_RuntimeError, "Unable to find type %s in module %s",
-			module, type_name);
+			     type_name, module);
 		return false;
 	}
 
@@ -102,11 +104,29 @@ PyObject *py_dcerpc_interface_init_helper(PyTypeObject *type, PyObject *args, Py
 	PyObject *py_lp_ctx = Py_None, *py_credentials = Py_None, *py_basis = Py_None;
 	NTSTATUS status;
 	unsigned int timeout = (unsigned int)-1;
+	int raise_result_exceptions = 1;
 	const char *kwnames[] = {
-		"binding", "lp_ctx", "credentials", "timeout", "basis_connection", NULL
+		"binding",
+		"lp_ctx",
+		"credentials",
+		"timeout",
+		"basis_connection",
+		"raise_result_exceptions",
+		NULL
 	};
+	bool ok;
 
-	if (!PyArg_ParseTupleAndKeywords(args, kwargs, "s|OOIO:samr", discard_const_p(char *, kwnames), &binding_string, &py_lp_ctx, &py_credentials, &timeout, &py_basis)) {
+	ok = PyArg_ParseTupleAndKeywords(args,
+					 kwargs,
+					 "s|OOIOp",
+					 discard_const_p(char *, kwnames),
+					 &binding_string,
+					 &py_lp_ctx,
+					 &py_credentials,
+					 &timeout,
+					 &py_basis,
+					 &raise_result_exceptions);
+	if (!ok) {
 		return NULL;
 	}
 
@@ -122,6 +142,7 @@ PyObject *py_dcerpc_interface_init_helper(PyTypeObject *type, PyObject *args, Py
 		return NULL;
 	}
 
+	ret->raise_result_exceptions = (raise_result_exceptions != 0);
 	ret->pipe = NULL;
 	ret->binding_handle = NULL;
 	ret->ev = NULL;
@@ -160,6 +181,8 @@ PyObject *py_dcerpc_interface_init_helper(PyTypeObject *type, PyObject *args, Py
 		struct dcerpc_pipe *base_pipe;
 		PyObject *py_base;
 		PyTypeObject *ClientConnection_Type;
+		struct loadparm_context *lp_ctx = NULL;
+		struct cli_credentials *credentials = NULL;
 
 		py_base = PyImport_ImportModule("samba.dcerpc.base");
 		if (py_base == NULL) {
@@ -204,16 +227,76 @@ PyObject *py_dcerpc_interface_init_helper(PyTypeObject *type, PyObject *args, Py
 			return NULL;
 		}
 
-		status = dcerpc_secondary_context(base_pipe, &ret->pipe, table);
-		if (!NT_STATUS_IS_OK(status)) {
-			PyErr_SetNTSTATUS(status);
-			Py_DECREF(ret);
-			Py_DECREF(py_base);
-			Py_DECREF(ClientConnection_Type);
-			return NULL;
+		if (py_lp_ctx != Py_None) {
+			lp_ctx = lpcfg_from_py_object(ret->ev, py_lp_ctx);
+			if (lp_ctx == NULL) {
+				PyErr_SetString(PyExc_TypeError, "Expected loadparm context");
+				Py_DECREF(ret);
+				return NULL;
+			}
 		}
 
-		ret->pipe = talloc_steal(ret->mem_ctx, ret->pipe);
+		if (py_credentials != Py_None) {
+			credentials = cli_credentials_from_py_object(py_credentials);
+			if (credentials == NULL) {
+				PyErr_SetString(PyExc_TypeError, "Expected credentials");
+				Py_DECREF(ret);
+				return NULL;
+			}
+		}
+
+		if (credentials != NULL) {
+			struct dcerpc_binding *binding = NULL;
+
+			if (lp_ctx == NULL) {
+				PyErr_SetString(
+					PyExc_TypeError,
+					"Expected a loadparm context together "
+					"with provided credentials");
+				Py_DECREF(ret);
+				Py_DECREF(py_base);
+				Py_DECREF(ClientConnection_Type);
+				return NULL;
+			}
+
+			status = dcerpc_parse_binding(ret->mem_ctx,
+						      binding_string,
+						      &binding);
+			if (!NT_STATUS_IS_OK(status)) {
+				PyErr_SetNTSTATUS(status);
+				Py_DECREF(ret);
+				Py_DECREF(py_base);
+				Py_DECREF(ClientConnection_Type);
+				return NULL;
+			}
+
+			status = dcerpc_secondary_auth_connection(base_pipe,
+								  binding,
+								  table,
+								  credentials,
+								  lp_ctx,
+								  ret->mem_ctx,
+								  &ret->pipe);
+			TALLOC_FREE(binding);
+			if (!NT_STATUS_IS_OK(status)) {
+				PyErr_SetNTSTATUS(status);
+				Py_DECREF(ret);
+				Py_DECREF(py_base);
+				Py_DECREF(ClientConnection_Type);
+				return NULL;
+			}
+		} else {
+			status = dcerpc_secondary_context(base_pipe, &ret->pipe, table);
+			if (!NT_STATUS_IS_OK(status)) {
+				PyErr_SetNTSTATUS(status);
+				Py_DECREF(ret);
+				Py_DECREF(py_base);
+				Py_DECREF(ClientConnection_Type);
+				return NULL;
+			}
+			ret->pipe = talloc_steal(ret->mem_ctx, ret->pipe);
+		}
+
 		Py_XDECREF(ClientConnection_Type);
 		Py_XDECREF(py_base);
 	} else {
@@ -300,14 +383,14 @@ static PyObject *py_dcerpc_run_function(dcerpc_InterfaceObject *iface,
 		return NULL;
 	}
 
-	result = md->unpack_out_data(r);
+	result = md->unpack_out_data(r, iface->raise_result_exceptions);
 
 	talloc_free(mem_ctx);
 	return result;
 }
 
 static PyObject *py_dcerpc_call_wrapper(PyObject *self, PyObject *args, void *wrapped, PyObject *kwargs)
-{	
+{
 	dcerpc_InterfaceObject *iface = (dcerpc_InterfaceObject *)self;
 	const struct PyNdrRpcMethodDef *md = (const struct PyNdrRpcMethodDef *)wrapped;
 
@@ -332,7 +415,7 @@ bool PyInterface_AddNdrRpcMethods(PyTypeObject *ifacetype, const struct PyNdrRpc
 
 		ret = PyDescr_NewWrapper(ifacetype, wb, discard_const_p(void, &mds[i]));
 
-		PyDict_SetItemString(ifacetype->tp_dict, mds[i].name, 
+		PyDict_SetItemString(ifacetype->tp_dict, mds[i].name,
 				     (PyObject *)ret);
 		Py_CLEAR(ret);
 	}
@@ -417,6 +500,55 @@ PyObject *PyString_FromStringOrNULL(const char *str)
 		Py_RETURN_NONE;
 	}
 	return PyUnicode_FromString(str);
+}
+
+PyObject *PyBytes_FromUtf16StringOrNULL(const unsigned char *str)
+{
+	size_t len;
+
+	if (str == NULL) {
+		Py_RETURN_NONE;
+	}
+
+	len = utf16_len(str);
+	return PyBytes_FromStringAndSize((const char *)str, len);
+}
+
+unsigned char *PyUtf16String_FromBytes(TALLOC_CTX *mem_ctx, PyObject *value)
+{
+	char *bytes = NULL;
+	Py_ssize_t len = 0;
+	unsigned char *utf16_string = NULL;
+	int ret;
+
+	ret = PyBytes_AsStringAndSize(value, &bytes, &len);
+	if (ret) {
+		return NULL;
+	}
+
+	if (len < 0) {
+		PyErr_SetString(PyExc_ValueError, "bytes length is negative");
+		return NULL;
+	}
+	if (len & 1) {
+		PyErr_SetString(PyExc_ValueError, "bytes length is odd");
+		return NULL;
+	}
+
+	/* Ensure that the bytes object contains no embedded null terminator. */
+	if ((size_t)len != utf16_len_n(bytes, len)) {
+		PyErr_SetString(PyExc_ValueError,
+				"value contains an embedded null terminator");
+		return NULL;
+	}
+
+	utf16_string = talloc_utf16_strlendup(mem_ctx, bytes, len);
+	if (utf16_string == NULL) {
+		PyErr_NoMemory();
+		return NULL;
+	}
+
+	return utf16_string;
 }
 
 PyObject *pyrpc_import_union(PyTypeObject *type, TALLOC_CTX *mem_ctx, int level,

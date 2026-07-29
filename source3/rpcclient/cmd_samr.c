@@ -166,8 +166,8 @@ static void display_sam_dom_info_2(struct samr_DomGeneralInformation *general)
 
 	printf("Sequence No:\t%llu\n", (unsigned long long)general->sequence_num);
 
-	printf("Force Logoff:\t%d\n",
-		(int)nt_time_to_unix_abs(&general->force_logoff_time));
+	printf("Force Logoff:\t%" PRIu64 "\n",
+	       (uint64_t)nt_time_to_unix_abs(&general->force_logoff_time));
 
 	printf("Domain Server State:\t0x%x\n", general->domain_server_state);
 	printf("Server Role:\t%s\n", server_role_str(general->role));
@@ -176,8 +176,8 @@ static void display_sam_dom_info_2(struct samr_DomGeneralInformation *general)
 
 static void display_sam_dom_info_3(struct samr_DomInfo3 *info3)
 {
-	printf("Force Logoff:\t%d\n",
-		(int)nt_time_to_unix_abs(&info3->force_logoff_time));
+	printf("Force Logoff:\t%" PRIu64 "\n",
+	       (uint64_t)nt_time_to_unix_abs(&info3->force_logoff_time));
 }
 
 static void display_sam_dom_info_4(struct samr_DomOEMInformation *oem)
@@ -3198,7 +3198,8 @@ static NTSTATUS cmd_samr_setuserinfo_int(struct rpc_pipe_client *cli,
 		password_expired = atoi(argv[4]);
 	}
 
-	status = cli_get_session_key(frame, cli, &session_key);
+	status = dcerpc_binding_handle_transport_session_key(
+				b, frame, &session_key);
 	if (!NT_STATUS_IS_OK(status)) {
 		goto done;
 	}

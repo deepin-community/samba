@@ -22,6 +22,8 @@ EOF
 
 	export RPCNFSDCOUNT
 
+	TEST_RPC_ALL_SERVICES="portmapper nfs mountd rquotad nlockmgr status"
+
 	if [ "$1" != "down" ]; then
 		debug <<EOF
 Setting up NFS environment: all RPC services up, NFS managed by CTDB
@@ -40,9 +42,9 @@ EOF
 			;;
 		esac
 
-		rpc_services_up \
-			"portmapper" "nfs" "mountd" "rquotad" \
-			"nlockmgr" "status"
+		# Intentional word splitting
+		# shellcheck disable=SC2086
+		_rpc_services_up $TEST_RPC_ALL_SERVICES
 
 		nfs_setup_fake_threads "nfsd"
 		nfs_setup_fake_threads "rpc.foobar" # Set the variable to empty
@@ -65,16 +67,9 @@ EOF
 			;;
 		esac
 	fi
-
-	# This is really nasty.  However, when we test NFS we don't
-	# actually test statd-callout. If we leave it there then left
-	# over, backgrounded instances of statd-callout will do
-	# horrible things with the "ctdb ip" stub and cause the actual
-	# statd-callout tests that follow to fail.
-	rm "${CTDB_BASE}/statd-callout"
 }
 
-rpc_services_down()
+_rpc_services_down()
 {
 	_out=""
 	for _s in $FAKE_RPCINFO_SERVICES; do
@@ -89,7 +84,22 @@ rpc_services_down()
 	FAKE_RPCINFO_SERVICES="$_out"
 }
 
-rpc_services_up()
+_rpc_services_timeout()
+{
+	_out=""
+	for _s in $FAKE_RPCINFO_SERVICES; do
+		for _i; do
+			if [ "$_i" = "${_s%%:*}" ]; then
+				debug "Marking RPC service \"${_i}\" as TIMEOUT"
+				_s="${_s}:TIMEOUT"
+			fi
+		done
+		_out="${_out}${_out:+ }${_s}"
+	done
+	FAKE_RPCINFO_SERVICES="$_out"
+}
+
+_rpc_services_up()
 {
 	_out="$FAKE_RPCINFO_SERVICES"
 	for _i; do
@@ -126,6 +136,34 @@ nfs_setup_fake_threads()
 		export FAKE_RPC_THREAD_PIDS="$*"
 		;;
 	esac
+}
+
+nfs_stats_check_changed()
+{
+	_rpc_service="$1"
+	_cmd="$2"
+
+	if [ -z "$_cmd" ]; then
+		# No stats command, statistics don't change...
+		return 1
+	fi
+
+	_curr="${CTDB_TEST_TMP_DIR}/${_rpc_service}.stats"
+	_prev="${_curr}.prev"
+
+	: >"$_prev"
+	if [ -e "$_curr" ]; then
+		mv "$_curr" "$_prev"
+	fi
+
+	eval "$_cmd" >"$_curr"
+
+	! diff "$_prev" "$_curr" >/dev/null
+}
+
+rpcinfo_timed_out()
+{
+	echo "$1" | grep -q "Timed out"
 }
 
 guess_output()
@@ -233,6 +271,49 @@ EOF
 	esac
 }
 
+rpc_failure()
+{
+	_err_or_warn="$1"
+	_rpc_service="$2"
+	_ver="$3"
+	_why="${4:-Program not registered}"
+
+	cat <<EOF
+${_err_or_warn} ${_rpc_service} failed RPC check:
+rpcinfo: RPC: ${_why}
+program ${_rpc_service}${_ver:+ version }${_ver} is not available
+EOF
+}
+
+_rpc_was_healthy_common()
+{
+	_rpc_service="$1"
+
+	_f="rpc.${_rpc_service}.was_healthy"
+	_rpc_was_healthy_file="${CTDB_TEST_TMP_DIR}/${_f}"
+}
+
+_rpc_set_was_healthy()
+{
+	if [ $# -eq 0 ]; then
+		# Intentional word splitting
+		# shellcheck disable=SC2086
+		set -- $TEST_RPC_ALL_SERVICES
+	fi
+
+	for _rpc_service; do
+		_rpc_was_healthy_common "$_rpc_service"
+		touch "$_rpc_was_healthy_file"
+	done
+}
+
+_rpc_check_was_healthy()
+{
+	_rpc_was_healthy_common "$1"
+
+	[ -e "$_rpc_was_healthy_file" ]
+}
+
 # Set the required result for a particular RPC program having failed
 # for a certain number of iterations.  This is probably still a work
 # in progress.  Note that we could hook aggressively
@@ -244,11 +325,12 @@ EOF
 rpc_set_service_failure_response()
 {
 	_rpc_service="$1"
-	_numfails="${2:-1}" # default 1
 
 	# Default
 	ok_null
-	if [ "$_numfails" -eq 0 ]; then
+
+	if [ -z "$_rpc_service" ]; then
+		_rpc_set_was_healthy
 		return
 	fi
 
@@ -267,6 +349,14 @@ rpc_set_service_failure_response()
 	_out="${CTDB_TEST_TMP_DIR}/rpc_failure_output"
 	: >"$_out"
 	_rc_file="${CTDB_TEST_TMP_DIR}/rpc_result"
+	echo 0 >"$_rc_file"
+
+	# 0 if not already set - makes this function self-contained
+	_failcount_file="${CTDB_TEST_TMP_DIR}/test_failcount"
+	if [ ! -e "$_failcount_file" ]; then
+		echo 0 >"$_failcount_file"
+	fi
+	read -r _numfails <"$_failcount_file"
 
 	(
 		# Subshell to restrict scope variables...
@@ -284,6 +374,7 @@ rpc_set_service_failure_response()
 		# Unused, but for completeness, possible future use
 		service_check_cmd=""
 		service_debug_cmd=""
+		service_stats_cmd=""
 
 		# Don't bother syntax checking, eventscript does that...
 		. "$_file"
@@ -299,25 +390,72 @@ rpc_set_service_failure_response()
 			*) _ver=1 ;;
 			esac
 		fi
-		_rpc_check_out="\
-$_rpc_service failed RPC check:
-rpcinfo: RPC: Program not registered
-program $_rpc_service${_ver:+ version }${_ver} is not available"
+
+		# It doesn't matter here if the statistics have
+		# changed.  However, this generates the current
+		# statistics, which needs to happen, regardless of
+		# service health, so they can be compared when they
+		# matter...
+		_stats_changed=false
+		if nfs_stats_check_changed \
+			   "$_rpc_service" "$service_stats_cmd"; then
+			_stats_changed=true
+		fi
+
+		_why=""
+		_ri_out=$(rpcinfo -T tcp localhost "$_rpc_service" 2>&1)
+		# Check exit code separately for readability
+		# shellcheck disable=SC2181
+		if [ $? -eq 0 ]; then
+			echo 0 >"$_failcount_file"
+			_rpc_set_was_healthy "$_rpc_service"
+			exit # from subshell
+		elif rpcinfo_timed_out "$_ri_out"; then
+			_why="Timed out"
+
+			if $_stats_changed; then
+				rpc_failure \
+					"WARNING: statistics changed but" \
+					"$_rpc_service" \
+					"$_ver" \
+					"$_why" \
+					>"$_out"
+				echo 0 >"$_failcount_file"
+				exit # from subshell
+			fi
+		elif ! _rpc_check_was_healthy "$_rpc_service"; then
+			echo 1 >"$_rc_file"
+			rpc_failure "ERROR:" "$_rpc_service" "$_ver" >"$_out"
+			exit # from subshell
+		fi
+
+		_numfails=$((_numfails + 1))
+		echo "$_numfails" >"$_failcount_file"
 
 		if [ $unhealthy_after -gt 0 ] &&
 			[ "$_numfails" -ge $unhealthy_after ]; then
 			_unhealthy=true
 			echo 1 >"$_rc_file"
-			echo "ERROR: ${_rpc_check_out}" >>"$_out"
+			rpc_failure \
+				"ERROR:" \
+				"$_rpc_service" \
+				"$_ver" \
+				"$_why" \
+				>"$_out"
 		else
 			_unhealthy=false
-			echo 0 >"$_rc_file"
+			_rpc_set_was_healthy "$_rpc_service"
 		fi
 
 		if [ $restart_every -gt 0 ] &&
 			[ $((_numfails % restart_every)) -eq 0 ]; then
 			if ! $_unhealthy; then
-				echo "WARNING: ${_rpc_check_out}" >>"$_out"
+				rpc_failure \
+					"WARNING:" \
+					"$_rpc_service" \
+					"$_ver" \
+					"$_why" \
+					>"$_out"
 			fi
 
 			echo "Trying to restart service \"${_rpc_service}\"..." \
@@ -362,63 +500,94 @@ program_stack_traces()
 #
 # - 1st argument is the number of iterations.
 #
-# - 2nd argument is the NFS/RPC service being tested
+# - 2nd argument is the NFS/RPC service being tested, with optional
+#   TIMEOUT flag
 #
-#   rpcinfo is used on each iteration to test the availability of the
-#   service
+#   This service is marked down before the 1st iteration.
 #
-#   If this is not set or null then no RPC service is checked and the
-#   required output is not reset on each iteration.  This is useful in
-#   baseline tests to confirm that the eventscript and test
+#   rpcinfo is then used on each iteration to test the availability of
+#   the service.
+#
+#   If this is not set or null it is assumed all services are healthy
+#   and no output or non-zero return codes are generated.  This is
+#   useful in baseline tests to confirm that the eventscript and test
 #   infrastructure is working correctly.
 #
-# - Subsequent arguments come in pairs: an iteration number and
-#   something to eval before that iteration.  Each time an iteration
-#   number is matched the associated argument is given to eval after
-#   the default setup is done.  The iteration numbers need to be given
-#   in ascending order.
-#
-#   These arguments can allow a service to be started or stopped
-#   before a particular iteration.
+# - 3rd argument is optional iteration on which to bring the RPC
+#   service back up
 #
 nfs_iterate_test()
 {
+	_initial_monitor_event=false
+	if [ "$1" = "-i" ]; then
+		shift
+		_initial_monitor_event=true
+	fi
+
 	_repeats="$1"
 	_rpc_service="$2"
+	_up_iteration="${3:--1}"
 	if [ -n "$2" ]; then
 		shift 2
 	else
 		shift
 	fi
 
+	if [ -n "$_rpc_service" ]; then
+		_action="${_rpc_service#*:}"
+		if [ "$_action" != "$_rpc_service" ]; then
+			_rpc_service="${_rpc_service%:*}"
+		else
+			_action=""
+		fi
+
+		if ! $_initial_monitor_event; then
+			cat <<EOF
+--------------------------------------------------
+Running initial monitor event
+
+EOF
+			# Remember a successful test result...
+			rpc_set_service_failure_response "$_rpc_service"
+			# ... and a successful monitor result
+			simple_test
+		fi
+
+
+		cat <<EOF
+--------------------------------------------------
+EOF
+
+		if [ -n "$_action" ]; then
+			case "$_action" in
+			TIMEOUT)
+				_rpc_services_timeout "$_rpc_service"
+				;;
+			esac
+		else
+			_rpc_services_down "$_rpc_service"
+		fi
+	fi
+
+	debug <<EOF
+--------------------------------------------------
+EOF
 	# shellcheck disable=SC2154
 	# Variables defined in define_test()
 	echo "Running $_repeats iterations of \"$script $event\" $args"
 
-	_iterate_failcount=0
 	for _iteration in $(seq 1 "$_repeats"); do
-		# This is not a numerical comparison because $1 will
-		# often not be set.
-		if [ "$_iteration" = "$1" ]; then
-			debug <<EOF
-##################################################
-EOF
-			eval "$2"
-			debug <<EOF
-##################################################
-EOF
-			shift 2
-		fi
 		if [ -n "$_rpc_service" ]; then
-			if rpcinfo -T tcp localhost "$_rpc_service" \
-				   >/dev/null 2>&1 ; then
-				_iterate_failcount=0
-			else
-				_iterate_failcount=$((_iterate_failcount + 1))
+			if [ "$_iteration" = "$_up_iteration" ]; then
+				debug <<EOF
+--------------------------------------------------
+EOF
+				_rpc_services_up "$_rpc_service"
 			fi
-			rpc_set_service_failure_response \
-				"$_rpc_service" $_iterate_failcount
 		fi
+
+		rpc_set_service_failure_response "$_rpc_service"
+
 		_out=$(simple_test 2>&1)
 		_ret=$?
 		if "$CTDB_TEST_VERBOSE" || [ $_ret -ne 0 ]; then

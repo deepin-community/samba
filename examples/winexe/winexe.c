@@ -295,6 +295,7 @@ static NTSTATUS winexe_svc_upload(
 	const DATA_BLOB *binary = NULL;
 
 	status = cli_full_connection_creds(
+		talloc_tos(),
 		&cli,
 		NULL,
 		hostname,
@@ -993,11 +994,11 @@ static void winexe_out_pipe_got_data(struct tevent_req *subreq)
 		  nt_errstr(status));
 
 	if (NT_STATUS_EQUAL(status, NT_STATUS_PIPE_DISCONNECTED)) {
-		subreq = cli_close_send(
-			state,
-			state->ev,
-			state->cli,
-			state->out_pipe);
+		subreq = cli_close_send(state,
+					state->ev,
+					state->cli,
+					state->out_pipe,
+					0);
 		if (tevent_req_nomem(subreq, req)) {
 			return;
 		}
@@ -1206,11 +1207,11 @@ static void winexe_in_pipe_written(struct tevent_req *subreq)
 
 	if (NT_STATUS_EQUAL(status, NT_STATUS_PIPE_DISCONNECTED) ||
 	    state->close_requested) {
-		subreq = cli_close_send(
-			state,
-			state->ev,
-			state->cli,
-			state->in_pipe);
+		subreq = cli_close_send(state,
+					state->ev,
+					state->cli,
+					state->in_pipe,
+					0);
 		if (tevent_req_nomem(subreq, req)) {
 			return;
 		}
@@ -1275,11 +1276,8 @@ static bool winexe_in_pipe_close(struct tevent_req *req)
 
 	TALLOC_FREE(state->fd_read_req);
 
-	subreq = cli_close_send(
-		state,
-		state->ev,
-		state->cli,
-		state->in_pipe);
+	subreq =
+		cli_close_send(state, state->ev, state->cli, state->in_pipe, 0);
 	if (subreq == NULL) {
 		return false;
 	}
@@ -1597,11 +1595,11 @@ static void winexe_ctrl_got_read(struct tevent_req *subreq)
 	TALLOC_FREE(subreq);
 
 	if (NT_STATUS_EQUAL(status, NT_STATUS_PIPE_DISCONNECTED)) {
-		subreq = cli_close_send(
-			state,
-			state->ev,
-			state->cli,
-			state->ctrl_pipe);
+		subreq = cli_close_send(state,
+					state->ev,
+					state->cli,
+					state->ctrl_pipe,
+					0);
 		if (tevent_req_nomem(subreq, req)) {
 			return;
 		}
@@ -1860,6 +1858,7 @@ int main(int argc, char *argv[])
 	}
 
 	status = cli_full_connection_creds(
+		talloc_tos(),
 		&cli,
 		lp_netbios_name(),
 		options.hostname,

@@ -9,11 +9,9 @@ Author: rong wang <wangrong@uniontech.com>
 Bug: https://pms.uniontech.com/bug-view-256243.html
 Forwarded: not-needed
 ---
-Index: samba-4.19.5+dfsg/source3/libsmb/cli_smb2_fnum.c
-===================================================================
---- samba-4.19.5+dfsg.orig/source3/libsmb/cli_smb2_fnum.c
-+++ samba-4.19.5+dfsg/source3/libsmb/cli_smb2_fnum.c
-@@ -2806,6 +2806,7 @@ NTSTATUS cli_smb2_dskattr(struct cli_sta
+--- a/source3/libsmb/cli_smb2_fnum.c
++++ b/source3/libsmb/cli_smb2_fnum.c
+@@ -2656,6 +2656,7 @@
  ***************************************************************/
  
  NTSTATUS cli_smb2_get_fs_full_size_info(struct cli_state *cli,
@@ -21,7 +19,7 @@ Index: samba-4.19.5+dfsg/source3/libsmb/cli_smb2_fnum.c
  				uint64_t *total_allocation_units,
  				uint64_t *caller_allocation_units,
  				uint64_t *actual_allocation_units,
-@@ -2827,7 +2828,7 @@ NTSTATUS cli_smb2_get_fs_full_size_info(
+@@ -2677,7 +2678,7 @@
  
  	/* First open the top level directory. */
  	status =
@@ -30,11 +28,9 @@ Index: samba-4.19.5+dfsg/source3/libsmb/cli_smb2_fnum.c
  				 (struct cli_smb2_create_flags){0},
  				 SMB2_IMPERSONATION_IMPERSONATION,
  				 FILE_READ_ATTRIBUTES,     /* desired_access */
-Index: samba-4.19.5+dfsg/source3/libsmb/cli_smb2_fnum.h
-===================================================================
---- samba-4.19.5+dfsg.orig/source3/libsmb/cli_smb2_fnum.h
-+++ samba-4.19.5+dfsg/source3/libsmb/cli_smb2_fnum.h
-@@ -202,6 +202,7 @@ NTSTATUS cli_smb2_dskattr(struct cli_sta
+--- a/source3/libsmb/cli_smb2_fnum.h
++++ b/source3/libsmb/cli_smb2_fnum.h
+@@ -190,6 +190,7 @@
  			uint64_t *avail);
  NTSTATUS cli_smb2_get_fs_attr_info(struct cli_state *cli, uint32_t *fs_attr);
  NTSTATUS cli_smb2_get_fs_full_size_info(struct cli_state *cli,
@@ -42,11 +38,9 @@ Index: samba-4.19.5+dfsg/source3/libsmb/cli_smb2_fnum.h
  			uint64_t *total_allocation_units,
  			uint64_t *caller_allocation_units,
  			uint64_t *actual_allocation_units,
-Index: samba-4.19.5+dfsg/source3/libsmb/clifile.c
-===================================================================
---- samba-4.19.5+dfsg.orig/source3/libsmb/clifile.c
-+++ samba-4.19.5+dfsg/source3/libsmb/clifile.c
-@@ -5222,6 +5222,7 @@ NTSTATUS cli_disk_size(struct cli_state
+--- a/source3/libsmb/clifile.c
++++ b/source3/libsmb/clifile.c
+@@ -5470,6 +5470,7 @@
  	 */
  
  	status = cli_get_fs_full_size_info(cli,
@@ -54,11 +48,9 @@ Index: samba-4.19.5+dfsg/source3/libsmb/clifile.c
  			total,
  			avail,
  			NULL,
-Index: samba-4.19.5+dfsg/source3/libsmb/clifsinfo.c
-===================================================================
---- samba-4.19.5+dfsg.orig/source3/libsmb/clifsinfo.c
-+++ samba-4.19.5+dfsg/source3/libsmb/clifsinfo.c
-@@ -429,6 +429,7 @@ NTSTATUS cli_get_fs_volume_info(struct c
+--- a/source3/libsmb/clifsinfo.c
++++ b/source3/libsmb/clifsinfo.c
+@@ -427,6 +427,7 @@
  }
  
  NTSTATUS cli_get_fs_full_size_info(struct cli_state *cli,
@@ -66,7 +58,7 @@ Index: samba-4.19.5+dfsg/source3/libsmb/clifsinfo.c
  				   uint64_t *total_allocation_units,
  				   uint64_t *caller_allocation_units,
  				   uint64_t *actual_allocation_units,
-@@ -443,6 +444,7 @@ NTSTATUS cli_get_fs_full_size_info(struc
+@@ -441,6 +442,7 @@
  
  	if (smbXcli_conn_protocol(cli->conn) >= PROTOCOL_SMB2_02) {
  		return cli_smb2_get_fs_full_size_info(cli,
@@ -74,11 +66,9 @@ Index: samba-4.19.5+dfsg/source3/libsmb/clifsinfo.c
  						total_allocation_units,
  						caller_allocation_units,
  						actual_allocation_units,
-Index: samba-4.19.5+dfsg/source3/libsmb/libsmb_stat.c
-===================================================================
---- samba-4.19.5+dfsg.orig/source3/libsmb/libsmb_stat.c
-+++ samba-4.19.5+dfsg/source3/libsmb/libsmb_stat.c
-@@ -398,6 +398,48 @@ SMBC_statvfs_ctx(SMBCCTX *context,
+--- a/source3/libsmb/libsmb_stat.c
++++ b/source3/libsmb/libsmb_stat.c
+@@ -356,6 +356,48 @@
  }
  
  
@@ -127,7 +117,7 @@ Index: samba-4.19.5+dfsg/source3/libsmb/libsmb_stat.c
  /*
   * Routine to obtain file system information given an fd
   */
-@@ -412,6 +454,19 @@ SMBC_fstatvfs_ctx(SMBCCTX *context,
+@@ -370,6 +412,19 @@
  	struct cli_state *cli = file->srv->cli;
  	struct smbXcli_tcon *tcon;
  	TALLOC_CTX *frame = talloc_stackframe();
@@ -147,7 +137,7 @@ Index: samba-4.19.5+dfsg/source3/libsmb/libsmb_stat.c
  
  	if (smbXcli_conn_protocol(cli->conn) >= PROTOCOL_SMB2_02) {
  		tcon = cli->smb2.tcon;
-@@ -442,6 +497,7 @@ SMBC_fstatvfs_ctx(SMBCCTX *context,
+@@ -400,6 +455,7 @@
  
                  /* Nope. If size data is available... */
  		status = cli_get_fs_full_size_info(cli,
@@ -155,11 +145,9 @@ Index: samba-4.19.5+dfsg/source3/libsmb/libsmb_stat.c
  						   &total_allocation_units,
  						   &caller_allocation_units,
  						   &actual_allocation_units,
-Index: samba-4.19.5+dfsg/source3/libsmb/proto.h
-===================================================================
---- samba-4.19.5+dfsg.orig/source3/libsmb/proto.h
-+++ samba-4.19.5+dfsg/source3/libsmb/proto.h
-@@ -716,6 +716,7 @@ NTSTATUS cli_get_fs_volume_info(struct c
+--- a/source3/libsmb/proto.h
++++ b/source3/libsmb/proto.h
+@@ -724,6 +724,7 @@
  				TALLOC_CTX *mem_ctx, char **volume_name,
  				uint32_t *pserial_number, time_t *pdate);
  NTSTATUS cli_get_fs_full_size_info(struct cli_state *cli,

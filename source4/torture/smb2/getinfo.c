@@ -1,20 +1,20 @@
-/* 
+/*
    Unix SMB/CIFS implementation.
 
    SMB2 getinfo test suite
 
    Copyright (C) Andrew Tridgell 2005
-   
+
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
    the Free Software Foundation; either version 3 of the License, or
    (at your option) any later version.
-   
+
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
    GNU General Public License for more details.
-   
+
    You should have received a copy of the GNU General Public License
    along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
@@ -588,7 +588,7 @@ static bool torture_smb2_qfs_buffercheck(struct torture_context *tctx)
 	for (i=0; i<ARRAY_SIZE(levels); i++) {
 		struct smb2_getinfo b;
 
-		if (TARGET_IS_SAMBA3(tctx) &&
+		if ((TARGET_IS_SAMBA3(tctx) || TARGET_IS_SAMBA4(tctx)) &&
 		    ((levels[i].level == 6) || (levels[i].level == 11))) {
 			continue;
 		}

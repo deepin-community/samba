@@ -52,14 +52,14 @@ static char **completion_fn(const char *text, int start, int end)
 		return NULL;
 	}
 
-	ADD_TO_ARRAY(NULL, char *, SMB_STRDUP(text), &cmds, &n_cmds);
+	ADD_TO_MALLOC_ARRAY(char *, SMB_STRDUP(text), &cmds, &n_cmds);
 
 	for (c = this_ctx->cmds; c->name != NULL; c++) {
 		bool match = (strncmp(text, c->name, strlen(text)) == 0);
 
 		if (match) {
-			ADD_TO_ARRAY(NULL, char *, SMB_STRDUP(c->name),
-				     &cmds, &n_cmds);
+			ADD_TO_MALLOC_ARRAY(char *, SMB_STRDUP(c->name),
+					    &cmds, &n_cmds);
 		}
 	}
 
@@ -69,7 +69,7 @@ static char **completion_fn(const char *text, int start, int end)
 		n_cmds -= 1;
 	}
 
-	ADD_TO_ARRAY(NULL, char *, NULL, &cmds, &n_cmds);
+	ADD_TO_MALLOC_ARRAY(char *, NULL, &cmds, &n_cmds);
 	return cmds;
 }
 
@@ -229,11 +229,7 @@ int net_rpc_shell(struct net_context *c, int argc, const char **argv)
 		return -1;
 	}
 
-	if (libnetapi_net_init(&c->netapi_ctx) != 0) {
-		return -1;
-	}
-
-	net_api_status = libnetapi_set_creds(c->netapi_ctx, c->creds);
+	net_api_status = libnetapi_net_init(&c->netapi_ctx, c->lp_ctx, c->creds);
 	if (net_api_status != 0) {
 		return -1;
 	}

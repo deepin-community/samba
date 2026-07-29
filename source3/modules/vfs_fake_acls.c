@@ -47,7 +47,7 @@ static int fake_acls_fuid(vfs_handle_struct *handle,
 	uint8_t uid_buf[4];
 
 	size = SMB_VFS_NEXT_FGETXATTR(handle, fsp, FAKE_UID, uid_buf, sizeof(uid_buf));
-	if (size == -1 && errno == ENOATTR) {
+	if (size == -1 && ((errno == ENOATTR) || (errno == EBADF))) {
 		return 0;
 	}
 	if (size != 4) {
@@ -65,7 +65,7 @@ static int fake_acls_fgid(vfs_handle_struct *handle,
 	uint8_t gid_buf[4];
 
 	size = SMB_VFS_NEXT_FGETXATTR(handle, fsp, FAKE_GID, gid_buf, sizeof(gid_buf));
-	if (size == -1 && errno == ENOATTR) {
+	if (size == -1 && ((errno == ENOATTR) || (errno == EBADF))) {
 		return 0;
 	}
 	if (size != 4) {
@@ -126,12 +126,20 @@ static int fake_acls_stat(vfs_handle_struct *handle,
 			return -1;
 		}
 
-		/* Recursion guard. */
-		prd->calling_pathref_fsp = true;
-		status = openat_pathref_fsp(handle->conn->cwd_fsp,
-					    smb_fname_cp);
-		/* End recursion guard. */
-		prd->calling_pathref_fsp = false;
+		if (fsp_get_pathref_fd(handle->conn->cwd_fsp) == -1) {
+			/*
+			 * No tcon around, fail as if we don't have
+			 * the EAs
+			 */
+			status = NT_STATUS_INVALID_HANDLE;
+		} else {
+			/* Recursion guard. */
+			prd->calling_pathref_fsp = true;
+			status = openat_pathref_fsp(handle->conn->cwd_fsp,
+						    smb_fname_cp);
+			/* End recursion guard. */
+			prd->calling_pathref_fsp = false;
+		}
 
 		if (!NT_STATUS_IS_OK(status)) {
 			/*
@@ -335,7 +343,7 @@ static SMB_ACL_T fake_acls_sys_acl_get_fd(struct vfs_handle_struct *handle,
 		length = SMB_VFS_NEXT_FGETXATTR(handle, fsp, name, blob.data, blob.length);
 		blob.length = length;
 	} while (length == -1 && errno == ERANGE);
-	if (length == -1 && errno == ENOATTR) {
+	if (length == -1 && ((errno == ENOATTR) || (errno == EBADF))) {
 		TALLOC_FREE(frame);
 		return NULL;
 	}
@@ -391,7 +399,7 @@ static int fake_acls_sys_acl_delete_def_fd(vfs_handle_struct *handle,
 	}
 
 	ret = SMB_VFS_NEXT_FREMOVEXATTR(handle, fsp, name);
-	if (ret == -1 && errno == ENOATTR) {
+	if (ret == -1 && ((errno == ENOATTR) || (errno == EBADF))) {
 		ret = 0;
 		errno = 0;
 	}
@@ -575,7 +583,8 @@ static int fake_acl_process_chmod(SMB_ACL_T *pp_the_acl,
 
 	if (!got_mask) {
 		SMB_ACL_ENTRY_T mask_entry;
-		SMB_ACL_PERMSET_T mask_permset;
+		uint32_t mask_perm = 0;
+		SMB_ACL_PERMSET_T mask_permset = &mask_perm;
 		ret = sys_acl_create_entry(&the_acl, &mask_entry);
 		if (ret == -1) {
 			return -1;
@@ -627,7 +636,7 @@ static int fake_acls_fchmod(vfs_handle_struct *handle,
 				talloc_tos());
 	if (the_acl == NULL) {
 		TALLOC_FREE(frame);
-		if (errno == ENOATTR) {
+		if (((errno == ENOATTR) || (errno == EBADF))) {
 			/* No ACL on this file. Just passthrough. */
 			return 0;
 		}

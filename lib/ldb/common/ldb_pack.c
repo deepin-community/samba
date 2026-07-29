@@ -636,7 +636,7 @@ static int ldb_unpack_data_flags_v1(struct ldb_context *ldb,
 	 * of these, just to then hold the pointer to the data buffer
 	 * So with LDB_UNPACK_DATA_FLAG_NO_VALUES_ALLOC we allocate this
 	 * ahead of time and use it for the single values where possible.
-	 * (This is used the the normal search case, but not in the
+	 * (This is used in the normal search case, but not in the
 	 * index case because of caller requirements).
 	 */
 	if (flags & LDB_UNPACK_DATA_FLAG_NO_VALUES_ALLOC) {
@@ -869,7 +869,7 @@ static int ldb_unpack_data_flags_v2(struct ldb_context *ldb,
 	 * of these, just to then hold the pointer to the data buffer.
 	 * So with LDB_UNPACK_DATA_FLAG_NO_VALUES_ALLOC we allocate this
 	 * ahead of time and use it for the single values where possible.
-	 * (This is used the the normal search case, but not in the
+	 * (This is used in the normal search case, but not in the
 	 * index case because of caller requirements).
 	 */
 	if (flags & LDB_UNPACK_DATA_FLAG_NO_VALUES_ALLOC) {
@@ -1294,19 +1294,23 @@ int ldb_filter_attrs_in_place(struct ldb_message *msg,
 		keep_all = true;
 	}
 
+	if (keep_all) {
+		return LDB_SUCCESS;
+	}
+	/*
+	 * Find the intersection between the msg elements and attrs.
+	 *
+	 * TODO, maybe: use a faster algorithm when (n * m) is too large.
+	 */
 	for (i = 0; i < msg->num_elements; i++) {
 		bool found = false;
 		unsigned int j;
 
-		if (keep_all) {
-			found = true;
-		} else {
-			for (j = 0; attrs[j]; j++) {
-				int cmp = ldb_attr_cmp(msg->elements[i].name, attrs[j]);
-				if (cmp == 0) {
-					found = true;
-					break;
-				}
+		for (j = 0; attrs[j]; j++) {
+			int cmp = ldb_attr_cmp(msg->elements[i].name, attrs[j]);
+			if (cmp == 0) {
+				found = true;
+				break;
 			}
 		}
 

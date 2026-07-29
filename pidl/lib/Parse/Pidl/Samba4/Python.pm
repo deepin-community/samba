@@ -169,7 +169,7 @@ sub PythonElementGetSet($$$$$$) {
 	$self->pidl("static PyObject *py_$name\_get_$e->{NAME}(PyObject *obj, void *closure)");
 	$self->pidl("{");
 	$self->indent;
-	$self->pidl("$cname *object = ($cname *)pytalloc_get_ptr(obj);");
+	$self->pidl("$cname *object = pytalloc_get_ptr(obj);");
 	$self->pidl("PyObject *py_$e->{NAME};");
 	my $l = $e->{LEVELS}[0];
 	if ($l->{TYPE} eq "POINTER") {
@@ -188,7 +188,7 @@ sub PythonElementGetSet($$$$$$) {
 	$self->pidl("static int py_$name\_set_$e->{NAME}(PyObject *py_obj, PyObject *value, void *closure)");
 	$self->pidl("{");
 	$self->indent;
-	$self->pidl("$cname *object = ($cname *)pytalloc_get_ptr(py_obj);");
+	$self->pidl("$cname *object = pytalloc_get_ptr(py_obj);");
 	my $mem_ctx = "pytalloc_get_mem_ctx(py_obj)";
 	my $nl = GetNextLevel($e, $l);
 	if ($l->{TYPE} eq "POINTER" and
@@ -259,7 +259,7 @@ sub PythonStruct($$$$$$)
 		$self->pidl("static PyObject *py_$name\_ndr_pack(PyObject *py_obj,  PyObject *Py_UNUSED(ignored))");
 		$self->pidl("{");
 		$self->indent;
-		$self->pidl("$cname *object = ($cname *)pytalloc_get_ptr(py_obj);");
+		$self->pidl("$cname *object = pytalloc_get_ptr(py_obj);");
 		$self->pidl("PyObject *ret = NULL;");
 		$self->pidl("DATA_BLOB blob;");
 		$self->pidl("enum ndr_err_code err;");
@@ -289,7 +289,7 @@ sub PythonStruct($$$$$$)
 		$self->pidl("static PyObject *py_$name\_ndr_unpack(PyObject *py_obj, PyObject *args, PyObject *kwargs)");
 		$self->pidl("{");
 		$self->indent;
-		$self->pidl("$cname *object = ($cname *)pytalloc_get_ptr(py_obj);");
+		$self->pidl("$cname *object = pytalloc_get_ptr(py_obj);");
 		$self->pidl("DATA_BLOB blob = {.data = NULL, .length = 0};");
 		$self->pidl("Py_ssize_t blob_length = 0;");
 		$self->pidl("enum ndr_err_code err;");
@@ -336,14 +336,36 @@ sub PythonStruct($$$$$$)
 		$self->pidl("}");
 		$self->pidl("");
 
-		$self->pidl("static PyObject *py_$name\_ndr_print(PyObject *py_obj, PyObject *Py_UNUSED(ignored))");
+		$self->pidl("static PyObject *py_$name\_ndr_print(PyObject *py_obj, PyObject *args, PyObject *kwargs)");
 		$self->pidl("{");
 		$self->indent;
-		$self->pidl("$cname *object = ($cname *)pytalloc_get_ptr(py_obj);");
+		$self->pidl("$cname *object = pytalloc_get_ptr(py_obj);");
+		$self->pidl("const char * const kwnames[] = { \"print_secrets\", NULL };");
+		$self->pidl("PyObject *py_print_secrets = NULL;");
 		$self->pidl("PyObject *ret;");
 		$self->pidl("char *retstr;");
+		$self->pidl("bool ok;");
 		$self->pidl("");
+		$self->pidl("ok = PyArg_ParseTupleAndKeywords(args, kwargs, \"|O:__ndr_print__\",");
+		$self->indent;
+		$self->pidl("discard_const_p(char *, kwnames),");
+		$self->pidl("&py_print_secrets);");
+		$self->deindent;
+		$self->pidl("if (!ok) {");
+		$self->indent;
+		$self->pidl("return NULL;");
+		$self->deindent;
+		$self->pidl("}");
+		$self->pidl("");
+		$self->pidl("if (py_print_secrets != NULL && PyObject_IsTrue(py_print_secrets)) {");
+		$self->indent;
+		$self->pidl("retstr = ndr_print_struct_secret_string(pytalloc_get_mem_ctx(py_obj), (ndr_print_fn_t)ndr_print_$name, \"$name\", object);");
+		$self->deindent;
+		$self->pidl("} else {");
+		$self->indent;
 		$self->pidl("retstr = ndr_print_struct_string(pytalloc_get_mem_ctx(py_obj), (ndr_print_fn_t)ndr_print_$name, \"$name\", object);");
+		$self->pidl("}");
+		$self->deindent;
 		$self->pidl("ret = PyUnicode_FromString(retstr);");
 		$self->pidl("talloc_free(retstr);");
 		$self->pidl("");
@@ -357,7 +379,7 @@ sub PythonStruct($$$$$$)
 		$self->indent;
 		$self->pidl("{ \"__ndr_pack__\", (PyCFunction)py_$name\_ndr_pack, METH_NOARGS, \"S.ndr_pack(object) -> blob\\nNDR pack\" },");
 		$self->pidl("{ \"__ndr_unpack__\", PY_DISCARD_FUNC_SIG(PyCFunction,py_$name\_ndr_unpack), METH_VARARGS|METH_KEYWORDS, \"S.ndr_unpack(class, blob, allow_remaining=False) -> None\\nNDR unpack\" },");
-		$self->pidl("{ \"__ndr_print__\", (PyCFunction)py_$name\_ndr_print, METH_NOARGS, \"S.ndr_print(object) -> None\\nNDR print\" },");
+		$self->pidl("{ \"__ndr_print__\", PY_DISCARD_FUNC_SIG(PyCFunction,py_$name\_ndr_print), METH_VARARGS|METH_KEYWORDS, \"S.ndr_print(object, print_secrets=False) -> String\\nNDR print\" },");
 		$self->pidl("{ NULL, NULL, 0, NULL }");
 		$self->deindent;
 		$self->pidl("};");
@@ -531,7 +553,7 @@ sub PythonFunctionStruct($$$$)
 	my $py_methods = "NULL";
 
 	my $ndr_call = "const struct ndr_interface_call *call = NULL;";
-	my $object_ptr = "$cname *object = ($cname *)pytalloc_get_ptr(py_obj);";
+	my $object_ptr = "$cname *object = pytalloc_get_ptr(py_obj);";
 
 	$self->pidl("static PyObject *py_$name\_ndr_opnum(PyTypeObject *type, PyObject *Py_UNUSED(ignored))");
 	$self->pidl("{");
@@ -543,7 +565,7 @@ sub PythonFunctionStruct($$$$)
 	$self->pidl("}");
 	$self->pidl("");
 
-	$self->pidl("static PyObject *py_$name\_ndr_pack(PyObject *py_obj, int ndr_inout_flags, uint32_t ndr_push_flags)");
+	$self->pidl("static PyObject *py_$name\_ndr_pack(PyObject *py_obj, ndr_flags_type ndr_inout_flags, libndr_flags ndr_push_flags)");
 	$self->pidl("{");
 	$self->indent;
 	$self->pidl("$ndr_call");
@@ -594,7 +616,7 @@ sub PythonFunctionStruct($$$$)
 	$self->pidl("const char * const kwnames[] = { \"bigendian\", \"ndr64\", NULL };");
 	$self->pidl("PyObject *bigendian_obj = NULL;");
 	$self->pidl("PyObject *ndr64_obj = NULL;");
-	$self->pidl("uint32_t ndr_push_flags = 0;");
+	$self->pidl("libndr_flags ndr_push_flags = 0;");
 	$self->pidl("");
 	$self->pidl("if (!PyArg_ParseTupleAndKeywords(args, kwargs, \"|OO:__ndr_pack_in__\",");
 	$self->indent;
@@ -629,7 +651,7 @@ sub PythonFunctionStruct($$$$)
 	$self->pidl("const char * const kwnames[] = { \"bigendian\", \"ndr64\", NULL };");
 	$self->pidl("PyObject *bigendian_obj = NULL;");
 	$self->pidl("PyObject *ndr64_obj = NULL;");
-	$self->pidl("uint32_t ndr_push_flags = 0;");
+	$self->pidl("libndr_flags ndr_push_flags = 0;");
 	$self->pidl("");
 	$self->pidl("if (!PyArg_ParseTupleAndKeywords(args, kwargs, \"|OO:__ndr_pack_out__\",");
 	$self->indent;
@@ -658,7 +680,7 @@ sub PythonFunctionStruct($$$$)
 	$self->pidl("}");
 	$self->pidl("");
 
-	$self->pidl("static PyObject *py_$name\_ndr_unpack(PyObject *py_obj, const DATA_BLOB *blob, int ndr_inout_flags, uint32_t ndr_pull_flags, bool allow_remaining)");
+	$self->pidl("static PyObject *py_$name\_ndr_unpack(PyObject *py_obj, const DATA_BLOB *blob, ndr_flags_type ndr_inout_flags, libndr_flags ndr_pull_flags, bool allow_remaining)");
 	$self->pidl("{");
 	$self->indent;
 	$self->pidl("$ndr_call");
@@ -735,7 +757,7 @@ sub PythonFunctionStruct($$$$)
 	$self->pidl("const char * const kwnames[] = { \"data_blob\", \"bigendian\", \"ndr64\", \"allow_remaining\", NULL };");
 	$self->pidl("PyObject *bigendian_obj = NULL;");
 	$self->pidl("PyObject *ndr64_obj = NULL;");
-	$self->pidl("uint32_t ndr_pull_flags = LIBNDR_FLAG_REF_ALLOC;");
+	$self->pidl("libndr_flags ndr_pull_flags = LIBNDR_FLAG_REF_ALLOC;");
 	$self->pidl("PyObject *allow_remaining_obj = NULL;");
 	$self->pidl("bool allow_remaining = false;");
 	$self->pidl("");
@@ -783,7 +805,7 @@ sub PythonFunctionStruct($$$$)
 	$self->pidl("const char * const kwnames[] = { \"data_blob\", \"bigendian\", \"ndr64\", \"allow_remaining\", NULL };");
 	$self->pidl("PyObject *bigendian_obj = NULL;");
 	$self->pidl("PyObject *ndr64_obj = NULL;");
-	$self->pidl("uint32_t ndr_pull_flags = LIBNDR_FLAG_REF_ALLOC;");
+	$self->pidl("libndr_flags ndr_pull_flags = LIBNDR_FLAG_REF_ALLOC;");
 	$self->pidl("PyObject *allow_remaining_obj = NULL;");
 	$self->pidl("bool allow_remaining = false;");
 	$self->pidl("");
@@ -823,13 +845,27 @@ sub PythonFunctionStruct($$$$)
 	$self->pidl("}");
 	$self->pidl("");
 
-	$self->pidl("static PyObject *py_$name\_ndr_print(PyObject *py_obj, const char *name, int ndr_inout_flags)");
+	$self->pidl("static PyObject *py_$name\_ndr_print(PyObject *py_obj, PyObject *args, PyObject *kwargs, const char *name, ndr_flags_type ndr_inout_flags)");
 	$self->pidl("{");
 	$self->indent;
 	$self->pidl("$ndr_call");
 	$self->pidl("$object_ptr");
+	$self->pidl("const char * const kwnames[] = { \"print_secrets\", NULL };");
+	$self->pidl("PyObject *py_print_secrets = NULL;");
 	$self->pidl("PyObject *ret;");
 	$self->pidl("char *retstr;");
+	$self->pidl("bool ok;");
+	$self->pidl("");
+	$self->pidl("ok = PyArg_ParseTupleAndKeywords(args, kwargs, \"|O:__ndr_print__\",");
+	$self->indent;
+	$self->pidl("discard_const_p(char *, kwnames),");
+	$self->pidl("&py_print_secrets);");
+	$self->deindent;
+	$self->pidl("if (!ok) {");
+	$self->indent;
+	$self->pidl("return NULL;");
+	$self->deindent;
+	$self->pidl("}");
 	$self->pidl("");
 	$self->pidl("if (ndr_table_$iface\.num_calls < " . ($fn->{OPNUM}+1) .
 		    ") {");
@@ -840,7 +876,15 @@ sub PythonFunctionStruct($$$$)
 	$self->pidl("}");
 	$self->pidl("call = &ndr_table_$iface\.calls[$fn->{OPNUM}];");
 	$self->pidl("");
+	$self->pidl("if (py_print_secrets != NULL && PyObject_IsTrue(py_print_secrets)) {");
+	$self->indent;
+	$self->pidl("retstr = ndr_print_function_secret_string(pytalloc_get_mem_ctx(py_obj), call->ndr_print, name, ndr_inout_flags, object);");
+	$self->deindent;
+	$self->pidl("} else {");
+	$self->indent;
 	$self->pidl("retstr = ndr_print_function_string(pytalloc_get_mem_ctx(py_obj), call->ndr_print, name, ndr_inout_flags, object);");
+	$self->deindent;
+	$self->pidl("}");
 	$self->pidl("ret = PyUnicode_FromString(retstr);");
 	$self->pidl("TALLOC_FREE(retstr);");
 	$self->pidl("");
@@ -849,18 +893,18 @@ sub PythonFunctionStruct($$$$)
 	$self->pidl("}");
 	$self->pidl("");
 
-	$self->pidl("static PyObject *py_$name\_ndr_print_in(PyObject *py_obj, PyObject *Py_UNUSED(ignored))");
+	$self->pidl("static PyObject *py_$name\_ndr_print_in(PyObject *py_obj, PyObject *args, PyObject *kwargs)");
 	$self->pidl("{");
 	$self->indent;
-	$self->pidl("return py_$name\_ndr_print(py_obj, \"$name\_in\", NDR_IN);");
+	$self->pidl("return py_$name\_ndr_print(py_obj, args, kwargs, \"$name\_in\", NDR_IN);");
 	$self->deindent;
 	$self->pidl("}");
 	$self->pidl("");
 
-	$self->pidl("static PyObject *py_$name\_ndr_print_out(PyObject *py_obj, PyObject *Py_UNUSED(ignored))");
+	$self->pidl("static PyObject *py_$name\_ndr_print_out(PyObject *py_obj, PyObject *args, PyObject *kwargs)");
 	$self->pidl("{");
 	$self->indent;
-	$self->pidl("return py_$name\_ndr_print(py_obj, \"$name\_out\", NDR_OUT);");
+	$self->pidl("return py_$name\_ndr_print(py_obj, args, kwargs, \"$name\_out\", NDR_OUT);");
 	$self->deindent;
 	$self->pidl("}");
 	$self->pidl("");
@@ -888,8 +932,14 @@ sub PythonFunctionStruct($$$$)
 	$self->indent;
 	$self->pidl("\"S.ndr_unpack_out(class, blob, bigendian=False, ndr64=False, allow_remaining=False) -> None\\nNDR unpack output\" },");
 	$self->deindent;
-	$self->pidl("{ \"__ndr_print_in__\", (PyCFunction)py_$name\_ndr_print_in, METH_NOARGS, \"S.ndr_print_in(object) -> None\\nNDR print input\" },");
-	$self->pidl("{ \"__ndr_print_out__\", (PyCFunction)py_$name\_ndr_print_out, METH_NOARGS, \"S.ndr_print_out(object) -> None\\nNDR print output\" },");
+	$self->pidl("{ \"__ndr_print_in__\", PY_DISCARD_FUNC_SIG(PyCFunction,py_$name\_ndr_print_in), METH_VARARGS|METH_KEYWORDS,");
+	$self->indent;
+	$self->pidl("\"S.ndr_print_in(object, print_secrets=False) -> String\\nNDR print input\" },");
+	$self->deindent;
+	$self->pidl("{ \"__ndr_print_out__\", PY_DISCARD_FUNC_SIG(PyCFunction,py_$name\_ndr_print_out), METH_VARARGS|METH_KEYWORDS,");
+	$self->indent;
+	$self->pidl("\"S.ndr_print_out(object, print_secrets=False) -> String\\nNDR print output\" },");
+	$self->deindent;
 	$self->pidl("{ NULL, NULL, 0, NULL }");
 	$self->deindent;
 	$self->pidl("};");
@@ -967,32 +1017,81 @@ sub PythonFunctionUnpackOut($$$)
 	my $env = GenerateFunctionOutEnv($fn, "r->");
 	my $result_size = 0;
 
-	$self->pidl("static PyObject *$outfnname(struct $fn->{NAME} *r)");
+	$self->pidl("static PyObject *$outfnname(struct $fn->{NAME} *r, bool raise_result_exception)");
 	$self->pidl("{");
 	$self->indent;
-	$self->pidl("PyObject *result;");
 	foreach my $e (@{$fn->{ELEMENTS}}) {
 		next unless (grep(/out/,@{$e->{DIRECTION}}));
 		next if (($metadata_args->{in}->{$e->{NAME}} and grep(/in/, @{$e->{DIRECTION}})) or
 		         ($metadata_args->{out}->{$e->{NAME}}) and grep(/out/, @{$e->{DIRECTION}}));
-		$self->pidl("PyObject *py_$e->{NAME};");
+		$self->pidl("PyObject *py_$e->{NAME} = NULL;");
 		$result_size++;
 	}
 
-	if ($fn->{RETURN_TYPE}) {
-		$result_size++ unless ($fn->{RETURN_TYPE} eq "WERROR" or $fn->{RETURN_TYPE} eq "NTSTATUS");
+	my $is_raisable_return = 0;
+	if ($fn->{RETURN_TYPE} and ($fn->{RETURN_TYPE} eq "WERROR" or $fn->{RETURN_TYPE} eq "NTSTATUS")) {
+		$is_raisable_return = 1;
+	}
+
+	if ($fn->{RETURN_TYPE} and not $is_raisable_return) {
+		$result_size++;
+	}
+
+	my $max_result_size = $result_size;
+	my $alloc_size = "$result_size";
+	if ($fn->{RETURN_TYPE} and $is_raisable_return) {
+		$max_result_size++;
+	}
+	$self->pidl("PyObject *result = NULL;");
+	if ($max_result_size != $result_size) {
+		$self->pidl("size_t result_size = $result_size;");
+		$alloc_size = "result_size";
+	}
+	$self->pidl("");
+
+	if ($result_size > 1) {
+		$signature .= "(";
+	} elsif ($result_size == 0) {
+		$signature .= "None";
+	}
+
+	if ($fn->{RETURN_TYPE} and $is_raisable_return) {
+		$self->pidl("if (raise_result_exception) {");
+		$self->indent;
+		if (defined($fn->{RETURN_TYPE}) and $fn->{RETURN_TYPE} eq "NTSTATUS") {
+			$self->handle_ntstatus("r->out.result", "NULL", undef);
+		} elsif (defined($fn->{RETURN_TYPE}) and $fn->{RETURN_TYPE} eq "WERROR") {
+			$self->handle_werror("r->out.result", "NULL", undef);
+		}
+		$self->deindent;
+		$self->pidl("} else {");
+		$self->indent;
+		$self->pidl("/* $fn->{RETURN_TYPE} will be part of the results */");
+		$self->pidl("result_size += 1;");
+		$self->deindent;
+		$self->pidl("}");
+		$self->pidl("");
+	}
+
+	if ($max_result_size > 1) {
+		if ($max_result_size != $result_size) {
+			$self->pidl("if (result_size > 1) {");
+			$self->indent;
+		}
+		$self->pidl("result = PyTuple_New($alloc_size);");
+		$self->pidl("if (result == NULL) {");
+		$self->indent;
+		$self->pidl("return NULL;");
+		$self->deindent;
+		$self->pidl("}");
+		if ($max_result_size != $result_size) {
+			$self->deindent;
+			$self->pidl("}");
+		}
+		$self->pidl("");
 	}
 
 	my $i = 0;
-
-	if ($result_size > 1) {
-		$self->pidl("result = PyTuple_New($result_size);");
-		$signature .= "(";
-	} elsif ($result_size == 0) {
-		$self->pidl("result = Py_None;");
-		$self->pidl("Py_INCREF(result);");
-		$signature .= "None";
-	}
 
 	foreach my $e (@{$fn->{ELEMENTS}}) {
 		next if ($metadata_args->{out}->{$e->{NAME}});
@@ -1000,28 +1099,64 @@ sub PythonFunctionUnpackOut($$$)
 		if (grep(/out/,@{$e->{DIRECTION}})) {
 			$self->ConvertObjectToPython("r", $env, $e, "r->out.$e->{NAME}", $py_name, "return NULL;");
 			if ($result_size > 1) {
-				$self->pidl("PyTuple_SetItem(result, $i, $py_name);");
-				$i++;
 				$signature .= "$e->{NAME}, ";
 			} else {
-				$self->pidl("result = $py_name;");
 				$signature .= $e->{NAME};
 			}
+
+			if ($max_result_size > 1) {
+				if ($max_result_size != $result_size and $result_size == 1) {
+					$self->pidl("if (result_size > 1) {");
+					$self->indent;
+				}
+				$self->pidl("PyTuple_SetItem(result, $i, $py_name);");
+				if ($max_result_size != $result_size and $result_size == 1) {
+					$self->deindent;
+					$self->pidl("}");
+				}
+			}
+			if ($result_size == 1) {
+				if ($max_result_size != $result_size) {
+					$self->pidl("if (result_size == 1) {");
+					$self->indent;
+				}
+				$self->pidl("result = $py_name;");
+				if ($max_result_size != $result_size) {
+					$self->deindent;
+					$self->pidl("}");
+				}
+			}
+			$self->pidl("");
+			$i++;
 		}
 	}
 
-	if (defined($fn->{RETURN_TYPE}) and $fn->{RETURN_TYPE} eq "NTSTATUS") {
-		$self->handle_ntstatus("r->out.result", "NULL", undef);
-	} elsif (defined($fn->{RETURN_TYPE}) and $fn->{RETURN_TYPE} eq "WERROR") {
-		$self->handle_werror("r->out.result", "NULL", undef);
-	} elsif (defined($fn->{RETURN_TYPE})) {
+	if ($fn->{RETURN_TYPE} and $is_raisable_return) {
+		$self->pidl("if (!raise_result_exception) {");
+		$self->indent;
+	}
+
+	if ($fn->{RETURN_TYPE}) {
 		my $conv = $self->ConvertObjectToPythonData("r", $fn->{RETURN_TYPE}, "r->out.result", $fn);
-		if ($result_size > 1) {
+		if ($max_result_size > 1) {
 			$self->pidl("PyTuple_SetItem(result, $i, $conv);");
-		} else {
+		} elsif ($max_result_size == 1) {
 			$self->pidl("result = $conv;");
+		} else {
+			fatal($fn->{ORIGINAL}, "Internal error max_result_size=$max_result_size");
 		}
-		$signature .= "result";
+
+		if (not $is_raisable_return) {
+			$signature .= "result";
+		}
+	}
+
+	if ($fn->{RETURN_TYPE} and $is_raisable_return) {
+		$self->deindent;
+		$self->pidl("}");
+		$self->pidl("");
+	} elsif ($fn->{RETURN_TYPE}) {
+		$self->pidl("");
 	}
 
 	if (substr($signature, -2) eq ", ") {
@@ -1029,6 +1164,20 @@ sub PythonFunctionUnpackOut($$$)
 	}
 	if ($result_size > 1) {
 		$signature .= ")";
+	}
+
+	if ($result_size == 0) {
+		if ($max_result_size != $result_size) {
+			$self->pidl("if (result_size == 0) {");
+			$self->indent;
+		}
+		$self->pidl("result = Py_None;");
+		$self->pidl("Py_INCREF(result);");
+		if ($max_result_size != $result_size) {
+			$self->deindent;
+			$self->pidl("}");
+		}
+		$self->pidl("");
 	}
 
 	$self->pidl("return result;");
@@ -1417,9 +1566,23 @@ sub Interface($$$)
 		$self->indent;
 		foreach my $d (@fns) {
 			my ($infn, $outfn, $callfn, $prettyname, $docstring, $opnum) = @$d;
-			$self->pidl("{ \"$prettyname\", $docstring, (py_dcerpc_call_fn)$callfn, (py_data_pack_fn)$infn, (py_data_unpack_fn)$outfn, $opnum, &ndr_table_$interface->{NAME} },");
+			$self->pidl("{");
+			$self->indent;
+			$self->pidl(".name = \"$prettyname\",");
+			$self->pidl(".doc = $docstring,");
+			$self->pidl(".call = (py_dcerpc_call_fn)$callfn,");
+			$self->pidl(".pack_in_data = (py_data_pack_fn)$infn,");
+			$self->pidl(".unpack_out_data = (py_data_unpack_fn)$outfn,");
+			$self->pidl(".opnum = $opnum,");
+			$self->pidl(".table = &ndr_table_$interface->{NAME},");
+			$self->deindent;
+			$self->pidl("},");
 		}
-		$self->pidl("{0}");
+		$self->pidl("{");
+		$self->indent;
+		$self->pidl(".name = NULL,");
+		$self->deindent;
+		$self->pidl("},");
 		$self->deindent;
 		$self->pidl("};");
 		$self->pidl("");
@@ -1434,11 +1597,30 @@ sub Interface($$$)
 		$self->pidl("");
 
 		my $signature =
-"\"$interface->{NAME}(binding, lp_ctx=None, credentials=None) -> connection\\n\"
-\"\\n\"
-\"binding should be a DCE/RPC binding string (for example: ncacn_ip_tcp:127.0.0.1)\\n\"
-\"lp_ctx should be a path to a smb.conf file or a param.LoadParm object\\n\"
-\"credentials should be a credentials.Credentials object.\\n\\n\"";
+"\"$interface->{NAME}(binding, lp_ctx=None, credentials=None, basis_connection=None) -> connection\\n\"
+\"\\n\\n\"
+\"Parameters\\n\"
+\"----------\\n\"
+\"binding : str\\n\"
+\"    A DCE/RPC binding string (for example: ncacn_ip_tcp:127.0.0.1)\\n\"
+\"lp_ctx : param.LoadParm\\n\"
+\"    Should be a path to a smb.conf file or a param.LoadParm object\\n\"
+\"credentials : credentials.Credentials, optional\\n\"
+\"    A credentials.Credentials object (default is None).\\n\"
+\"basis_connection : samba.dcerpc.ClientConnection, optional\\n\"
+\"    A $interface->{NAME} client connection object (default is None).\\n\"
+\"\\n\\n\"
+\"Returns\\n\"
+\"-------\\n\"
+\"samba.dcerpc.ClientConnection\\n\"
+\"    A ClientConnection object\\n\"
+\"\\n\\n\"
+\"Raises\\n\"
+\"------\\n\"
+\"samba.NTSTATUSError\\n\"
+\"    An NTSTATUS error\\n\"
+\"\\n\"";
+
 
 		my $docstring = $self->DocString($interface, $interface->{NAME});
 
@@ -1667,7 +1849,6 @@ sub ConvertStringFromPythonData($$$$$)
 	$self->pidl("unicode = PyUnicode_AsEncodedString($py_var, \"utf-8\", \"ignore\");");
 	$self->pidl("if (unicode == NULL) {");
 	$self->indent;
-	$self->pidl("PyErr_NoMemory();");
 	$self->pidl("$fail");
 	$self->deindent;
 	$self->pidl("}");
@@ -1697,6 +1878,27 @@ sub ConvertStringFromPythonData($$$$$)
 	$self->deindent;
 	$self->pidl("}");
 	$self->pidl("$target = talloc_str;");
+	$self->deindent;
+	$self->pidl("}");
+}
+
+sub ConvertU16StringFromPythonData($$$$$)
+{
+	my ($self, $mem_ctx, $py_var, $target, $fail) = @_;
+
+	$self->pidl("{");
+	$self->indent;
+	$self->pidl("unsigned char *str = NULL;");
+	$self->pidl("");
+	$self->pidl("str = PyUtf16String_FromBytes(");
+	$self->pidl("	$mem_ctx, $py_var);");
+	$self->pidl("if (str == NULL) {");
+	$self->indent;
+	$self->pidl("$fail");
+	$self->deindent;
+	$self->pidl("}");
+	$self->pidl("");
+	$self->pidl("$target = str;");
 	$self->deindent;
 	$self->pidl("}");
 }
@@ -1809,7 +2011,8 @@ sub ConvertObjectFromPythonData($$$$$$;$$)
 		my $ctype_name = $self->use_type_variable($ctype);
 		unless (defined ($ctype_name)) {
 			error($location, "Unable to determine origin of type `" . mapTypeName($ctype) . "'");
-			$self->pidl("PyErr_SetString(PyExc_TypeError, \"Can not convert C Type " . mapTypeName($ctype) . " from Python\");");
+			$self->pidl("PyErr_SetString(PyExc_TypeError, \"Cannot convert Python object to NDR $target\");");
+			$self->pidl("$fail");
 			return;
 		}
 		$self->pidl("PY_CHECK_TYPE($ctype_name, $cvar, $fail);");
@@ -1852,6 +2055,12 @@ sub ConvertObjectFromPythonData($$$$$$;$$)
 		 or $actual_ctype->{NAME} eq "ipv6address"
 		 or $actual_ctype->{NAME} eq "dnsp_name")) {
 	        $self->ConvertStringFromPythonData($mem_ctx, $cvar, $target, $fail);
+		return;
+	}
+
+	if ($actual_ctype->{TYPE} eq "SCALAR" and
+		$actual_ctype->{NAME} eq "u16string") {
+	        $self->ConvertU16StringFromPythonData($mem_ctx, $cvar, $target, $fail);
 		return;
 	}
 
@@ -1899,8 +2108,7 @@ sub ConvertObjectFromPythonLevel($$$$$$$$$)
 	if ($recurse == 0) {
 	        $self->pidl("if ($py_var == NULL) {");
 		$self->indent;
-		$self->pidl("PyErr_Format(PyExc_AttributeError, \"Cannot delete NDR object: " .
-                    mapTypeName($var_name) . "\");");
+		$self->pidl("PyErr_Format(PyExc_AttributeError, \"Cannot delete NDR object: $var_name\");");
 		$self->pidl($fail);
 		$self->deindent;
 		$self->pidl("}");
@@ -1976,7 +2184,7 @@ sub ConvertObjectFromPythonLevel($$$$$$$$$)
 			$self->pidl("int $counter;");
 			if (ArrayDynamicallyAllocated($e, $l)) {
 				$self->pidl("$var_name = talloc_array_ptrtype($mem_ctx, $var_name, PyList_GET_SIZE($py_var));");
-				$self->pidl("if (!$var_name) { $fail; }");
+				$self->pidl("if (!$var_name) { $fail }");
 				$self->pidl("talloc_set_name_const($var_name, \"ARRAY: $var_name\");");
 			} else {
 				$self->pidl("if (ARRAY_SIZE($var_name) != PyList_GET_SIZE($py_var)) {");
@@ -1989,9 +2197,9 @@ sub ConvertObjectFromPythonLevel($$$$$$$$$)
 			$self->pidl("for ($counter = 0; $counter < PyList_GET_SIZE($py_var); $counter++) {");
 			$self->indent;
 			if (ArrayDynamicallyAllocated($e, $l)) {
-				$self->ConvertObjectFromPythonLevel($env, $var_name, "PyList_GET_ITEM($py_var, $counter)", $e, $nl, $var_name."[$counter]", $fail, 0);
+				$self->ConvertObjectFromPythonLevel($env, $var_name, "PyList_GET_ITEM($py_var, $counter)", $e, $nl, "($var_name)"."[$counter]", $fail, 0);
 			} else {
-				$self->ConvertObjectFromPythonLevel($env, $mem_ctx, "PyList_GET_ITEM($py_var, $counter)", $e, $nl, $var_name."[$counter]", $fail, 0);
+				$self->ConvertObjectFromPythonLevel($env, $mem_ctx, "PyList_GET_ITEM($py_var, $counter)", $e, $nl, "($var_name)"."[$counter]", $fail, 0);
 			}
 			$self->deindent;
 			$self->pidl("}");
@@ -2056,11 +2264,11 @@ sub ConvertScalarToPython($$$$)
 	# possibly 64 bit unsigned long.  (enums are signed in C,
 	# unsigned in NDR)
 	if ($ctypename =~ /^(uint32|uint3264)$/) {
-		return "PyLong_FromUnsignedLongLong((uint32_t)$cvar)";
+		return "PyLong_FromUnsignedLongLong((uint32_t)($cvar))";
 	}
 
 	if ($ctypename =~ /^(uint|uint8|uint16|uint1632)$/) {
-		return "PyLong_FromLong((uint16_t)$cvar)";
+		return "PyLong_FromLong((uint16_t)($cvar))";
 	}
 
 	if ($ctypename eq "DATA_BLOB") {
@@ -2085,6 +2293,10 @@ sub ConvertScalarToPython($$$$)
 
 	if (($ctypename eq "dns_string" or $ctypename eq "dns_name")) {
 		return "PyString_FromStringOrNULL($cvar)";
+	}
+
+	if ($ctypename eq "u16string") {
+		return "PyBytes_FromUtf16StringOrNULL($cvar)";
 	}
 
 	# Not yet supported
@@ -2242,9 +2454,9 @@ sub ConvertObjectToPythonLevel($$$$$$$)
 			my $member_var = "py_$e->{NAME}_$l->{LEVEL_INDEX}";
 			$self->pidl("PyObject *$member_var;");
 			if (ArrayDynamicallyAllocated($e, $l)) {
-				$self->ConvertObjectToPythonLevel($var_name, $env, $e, $nl, $var_name."[$counter]", $member_var, $fail, $recurse);
+				$self->ConvertObjectToPythonLevel($var_name, $env, $e, $nl, "($var_name)"."[$counter]", $member_var, $fail, $recurse);
 			} else {
-				$self->ConvertObjectToPythonLevel($mem_ctx, $env, $e, $nl, $var_name."[$counter]", $member_var, $fail, $recurse);
+				$self->ConvertObjectToPythonLevel($mem_ctx, $env, $e, $nl, "($var_name)"."[$counter]", $member_var, $fail, $recurse);
 			}
 			$self->pidl("PyList_SetItem($py_var, $counter, $member_var);");
 			$self->deindent;
@@ -2265,6 +2477,10 @@ sub ConvertObjectToPythonLevel($$$$$$$)
 		}
 		my $conv = $self->ConvertObjectToPythonData($mem_ctx, $l->{DATA_TYPE}, $var_name, $e->{ORIGINAL});
 		$self->pidl("$py_var = $conv;");
+		if ($conv eq "NULL") {
+			$self->pidl("PyErr_SetString(PyExc_NotImplementedError, \"Cannot convert NDR $var_name to Python\");");
+			$self->pidl("$fail");
+		}
 	} elsif ($l->{TYPE} eq "SUBCONTEXT") {
 		$self->ConvertObjectToPythonLevel($mem_ctx, $env, $e, $nl, $var_name, $py_var, $fail, $recurse);
 	} else {

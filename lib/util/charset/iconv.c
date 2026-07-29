@@ -26,7 +26,7 @@
 #include "lib/util/charset/charset.h"
 #include "lib/util/charset/charset_proto.h"
 
-#ifdef HAVE_ICU_I18N
+#ifdef HAVE_ICUI18N
 #include <unicode/ustring.h>
 #include <unicode/utrans.h>
 #endif
@@ -168,7 +168,7 @@ static size_t sys_iconv(void *cd,
 }
 #endif
 
-#ifdef HAVE_ICU_I18N
+#ifdef HAVE_ICUI18N
 static size_t sys_uconv(void *cd,
 			const char **inbuf,
 			size_t *inbytesleft,
@@ -334,7 +334,7 @@ static bool is_utf16(const char *name)
 
 static int smb_iconv_t_destructor(smb_iconv_t hwd)
 {
-#ifdef HAVE_ICU_I18N
+#ifdef HAVE_ICUI18N
 	/*
 	 * This has to come first, as the cd_direct member won't be an iconv
 	 * handle and must not be passed to iconv_close().
@@ -418,7 +418,7 @@ _PUBLIC_ smb_iconv_t smb_iconv_open_ex(TALLOC_CTX *mem_ctx, const char *tocode,
 	}
 #endif
 
-#ifdef HAVE_ICU_I18N
+#ifdef HAVE_ICUI18N
 	if (strcasecmp(fromcode, "UTF8-NFD") == 0 &&
 	    strcasecmp(tocode, "UTF8-NFC") == 0)
 	{
@@ -861,6 +861,39 @@ static size_t utf8_pull(void *cd, const char **inbuf, size_t *inbytesleft,
 				errno = EILSEQ;
 				goto error;
 			}
+			if (codepoint >= 0xd800 && codepoint <= 0xdfff) {
+				/*
+				 * This is an invalid codepoint, per
+				 * RFC3629, as it encodes part of a
+				 * UTF-16 surrogate pair for a
+				 * character over U+10000, which ought
+				 * to have been encoded as a four byte
+				 * utf-8 sequence.
+				 *
+				 * Prior to Vista, Windows might
+				 * sometimes produce invalid strings
+				 * where a utf-16 sequence containing
+				 * surrogate pairs was converted
+				 * "verbatim" into utf-8, instead of
+				 * encoding the actual codepoint. This
+				 * format is sometimes called "WTF-8".
+				 *
+				 * If we were to support that, we'd
+				 * have a branch here for the case
+				 * where the codepoint is between
+				 * 0xd800 and 0xdbff (a "high
+				 * surrogate"), and read a *six*
+				 * character sequence from there which
+				 * would include a low surrogate. But
+				 * that would undermine the
+				 * hard-learnt principle that each
+				 * character should only have one
+				 * encoding.
+				 */
+				errno = EILSEQ;
+				goto error;
+			}
+
 			uc[0] = codepoint & 0xff;
 			uc[1] = codepoint >> 8;
 			c  += 3;
@@ -887,6 +920,16 @@ static size_t utf8_pull(void *cd, const char **inbuf, size_t *inbytesleft,
 			if (codepoint < 0x10000) {
 				/* reject UTF-8 characters that are not
 				   minimally packed */
+				errno = EILSEQ;
+				goto error;
+			}
+			if (codepoint > 0x10ffff) {
+				/*
+				 * Unicode stops at 0x10ffff, and if
+				 * we ignore that, we'll end up
+				 * encoding the wrong characters in
+				 * the surrogate pair.
+				 */
 				errno = EILSEQ;
 				goto error;
 			}

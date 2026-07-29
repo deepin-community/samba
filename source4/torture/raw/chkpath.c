@@ -1,18 +1,18 @@
-/* 
+/*
    Unix SMB/CIFS implementation.
    chkpath individual test suite
    Copyright (C) Andrew Tridgell 2003
-   
+
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
    the Free Software Foundation; either version 3 of the License, or
    (at your option) any later version.
-   
+
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
    GNU General Public License for more details.
-   
+
    You should have received a copy of the GNU General Public License
    along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
@@ -95,7 +95,7 @@ static bool test_path_ex(struct smbcli_state *cli, struct torture_context *tctx,
 	if (path_expected &&
 	    (!finfo.name_info.out.fname.s ||
 	     strcmp(finfo.name_info.out.fname.s, path_expected) != 0)) {
-		if (tctx && torture_setting_bool(tctx, "samba4", false)) {
+		if (tctx && torture_setting_bool(tctx, "samba4-ntvfs", false)) {
 			printf("IGNORE: %-30s => %-20s should be %s\n",
 				path, finfo.name_info.out.fname.s, path_expected);
 			return true;
@@ -138,7 +138,7 @@ static bool test_chkpath(struct smbcli_state *cli, struct torture_context *tctx)
 	}
 
 	ret &= test_path(cli, BASEDIR "\\test.txt..", NT_STATUS_NOT_A_DIRECTORY, NT_STATUS_DOS(ERRDOS,ERRbadpath));
-	
+
 	if (!torture_set_file_attribute(cli->tree, BASEDIR, FILE_ATTRIBUTE_HIDDEN)) {
 		printf("failed to set basedir hidden\n");
 		ret = false;
@@ -304,8 +304,9 @@ static bool test_chkpath_names(struct smbcli_state *cli, struct torture_context 
 		case '?':/*0x3F*/
 		case '|':/*0x7C*/
 			if (i == '/' &&
-			    torture_setting_bool(tctx, "samba3", false)) {
-				/* samba 3 handles '/' as '\\' */
+			    !torture_setting_bool(tctx, "samba4-ntvfs", false))
+			{
+				/* samba fs handles '/' as '\\' */
 				break;
 			}
 			expected = NT_STATUS_OBJECT_NAME_INVALID;
@@ -345,10 +346,10 @@ done:
 	return ret;
 }
 
-/* 
-   basic testing of chkpath calls 
+/*
+   basic testing of chkpath calls
 */
-bool torture_raw_chkpath(struct torture_context *torture, 
+bool torture_raw_chkpath(struct torture_context *torture,
 			 struct smbcli_state *cli)
 {
 	bool ret = true;

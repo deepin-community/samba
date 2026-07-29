@@ -55,55 +55,62 @@ bool server_id_equal(const struct server_id *p1, const struct server_id *p2)
 
 char *server_id_str_buf(struct server_id id, struct server_id_buf *dst)
 {
+	return server_id_str_buf_unique_ex(id, '\0', dst);
+}
+
+char *server_id_str_buf_unique_ex(struct server_id id,
+				  char unique_delimiter,
+				  struct server_id_buf *dst)
+{
+	if (id.unique_id == SERVERID_UNIQUE_ID_NOT_TO_VERIFY) {
+		unique_delimiter = '\0';
+	}
+
 	if (server_id_is_disconnected(&id)) {
 		strlcpy(dst->buf, "disconnected", sizeof(dst->buf));
 	} else if ((id.vnn == NONCLUSTER_VNN) && (id.task_id == 0)) {
-		snprintf(dst->buf, sizeof(dst->buf), "%llu",
-			 (unsigned long long)id.pid);
+		snprintf(dst->buf, sizeof(dst->buf),
+			 "%"PRIu64"%c%"PRIu64"",
+			 id.pid, unique_delimiter, id.unique_id);
 	} else if (id.vnn == NONCLUSTER_VNN) {
-		snprintf(dst->buf, sizeof(dst->buf), "%llu.%u",
-			 (unsigned long long)id.pid, (unsigned)id.task_id);
+		snprintf(dst->buf, sizeof(dst->buf),
+			 "%"PRIu64".%"PRIu32"%c%"PRIu64"",
+			 id.pid, id.task_id,
+			 unique_delimiter, id.unique_id);
 	} else if (id.task_id == 0) {
-		snprintf(dst->buf, sizeof(dst->buf), "%u:%llu",
-			 (unsigned)id.vnn, (unsigned long long)id.pid);
+		snprintf(dst->buf, sizeof(dst->buf),
+			 "%"PRIu32":%"PRIu64"%c%"PRIu64"",
+			 id.vnn, id.pid,
+			 unique_delimiter, id.unique_id);
 	} else {
-		snprintf(dst->buf, sizeof(dst->buf), "%u:%llu.%u",
-			 (unsigned)id.vnn,
-			 (unsigned long long)id.pid,
-			 (unsigned)id.task_id);
+		snprintf(dst->buf, sizeof(dst->buf),
+			 "%"PRIu32":%"PRIu64".%"PRIu32"%c%"PRIu64"",
+			 id.vnn, id.pid, id.task_id,
+			 unique_delimiter, id.unique_id);
 	}
 	return dst->buf;
 }
 
-size_t server_id_str_buf_unique(struct server_id id, char *buf, size_t buflen)
+char *server_id_str_buf_unique(struct server_id id, struct server_id_buf *dst)
 {
-	struct server_id_buf idbuf;
-	char unique_buf[21];	/* 2^64 is 18446744073709551616, 20 chars */
-	size_t idlen, unique_len, needed;
-
-	server_id_str_buf(id, &idbuf);
-
-	idlen = strlen(idbuf.buf);
-	unique_len = snprintf(unique_buf, sizeof(unique_buf), "%"PRIu64,
-			      id.unique_id);
-	needed = idlen + unique_len + 2;
-
-	if (buflen >= needed) {
-		memcpy(buf, idbuf.buf, idlen);
-		buf[idlen] = '/';
-		memcpy(buf + idlen + 1, unique_buf, unique_len+1);
-	}
-
-	return needed;
+	return server_id_str_buf_unique_ex(id, '/', dst);
 }
 
 struct server_id server_id_from_string(uint32_t local_vnn,
 				       const char *pid_string)
 {
+	return server_id_from_string_ex(local_vnn, '/', pid_string);
+}
+
+struct server_id server_id_from_string_ex(uint32_t local_vnn,
+					  char unique_delimiter,
+					  const char *pid_string)
+{
 	struct server_id templ = {
 		.vnn = NONCLUSTER_VNN, .pid = UINT64_MAX
 	};
 	struct server_id result;
+	char unique_delimiter_found = '\0';
 	int ret;
 
 	/*
@@ -114,10 +121,10 @@ struct server_id server_id_from_string(uint32_t local_vnn,
 	 */
 
 	result = templ;
-	ret = sscanf(pid_string, "%"SCNu32":%"SCNu64".%"SCNu32"/%"SCNu64,
+	ret = sscanf(pid_string, "%"SCNu32":%"SCNu64".%"SCNu32"%c%"SCNu64,
 		     &result.vnn, &result.pid, &result.task_id,
-		     &result.unique_id);
-	if (ret == 4) {
+		     &unique_delimiter_found, &result.unique_id);
+	if (ret == 5 && unique_delimiter_found == unique_delimiter) {
 		return result;
 	}
 
@@ -129,9 +136,10 @@ struct server_id server_id_from_string(uint32_t local_vnn,
 	}
 
 	result = templ;
-	ret = sscanf(pid_string, "%"SCNu32":%"SCNu64"/%"SCNu64,
-		     &result.vnn, &result.pid, &result.unique_id);
-	if (ret == 3) {
+	ret = sscanf(pid_string, "%"SCNu32":%"SCNu64"%c%"SCNu64,
+		     &result.vnn, &result.pid,
+		     &unique_delimiter_found, &result.unique_id);
+	if (ret == 4 && unique_delimiter_found == unique_delimiter) {
 		return result;
 	}
 
@@ -143,9 +151,10 @@ struct server_id server_id_from_string(uint32_t local_vnn,
 	}
 
 	result = templ;
-	ret = sscanf(pid_string, "%"SCNu64".%"SCNu32"/%"SCNu64,
-		     &result.pid, &result.task_id, &result.unique_id);
-	if (ret == 3) {
+	ret = sscanf(pid_string, "%"SCNu64".%"SCNu32"%c%"SCNu64,
+		     &result.pid, &result.task_id,
+		     &unique_delimiter_found, &result.unique_id);
+	if (ret == 4 && unique_delimiter_found == unique_delimiter) {
 		result.vnn = local_vnn;
 		return result;
 	}
@@ -159,9 +168,9 @@ struct server_id server_id_from_string(uint32_t local_vnn,
 	}
 
 	result = templ;
-	ret = sscanf(pid_string, "%"SCNu64"/%"SCNu64,
-		     &result.pid, &result.unique_id);
-	if (ret == 2) {
+	ret = sscanf(pid_string, "%"SCNu64"%c%"SCNu64,
+		     &result.pid, &unique_delimiter_found, &result.unique_id);
+	if (ret == 3 && unique_delimiter_found == unique_delimiter) {
 		result.vnn = local_vnn;
 		return result;
 	}

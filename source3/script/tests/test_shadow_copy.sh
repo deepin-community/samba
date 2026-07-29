@@ -100,7 +100,7 @@ build_snapshots()
     local prefix    #prefix from snapshot dir to share root
     local start     #timestamp index of first snapshot
     local end       #timestamp index of last snapshot
-    local sub       #creat a snapshot of subtree of share
+    local sub       #create a snapshot of subtree of share
     local snapdir
     local snapname
     local i
@@ -221,7 +221,7 @@ test_fetch_snap_file()
         -c "get ${SNAPSHOTS[$snapidx]}/$path $WORKDIR/foo"
 }
 
-# Test fetching a previous version of a file
+# Test listing the previous version of a dir
 test_fetch_snap_dir()
 {
     local share
@@ -273,6 +273,10 @@ test_shadow_copy_fixed()
 
     testit "$msg - regular file in subdir" \
         test_count_versions $share bar/baz $ncopies_allowed || \
+        failed=`expr $failed + 1`
+
+    testit "$msg - regular file in case insensitive subdir" \
+        test_count_versions $share bar/bAz $ncopies_allowed || \
         failed=`expr $failed + 1`
 
     testit "$msg - local symlink" \

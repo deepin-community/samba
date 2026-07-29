@@ -105,9 +105,9 @@ static bool object_in_list(const struct GUID *object_list, const struct GUID *ob
 	return false;
 }
 
-/* returns true if the ACE gontains generic information
+/* returns true if the ACE contains generic information
  * that needs to be processed additionally */
- 
+
 static bool desc_ace_has_generic(const struct security_ace *ace)
 {
 	if (ace->access_mask & SEC_GENERIC_ALL || ace->access_mask & SEC_GENERIC_READ ||
@@ -124,8 +124,8 @@ static bool desc_ace_has_generic(const struct security_ace *ace)
 /* creates an ace in which the generic information is expanded */
 
 static void desc_expand_generic(struct security_ace *new_ace,
-				struct dom_sid *owner,
-				struct dom_sid *group)
+				const struct dom_sid *owner,
+				const struct dom_sid *group)
 {
 	new_ace->access_mask = map_generic_rights_ds(new_ace->access_mask);
 	if (dom_sid_equal(&new_ace->trustee, &global_sid_Creator_Owner)) {
@@ -137,21 +137,22 @@ static void desc_expand_generic(struct security_ace *new_ace,
 	new_ace->flags = 0x0;
 }
 
-static struct security_acl *calculate_inherited_from_parent(TALLOC_CTX *mem_ctx,
-							    struct security_acl *acl,
-							    bool is_container,
-							    struct dom_sid *owner,
-							    struct dom_sid *group,
-							    struct GUID *object_list)
+static struct security_acl *calculate_inherited_from_parent(
+	TALLOC_CTX *mem_ctx,
+	struct security_acl *acl,
+	bool is_container,
+	const struct dom_sid *owner,
+	const struct dom_sid *group,
+	struct GUID *object_list)
 {
 	uint32_t i;
-	TALLOC_CTX *tmp_ctx = talloc_new(mem_ctx);
-	struct security_acl *tmp_acl = talloc_zero(mem_ctx, struct security_acl);
-	if (!tmp_acl) {
-		return NULL;
-	}
+	struct security_acl *tmp_acl = NULL;
 
 	if (!acl) {
+		return NULL;
+	}
+	tmp_acl = talloc_zero(mem_ctx, struct security_acl);
+	if (!tmp_acl) {
 		return NULL;
 	}
 
@@ -199,6 +200,9 @@ static struct security_acl *calculate_inherited_from_parent(TALLOC_CTX *mem_ctx,
 		case SEC_ACE_TYPE_ACCESS_DENIED_OBJECT:
 		case SEC_ACE_TYPE_SYSTEM_ALARM_OBJECT:
 		case SEC_ACE_TYPE_SYSTEM_AUDIT_OBJECT:
+		case SEC_ACE_TYPE_ACCESS_ALLOWED_CALLBACK_OBJECT:
+		case SEC_ACE_TYPE_ACCESS_DENIED_CALLBACK_OBJECT:
+		case SEC_ACE_TYPE_SYSTEM_AUDIT_CALLBACK_OBJECT:
 			if (ace->object.object.flags & SEC_ACE_OBJECT_TYPE_PRESENT) {
 				inherited_property = &ace->object.object.type.type;
 			}
@@ -215,6 +219,21 @@ static struct security_acl *calculate_inherited_from_parent(TALLOC_CTX *mem_ctx,
 			}
 
 			break;
+
+		case SEC_ACE_TYPE_ACCESS_DENIED_CALLBACK:
+		case SEC_ACE_TYPE_ACCESS_ALLOWED_CALLBACK:
+		case SEC_ACE_TYPE_SYSTEM_AUDIT_CALLBACK:
+			break;
+		case SEC_ACE_TYPE_SYSTEM_RESOURCE_ATTRIBUTE:
+			break;
+		case SEC_ACE_TYPE_SYSTEM_ALARM_CALLBACK:
+		case SEC_ACE_TYPE_SYSTEM_ALARM_CALLBACK_OBJECT:
+		case SEC_ACE_TYPE_SYSTEM_MANDATORY_LABEL:
+		case SEC_ACE_TYPE_SYSTEM_SCOPED_POLICY_ID:
+		default:
+			DBG_WARNING("ACE type %d is not handled\n", ace->type);
+			TALLOC_FREE(tmp_acl);
+			return NULL;
 		}
 
 		if (ace->flags & SEC_ACE_FLAG_NO_PROPAGATE_INHERIT) {
@@ -267,7 +286,7 @@ static struct security_acl *calculate_inherited_from_parent(TALLOC_CTX *mem_ctx,
 						       struct security_ace,
 						       tmp_acl->num_aces+1);
 			if (tmp_acl->aces == NULL) {
-				talloc_free(tmp_ctx);
+				TALLOC_FREE(tmp_acl);
 				return NULL;
 			}
 
@@ -327,6 +346,21 @@ static struct security_acl *calculate_inherited_from_parent(TALLOC_CTX *mem_ctx,
 				case SEC_ACE_TYPE_SYSTEM_AUDIT_OBJECT:
 					tmp_ace->type = SEC_ACE_TYPE_SYSTEM_AUDIT;
 					break;
+				case SEC_ACE_TYPE_ACCESS_ALLOWED_CALLBACK_OBJECT:
+					tmp_ace->type = SEC_ACE_TYPE_ACCESS_ALLOWED_CALLBACK;
+					break;
+				case SEC_ACE_TYPE_ACCESS_DENIED_CALLBACK_OBJECT:
+					tmp_ace->type = SEC_ACE_TYPE_ACCESS_DENIED_CALLBACK;
+					break;
+				case SEC_ACE_TYPE_SYSTEM_AUDIT_CALLBACK_OBJECT:
+					tmp_ace->type = SEC_ACE_TYPE_SYSTEM_AUDIT_CALLBACK;
+					break;
+				default:
+					/*
+					 * SEC_ACE_TYPE_SYSTEM_ALARM_CALLBACK_OBJECT
+					 * is reserved.
+					 */
+					break;
 				}
 			}
 
@@ -340,7 +374,7 @@ static struct security_acl *calculate_inherited_from_parent(TALLOC_CTX *mem_ctx,
 					       struct security_ace,
 					       tmp_acl->num_aces+1);
 		if (tmp_acl->aces == NULL) {
-			talloc_free(tmp_ctx);
+			TALLOC_FREE(tmp_acl);
 			return NULL;
 		}
 
@@ -363,6 +397,7 @@ static struct security_acl *calculate_inherited_from_parent(TALLOC_CTX *mem_ctx,
 		}
 	}
 	if (tmp_acl->num_aces == 0) {
+		TALLOC_FREE(tmp_acl);
 		return NULL;
 	}
 	if (acl) {
@@ -374,8 +409,8 @@ static struct security_acl *calculate_inherited_from_parent(TALLOC_CTX *mem_ctx,
 static struct security_acl *process_user_acl(TALLOC_CTX *mem_ctx,
 					     struct security_acl *acl,
 					     bool is_container,
-					     struct dom_sid *owner,
-					     struct dom_sid *group,
+					     const struct dom_sid *owner,
+					     const struct dom_sid *group,
 					     struct GUID *object_list,
 					     bool is_protected)
 {
@@ -565,20 +600,23 @@ static bool compute_acl(struct security_descriptor *parent_sd,
 	return true;
 }
 
-struct security_descriptor *create_security_descriptor(TALLOC_CTX *mem_ctx,
-						       struct security_descriptor *parent_sd,
-						       struct security_descriptor *creator_sd,
-						       bool is_container,
-						       struct GUID *object_list,
-						       uint32_t inherit_flags,
-						       struct security_token *token,
-						       struct dom_sid *default_owner, /* valid only for DS, NULL for the other RSs */
-						       struct dom_sid *default_group, /* valid only for DS, NULL for the other RSs */
-						       uint32_t (*generic_map)(uint32_t access_mask))
+struct security_descriptor *create_security_descriptor(
+	TALLOC_CTX *mem_ctx,
+	struct security_descriptor *parent_sd,
+	struct security_descriptor *creator_sd,
+	bool is_container,
+	struct GUID *object_list,
+	uint32_t inherit_flags,
+	struct security_token *token,
+	const struct dom_sid
+		*default_owner, /* valid only for DS, NULL for the other RSs */
+	const struct dom_sid
+		*default_group, /* valid only for DS, NULL for the other RSs */
+	uint32_t (*generic_map)(uint32_t access_mask))
 {
 	struct security_descriptor *new_sd;
-	struct dom_sid *new_owner = NULL;
-	struct dom_sid *new_group = NULL;
+	const struct dom_sid *new_owner = NULL;
+	const struct dom_sid *new_group = NULL;
 
 	new_sd = security_descriptor_initialise(mem_ctx);
 	if (!new_sd) {
@@ -614,8 +652,8 @@ struct security_descriptor *create_security_descriptor(TALLOC_CTX *mem_ctx,
 		new_group = creator_sd->group_sid;
 	}
 
-	new_sd->owner_sid = talloc_memdup(new_sd, new_owner, sizeof(struct dom_sid));
-	new_sd->group_sid = talloc_memdup(new_sd, new_group, sizeof(struct dom_sid));
+	new_sd->owner_sid = dom_sid_dup(new_sd, new_owner);
+	new_sd->group_sid = dom_sid_dup(new_sd, new_group);
 	if (!new_sd->owner_sid || !new_sd->group_sid){
 		talloc_free(new_sd);
 		return NULL;

@@ -20,6 +20,7 @@
 #include <tevent.h>
 #include "librpc/gen_ndr/file_id.h"
 #include "lib/util/time.h"
+#include "libcli/util/ntstatus.h"
 
 struct share_mode_data;
 struct share_mode_lock;
@@ -82,19 +83,27 @@ NTSTATUS fetch_share_mode_recv(
 	TALLOC_CTX *mem_ctx,
 	struct share_mode_lock **_lck);
 
-int share_entry_forall(
-	int (*fn)(struct file_id fid,
-		  const struct share_mode_data *data,
-		  const struct share_mode_entry *entry,
-		  void *private_data),
-	void *private_data);
+int share_entry_forall_read(int (*ro_fn)(struct file_id fid,
+					 const struct share_mode_data *data,
+					 const struct share_mode_entry *entry,
+					 void *private_data),
+			    void *private_data);
+int share_entry_forall(int (*fn)(struct file_id fid,
+				 struct share_mode_data *data,
+				 struct share_mode_entry *entry,
+				 void *private_data),
+		       void *private_data);
 
 NTSTATUS share_mode_count_entries(struct file_id fid, size_t *num_share_modes);
 int share_mode_forall(
 	int (*fn)(struct file_id fid,
-		  const struct share_mode_data *data,
+		  struct share_mode_data *data,
 		  void *private_data),
 	void *private_data);
+int share_mode_forall_read(int (*fn)(struct file_id fid,
+				     const struct share_mode_data *data,
+				     void *private_data),
+			   void *private_data);
 bool share_mode_forall_entries(
 	struct share_mode_lock *lck,
 	bool (*fn)(struct share_mode_entry *e,
@@ -125,7 +134,7 @@ void share_mode_flags_set(
 struct tevent_req *share_mode_watch_send(
 	TALLOC_CTX *mem_ctx,
 	struct tevent_context *ev,
-	struct share_mode_lock *lck,
+	struct file_id *id,
 	struct server_id blocker);
 NTSTATUS share_mode_watch_recv(
 	struct tevent_req *req, bool *blockerdead, struct server_id *blocker);

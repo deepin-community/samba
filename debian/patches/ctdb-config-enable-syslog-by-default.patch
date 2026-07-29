@@ -1,4 +1,9 @@
-ctdb-config: enable syslog by default
+Author: Rafael David Tinoco <rafaeldtinoco@ubuntu.com>
+Bug-Debian: https://bugs.debian.org/929931
+Bug-Ubuntu: https://bugs.launchpad.net/bugs/722201
+Last-Update: 2022-03-24
+Subject: ctdb-config: enable syslog by default
+Forwarded: not-needed
 
 CTDB uses /var/log/ctdb/ directory for the default log files. With
 syslog disabled, systemd journal is not able to correctly inform
@@ -18,11 +23,6 @@ or to follow ctdb logs by executing:
   journalctl -f -u ctdb
 
 Signed-off-by: Rafael David Tinoco <rafaeldtinoco@ubuntu.com>
--
-Author: Rafael David Tinoco <rafaeldtinoco@ubuntu.com>
-Bug-Debian: https://bugs.debian.org/929931
-Bug-Ubuntu: https://bugs.launchpad.net/bugs/722201
-Last-Update: 2022-03-24
 ---
  ctdb/config/ctdb.conf | 4 ++--
  1 file changed, 2 insertions(+), 2 deletions(-)

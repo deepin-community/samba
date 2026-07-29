@@ -529,9 +529,15 @@ SMBC_server_internal(TALLOC_CTX *ctx,
 			/*
 			 * Try 139 first for IPC$
 			 */
-			status = cli_connect_nb(server_n, NULL, NBT_SMB_PORT, 0x20,
-					smbc_getNetbiosName(context),
-					signing_state, flags, &c);
+			status = cli_connect_nb(NULL,
+						server_n,
+						NULL,
+						NBT_SMB_PORT,
+						0x20,
+						smbc_getNetbiosName(context),
+						signing_state,
+						flags,
+						&c);
 		}
 	}
 
@@ -539,14 +545,20 @@ SMBC_server_internal(TALLOC_CTX *ctx,
 		/*
 		 * No IPC$ or 139 did not work
 		 */
-		status = cli_connect_nb(server_n, NULL, port, 0x20,
+		status = cli_connect_nb(NULL,
+					server_n,
+					NULL,
+					port,
+					0x20,
 					smbc_getNetbiosName(context),
-					signing_state, flags, &c);
+					signing_state,
+					flags,
+					&c);
 	}
 
 	if (!NT_STATUS_IS_OK(status)) {
 		if (NT_STATUS_EQUAL(status, NT_STATUS_NOT_SUPPORTED)) {
-			DBG_ERR("NetBIOS support disabled, unable to connect");
+			DBG_ERR("NetBIOS support disabled, unable to connect\n");
 		}
 
 		errno = map_errno_from_nt_status(status);
@@ -555,9 +567,13 @@ SMBC_server_internal(TALLOC_CTX *ctx,
 
 	cli_set_timeout(c, smbc_getTimeout(context));
 
-	status = smbXcli_negprot(c->conn, c->timeout,
+	status = smbXcli_negprot(c->conn,
+				 c->timeout,
 				 lp_client_min_protocol(),
-				 lp_client_max_protocol());
+				 lp_client_max_protocol(),
+				 NULL,
+				 NULL,
+				 NULL);
 	if (!NT_STATUS_IS_OK(status)) {
 		cli_shutdown(c);
 		errno = map_errno_from_nt_status(status);
@@ -828,12 +844,17 @@ SMBC_attr_server(TALLOC_CTX *ctx,
 			return NULL;
 		}
 
-		nt_status = cli_full_connection_creds(&ipc_cli,
-						lp_netbios_name(), server,
-						NULL, 0, "IPC$", "?????",
-						creds,
-						flags);
-                if (! NT_STATUS_IS_OK(nt_status)) {
+		nt_status = cli_full_connection_creds(NULL,
+						      &ipc_cli,
+						      lp_netbios_name(),
+						      server,
+						      NULL,
+						      0,
+						      "IPC$",
+						      "?????",
+						      creds,
+						      flags);
+		if (! NT_STATUS_IS_OK(nt_status)) {
 			TALLOC_FREE(creds);
                         DEBUG(1,("cli_full_connection failed! (%s)\n",
                                  nt_errstr(nt_status)));

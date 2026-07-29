@@ -105,7 +105,6 @@
 ^samba4.rpc.netlogon.*.DatabaseSync2
 ^samba4.rpc.netlogon.*.NetrEnumerateTrustedDomains
 ^samba4.rpc.netlogon.*.NetrEnumerateTrustedDomainsEx
-^samba4.rpc.netlogon.*.GetPassword
 ^samba4.rpc.netlogon.*.DatabaseRedo
 ^samba4.rpc.netlogon.*.netlogon.lsa_over_netlogon\(ad_dc\) #Broken by split of \\pipe\lsass from \\pipe\netlogon in the IDL
 ^samba4.rpc.netlogon.*.netlogon.SetupCredentialsDowngrade\(ad_dc_ntvfs\) # Broken by allowing NT4 crypto on this environment
@@ -184,7 +183,6 @@
 ^samba4.smb2.sharemode.sharemode-access
 ^samba4.smb2.sharemode.access-sharemode
 ^samba4.ntvfs.cifs.krb5.base.createx_access.createx_access\(.*\)$
-^samba4.rpc.lsa.forest.trust #Not fully provided by Samba4
 ^samba4.blackbox.upgradeprovision.alpha13.ldapcmp_sd\(none\) # Due to something rewriting the NT ACL on DNS objects
 ^samba4.blackbox.upgradeprovision.alpha13.ldapcmp_full_sd\(none\) # Due to something rewriting the NT ACL on DNS objects
 ^samba4.blackbox.upgradeprovision.release-4-0-0.ldapcmp_sd\(none\) # Due to something rewriting the NT ACL on DNS objects
@@ -206,21 +204,14 @@
 ^samba4.smb2.ioctl-on-stream.ioctl-on-stream\(ad_dc_ntvfs\)
 ^samba3.smb2.dir.one
 ^samba3.smb2.dir.modify
-^samba3.smb2.oplock.batch20
 ^samba3.smb2.oplock.stream1
-^samba3.smb2.streams.rename
 ^samba3.smb2.streams.rename2
-^samba3.smb2.streams streams_xattr.rename\(nt4_dc\)
 ^samba3.smb2.streams streams_xattr.rename2\(nt4_dc\)
 ^samba3.smb2.getinfo.complex
 ^samba3.smb2.getinfo.fsinfo # quotas don't work yet
 ^samba3.smb2.setinfo.setinfo
 ^samba3.smb2.session.*reauth5 # some special anonymous checks?
-^samba3.smb2.compound.interim2 # wrong return code (STATUS_CANCELLED)
-^samba3.smb2.compound.aio.interim2 # wrong return code (STATUS_CANCELLED)
 ^samba3.smb2.lock.*replay_broken_windows # This tests the windows behaviour
-^samba3.smb2.lease.statopen3
-^samba3.smb2.lease.unlink # we currently do not downgrade RH lease to R after unlink
 ^samba4.smb2.ioctl.compress_notsup.*\(ad_dc_ntvfs\)
 ^samba3.raw.session.*reauth2 # maybe fix this?
 ^samba3.rpc.lsa.secrets.seal # This gives NT_STATUS_LOCAL_USER_SESSION_KEY
@@ -251,6 +242,10 @@
 # not implemented
 ^samba3.rpc.svcctl.svcctl.ChangeServiceConfigW\(ad_dc\)
 ^samba3.rpc.svcctl.svcctl.ChangeServiceConfigW\(nt4_dc\)
+^samba3.rpc.svcctl.svcctl.QueryServiceConfigEx\(ad_dc\)
+^samba3.rpc.svcctl.svcctl.QueryServiceConfigEx\(nt4_dc\)
+^samba3.rpc.svcctl.svcctl.ControlServiceExW\(ad_dc\)
+^samba3.rpc.svcctl.svcctl.ControlServiceExW\(nt4_dc\)
 #
 # This makes less sense when not running against an AD DC
 #
@@ -308,22 +303,6 @@
 #
 ^samba4.ldap.sort.python.+UnicodeSortTests
 #
-## We assert all "ldap server require strong auth" combinations
-#
-^samba4.ldb.simple.ldap with SIMPLE-BIND.*ad_dc_ntvfs # ldap server require strong auth = allow_sasl_over_tls
-^samba4.ldb.simple.ldap with SIMPLE-BIND.*fl2003dc    # ldap server require strong auth = yes
-^samba4.ldb.simple.ldaps with SASL-BIND.*fl2003dc     # ldap server require strong auth = yes
-# These are supposed to fail as we want to verify the "tls verify peer"
-# restrictions. Note that fl2008r2dc uses a self-signed certificate
-# with does not have a crl file.
-#
-^samba4.ldb.simple.ldaps.*SERVER_NAME.*tlsverifypeer=ca_and_name_if_available\(
-^samba4.ldb.simple.ldaps.*SERVER_NAME.*tlsverifypeer=ca_and_name\(
-^samba4.ldb.simple.ldaps.*SERVER_NAME.*tlsverifypeer=as_strict_as_possible\(
-^samba4.ldb.simple.ldaps.*SERVER_IP.*tlsverifypeer=ca_and_name\(
-^samba4.ldb.simple.ldaps.*SERVER_IP.*tlsverifypeer=as_strict_as_possible\(
-^samba4.ldb.simple.ldaps.*SERVER.REALM.*tlsverifypeer=as_strict_as_possible.*fl2008r2dc
-#
 # we don't allow auth_level_connect anymore...
 #
 ^samba3.blackbox.rpcclient.*ncacn_np.*with.*connect.*rpcclient # we don't allow auth_level_connect anymore
@@ -333,9 +312,9 @@
 ^samba4.smb.signing.*disabled.*client-protection=off.*\(ad_dc\)
 # fl2000dc doesn't support AES
 ^samba4.krb5.kdc.*as-req-aes.fl2000dc
-# nt4_member and ad_member don't support ntlmv1 (not even over SMB1)
-^samba3.blackbox.smbclient_auth.plain.*option=clientntlmv2auth=no.member.creds.*as.user.*_member
-^samba3.blackbox.smbclient_auth.plain.*option=clientntlmv2auth=no.*mNT1.member.creds.*as.user.*_member
+# ad_member don't support ntlmv1 (not even over SMB1)
+^samba3.blackbox.smbclient_auth.plain.*option=clientntlmv2auth=no.member.creds.*as.user.*ad_member
+^samba3.blackbox.smbclient_auth.plain.*option=clientntlmv2auth=no.*mNT1.member.creds.*as.user.*ad_member
 #nt-vfs server blocks read with execute access
 ^samba4.smb2.read.access
 #ntvfs server blocks copychunk with execute access on read handle
@@ -345,23 +324,6 @@
 ^samba.tests.dcerpc.raw_protocol.*.TestDCERPC_BIND.test_no_auth_presentation_ctx_invalid4
 ^samba.tests.dcerpc.raw_protocol.*.TestDCERPC_BIND.test_spnego_change_auth_type2
 ^samba.tests.dcerpc.raw_protocol.*.TestDCERPC_BIND.test_spnego_change_transfer
-# NETLOGON is disabled in any non-DC environments
-^samba.tests.dcerpc.raw_protocol.*.TestDCERPC_BIND.test_2nd_cancel_requests\(ad_member\)
-^samba.tests.dcerpc.raw_protocol.*.TestDCERPC_BIND.test_first_08_requests\(ad_member\)
-^samba.tests.dcerpc.raw_protocol.*.TestDCERPC_BIND.test_first_cancel_requests\(ad_member\)
-^samba.tests.dcerpc.raw_protocol.*.TestDCERPC_BIND.test_first_cmpx_requests\(ad_member\)
-^samba.tests.dcerpc.raw_protocol.*.TestDCERPC_BIND.test_first_didnot_requests\(ad_member\)
-^samba.tests.dcerpc.raw_protocol.*.TestDCERPC_BIND.test_first_maybe_requests\(ad_member\)
-^samba.tests.dcerpc.raw_protocol.*.TestDCERPC_BIND.test_first_only_requests\(ad_member\)
-^samba.tests.dcerpc.raw_protocol.*.TestDCERPC_BIND.test_fragmented_requests01\(ad_member\)
-^samba.tests.dcerpc.raw_protocol.*.TestDCERPC_BIND.test_fragmented_requests02\(ad_member\)
-^samba.tests.dcerpc.raw_protocol.*.TestDCERPC_BIND.test_fragmented_requests03\(ad_member\)
-^samba.tests.dcerpc.raw_protocol.*.TestDCERPC_BIND.test_fragmented_requests04\(ad_member\)
-^samba.tests.dcerpc.raw_protocol.*.TestDCERPC_BIND.test_fragmented_requests05\(ad_member\)
-^samba.tests.dcerpc.raw_protocol.*.TestDCERPC_BIND.test_last_cancel_requests\(ad_member\)
-^samba.tests.dcerpc.raw_protocol.*.TestDCERPC_BIND.test_last_only_requests\(ad_member\)
-^samba.tests.dcerpc.raw_protocol.*.TestDCERPC_BIND.test_mix_requests\(ad_member\)
-^samba.tests.dcerpc.raw_protocol.*.TestDCERPC_BIND.test_none_only_requests\(ad_member\)
 
 ^samba4.rpc.echo.*on.*with.object.echo.doublepointer.*nt4_dc
 ^samba4.rpc.echo.*on.*with.object.echo.surrounding.*nt4_dc
@@ -376,14 +338,3 @@
 
 # We currently don't send referrals for LDAP modify of non-replicated attrs
 ^samba4.ldap.rodc.python\(rodc\).__main__.RodcTests.test_modify_nonreplicated.*
-# NETLOGON is disabled in any non-DC environments
-^samba.tests.netlogonsvc.python\(ad_member\)
-^samba.tests.netlogonsvc.python\(simpleserver\)
-^samba.tests.netlogonsvc.python\(fileserver\)
-# NTLM authentication is (intentionally) disabled in ktest
-^samba.tests.ntlmdisabled.python\(ktest\).ntlmdisabled.NtlmDisabledTests.test_ntlm_connection\(ktest\)
-^samba.tests.ntlmdisabled.python\(ad_dc_no_ntlm\).ntlmdisabled.NtlmDisabledTests.test_samr_change_password\(ad_dc_no_ntlm\)
-# Disabling NTLM means you can't use samr to change the password
-^samba.tests.ntlmdisabled.python\(ktest\).ntlmdisabled.NtlmDisabledTests.test_samr_change_password\(ktest\)
-^samba.tests.ntlmdisabled.python\(ad_dc_no_ntlm\).ntlmdisabled.NtlmDisabledTests.test_ntlm_connection\(ad_dc_no_ntlm\)
-

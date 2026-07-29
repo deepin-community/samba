@@ -30,6 +30,9 @@ struct cli_state;
 #include "util_sd.h"
 #include "cmdline_contexts.h"
 #include "lib/util/string_wrappers.h"
+#include "lib/param/param.h"
+#include "lib/smbconf/smbconf.h"
+#include "lib/smbconf/smbconf_init.h"
 
 static TALLOC_CTX *ctx;
 
@@ -119,19 +122,19 @@ static int ace_compare(struct security_ace *ace1, struct security_ace *ace2)
 		return 0;
 
 	if (ace1->type != ace2->type)
-		return ace2->type - ace1->type;
+		return NUMERIC_CMP(ace2->type, ace1->type);
 
 	if (dom_sid_compare(&ace1->trustee, &ace2->trustee))
 		return dom_sid_compare(&ace1->trustee, &ace2->trustee);
 
 	if (ace1->flags != ace2->flags)
-		return ace1->flags - ace2->flags;
+		return NUMERIC_CMP(ace1->flags, ace2->flags);
 
 	if (ace1->access_mask != ace2->access_mask)
-		return ace1->access_mask - ace2->access_mask;
+		return NUMERIC_CMP(ace1->access_mask, ace2->access_mask);
 
 	if (ace1->size != ace2->size)
-		return ace1->size - ace2->size;
+		return NUMERIC_CMP(ace1->size, ace2->size);
 
 	return memcmp(ace1, ace2, sizeof(struct security_ace));
 }
@@ -315,6 +318,80 @@ static int view_sharesec_sddl(const char *sharename)
 	return 0;
 }
 
+static bool registry_share(const char *sharename)
+{
+	sbcErr err;
+	TALLOC_CTX *mem_ctx = talloc_stackframe();
+	struct smbconf_ctx *conf_ctx;
+	bool ret_status = true;
+
+	err = smbconf_init(mem_ctx, &conf_ctx, "registry:");
+	if (!SBC_ERROR_IS_OK(err)) {
+		DEBUG(0, ("Unable to init smbconf registry. Err:%s\n",
+		      sbcErrorString(err)));
+		ret_status = false;
+		goto out;
+	}
+
+	if(!smbconf_share_exists(conf_ctx, sharename)) {
+		ret_status = false;
+		goto done;
+	}
+done:
+	smbconf_shutdown(conf_ctx);
+out:
+	talloc_free(mem_ctx);
+	return ret_status;
+}
+
+static bool txt_share(const char *sharename)
+{
+	sbcErr err;
+	TALLOC_CTX *mem_ctx = talloc_stackframe();
+	struct smbconf_ctx *conf_ctx;
+	bool ret_status = true;
+	char *fconf_path;
+
+	fconf_path = talloc_asprintf(mem_ctx, "file:%s", get_dyn_CONFIGFILE());
+	if (fconf_path == NULL)	{
+		DEBUG(0, ("Not enough memory for conf file path"));
+		ret_status = false;
+		goto out;
+	}
+
+	err = smbconf_init(mem_ctx, &conf_ctx, fconf_path);
+	if (!SBC_ERROR_IS_OK(err)) {
+		DEBUG(0, ("Unable to init smbconf file. Err:%s\n",
+		      sbcErrorString(err)));
+		ret_status = false;
+		goto out;
+	}
+
+	if(!smbconf_share_exists(conf_ctx, sharename)) {
+		ret_status = false;
+		goto done;
+	}
+done:
+	smbconf_shutdown(conf_ctx);
+out:
+	talloc_free(mem_ctx);
+	return ret_status;
+}
+
+static bool share_exists(const char *sharename)
+{
+	bool ret_status = false;
+
+	if ((lp_config_backend() == CONFIG_BACKEND_REGISTRY) ||
+	    (lp_registry_shares() == true))
+		ret_status = registry_share(sharename);
+
+	if (!ret_status) {
+		ret_status = txt_share(sharename);
+	}
+	return ret_status;
+}
+
 /********************************************************************
   main program
 ********************************************************************/
@@ -332,10 +409,10 @@ int main(int argc, const char *argv[])
 	static char *the_acl = NULL;
 	fstring sharename;
 	bool force_acl = False;
-	int snum;
 	poptContext pc;
 	bool initialize_sid = False;
 	bool ok;
+	struct loadparm_context *lp_ctx = NULL;
 	struct poptOption long_options[] = {
 		POPT_AUTOHELP
 		{
@@ -450,8 +527,9 @@ int main(int argc, const char *argv[])
 		TALLOC_FREE(ctx);
 		exit(1);
 	}
+	lp_ctx = samba_cmdline_get_lp_ctx();
 	/* set default debug level to 1 regardless of what smb.conf sets */
-	lp_set_cmdline("log level", "1");
+	lpcfg_set_cmdline(lp_ctx, "log level", "1");
 
 	pc = samba_popt_get_context(getprogname(),
 				    argc,
@@ -525,7 +603,10 @@ int main(int argc, const char *argv[])
 
 	setlinebuf(stdout);
 
-	lp_load_with_registry_shares(get_dyn_CONFIGFILE());
+	if (mode == SMB_ACL_VIEW_ALL)
+		lp_load_with_registry_shares(get_dyn_CONFIGFILE());
+	else
+		lp_load_with_registry_without_shares(get_dyn_CONFIGFILE());
 
 	/* check for initializing secrets.tdb first */
 
@@ -552,7 +633,6 @@ int main(int argc, const char *argv[])
 
 	if (mode == SMB_ACL_VIEW_ALL) {
 		int i;
-
 		for (i=0; i<lp_numservices(); i++) {
 			TALLOC_CTX *frame = talloc_stackframe();
 			const struct loadparm_substitution *lp_sub =
@@ -560,6 +640,7 @@ int main(int argc, const char *argv[])
 			const char *service = lp_servicename(frame, lp_sub, i);
 
 			if (service == NULL) {
+				TALLOC_FREE(frame);
 				continue;
 			}
 
@@ -581,9 +662,7 @@ int main(int argc, const char *argv[])
 
 	fstrcpy(sharename, poptGetArg(pc));
 
-	snum = lp_servicenumber( sharename );
-
-	if ( snum == -1 && !force_acl ) {
+	if (!share_exists(sharename)) {
 		fprintf( stderr, "Invalid sharename: %s\n", sharename);
 		retval = -1;
 		goto done;
@@ -602,6 +681,7 @@ int main(int argc, const char *argv[])
 	}
 
 done:
+	gfree_all();
 	poptFreeContext(pc);
 	talloc_destroy(ctx);
 

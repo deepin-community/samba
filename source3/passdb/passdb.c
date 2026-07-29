@@ -436,27 +436,15 @@ void pdb_sethexpwd(char p[33], const unsigned char *pwd, uint32_t acct_ctrl)
 bool pdb_gethexpwd(const char *p, unsigned char *pwd)
 {
 	int i;
-	unsigned char   lonybble, hinybble;
-	const char      *hexchars = "0123456789ABCDEF";
-	char           *p1, *p2;
 
 	if (!p)
 		return false;
 
 	for (i = 0; i < 32; i += 2) {
-		hinybble = toupper_m(p[i]);
-		lonybble = toupper_m(p[i + 1]);
-
-		p1 = strchr(hexchars, hinybble);
-		p2 = strchr(hexchars, lonybble);
-
-		if (!p1 || !p2)
+		bool ok = hex_byte(p + i, &pwd[i / 2]);
+		if (!ok) {
 			return false;
-
-		hinybble = PTR_DIFF(p1, hexchars);
-		lonybble = PTR_DIFF(p2, hexchars);
-
-		pwd[i / 2] = (hinybble << 4) | lonybble;
+		}
 	}
 	return true;
 }
@@ -482,29 +470,16 @@ void pdb_sethexhours(char *p, const unsigned char *hours)
 bool pdb_gethexhours(const char *p, unsigned char *hours)
 {
 	int i;
-	unsigned char   lonybble, hinybble;
-	const char      *hexchars = "0123456789ABCDEF";
-	char           *p1, *p2;
 
 	if (!p) {
 		return (False);
 	}
 
 	for (i = 0; i < 42; i += 2) {
-		hinybble = toupper_m(p[i]);
-		lonybble = toupper_m(p[i + 1]);
-
-		p1 = strchr(hexchars, hinybble);
-		p2 = strchr(hexchars, lonybble);
-
-		if (!p1 || !p2) {
-			return (False);
+		bool ok = hex_byte(p, (uint8_t *)&hours[i / 2]);
+		if (!ok) {
+			return false;
 		}
-
-		hinybble = PTR_DIFF(p1, hexchars);
-		lonybble = PTR_DIFF(p2, hexchars);
-
-		hours[i / 2] = (hinybble << 4) | lonybble;
 	}
 	return (True);
 }
@@ -2203,8 +2178,11 @@ bool pdb_update_bad_password_count(struct samu *sampass, bool *updated)
 	}
 
 	LastBadPassword = pdb_get_bad_password_time(sampass);
-	DEBUG(7, ("LastBadPassword=%d, resettime=%d, current time=%d.\n",
-		   (uint32_t) LastBadPassword, resettime, (uint32_t)time(NULL)));
+	DBG_INFO("LastBadPassword=%" PRIu64 ", resettime=%d, "
+		 "current time=%" PRIu64 ".\n",
+		 (uint64_t)LastBadPassword,
+		 resettime,
+		 (uint64_t)time(NULL));
 	if (time(NULL) > (LastBadPassword + convert_uint32_t_to_time_t(resettime)*60)){
 		pdb_set_bad_password_count(sampass, 0, PDB_CHANGED);
 		pdb_set_bad_password_time(sampass, 0, PDB_CHANGED);

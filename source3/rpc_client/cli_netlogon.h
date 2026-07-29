@@ -39,22 +39,19 @@ NTSTATUS rpccli_create_netlogon_creds_ctx(
 	struct messaging_context *msg_ctx,
 	TALLOC_CTX *mem_ctx,
 	struct netlogon_creds_cli_context **creds_ctx);
-NTSTATUS rpccli_setup_netlogon_creds_locked(
-	struct cli_state *cli,
-	enum dcerpc_transport_t transport,
-	struct netlogon_creds_cli_context *creds_ctx,
-	bool force_reauth,
-	struct cli_credentials *cli_creds,
-	uint32_t *negotiate_flags);
 NTSTATUS rpccli_setup_netlogon_creds(
 	struct cli_state *cli,
 	enum dcerpc_transport_t transport,
+	const char *remote_name,
+	const struct sockaddr_storage *remote_sockaddr,
 	struct netlogon_creds_cli_context *creds_ctx,
 	bool force_reauth,
 	struct cli_credentials *cli_creds);
 NTSTATUS rpccli_connect_netlogon(
 	struct cli_state *cli,
 	enum dcerpc_transport_t transport,
+	const char *remote_name,
+	const struct sockaddr_storage *remote_sockaddr,
 	struct netlogon_creds_cli_context *creds_ctx,
 	bool force_reauth,
 	struct cli_credentials *trust_creds,

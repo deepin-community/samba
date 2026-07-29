@@ -36,11 +36,7 @@
  * @brief time handling functions
  */
 
-#if (SIZEOF_LONG == 8)
-#define TIME_FIXUP_CONSTANT_INT 11644473600L
-#elif (SIZEOF_LONG_LONG == 8)
-#define TIME_FIXUP_CONSTANT_INT 11644473600LL
-#endif
+#define TIME_FIXUP_CONSTANT_INT INT64_C(11644473600)
 
 
 #define NSEC_PER_SEC 1000000000
@@ -106,9 +102,7 @@ time_t convert_timespec_to_time_t(struct timespec ts)
 
 struct timespec convert_time_t_to_timespec(time_t t)
 {
-	struct timespec ts;
-	ts.tv_sec = t;
-	ts.tv_nsec = 0;
+	struct timespec ts = {.tv_sec = t};
 	return ts;
 }
 
@@ -140,7 +134,7 @@ _PUBLIC_ void unix_to_nt_time(NTTIME *nt, time_t t)
 	uint64_t t2;
 
 	if (t == (time_t)-1) {
-		*nt = (NTTIME)-1LL;
+		*nt = UINT64_MAX;
 		return;
 	}
 
@@ -353,15 +347,7 @@ char *timeval_string(TALLOC_CTX *ctx, const struct timeval *tp, bool hires)
 		return NULL;
 	}
 
-	/*
-	 * beautify the talloc_report output
-	 *
-	 * This is not just cosmetics. A C compiler might in theory make the
-	 * talloc_strdup call above a tail call with the tail call
-	 * optimization. This would render "tmp" invalid while talloc_strdup
-	 * tries to duplicate it. The talloc_set_name_const call below puts
-	 * the talloc_strdup call into non-tail position.
-	 */
+	/* beautify the talloc_report output */
 	talloc_set_name_const(result, result);
 	return result;
 }
@@ -630,18 +616,6 @@ _PUBLIC_ struct timeval timeval_current(void)
 }
 
 /**
-  return a timeval struct with the given elements
-*/
-_PUBLIC_ struct timeval timeval_set(uint32_t secs, uint32_t usecs)
-{
-	struct timeval tv;
-	tv.tv_sec = secs;
-	tv.tv_usec = usecs;
-	return tv;
-}
-
-
-/**
   return a timeval ofs microseconds after tv
 */
 _PUBLIC_ struct timeval timeval_add(const struct timeval *tv,
@@ -779,29 +753,6 @@ _PUBLIC_ struct timeval timeval_max(const struct timeval *tv1,
 }
 
 /**
-  return the difference between two timevals as a timeval
-  if tv1 comes after tv2, then return a zero timeval
-  (this is *tv2 - *tv1)
-*/
-_PUBLIC_ struct timeval timeval_until(const struct timeval *tv1,
-			     const struct timeval *tv2)
-{
-	struct timeval t;
-	if (timeval_compare(tv1, tv2) >= 0) {
-		return timeval_zero();
-	}
-	t.tv_sec = tv2->tv_sec - tv1->tv_sec;
-	if (tv1->tv_usec > tv2->tv_usec) {
-		t.tv_sec--;
-		t.tv_usec = 1000000 - (tv1->tv_usec - tv2->tv_usec);
-	} else {
-		t.tv_usec = tv2->tv_usec - tv1->tv_usec;
-	}
-	return t;
-}
-
-
-/**
   convert a timeval to a NTTIME
 */
 _PUBLIC_ NTTIME timeval_to_nttime(const struct timeval *tv)
@@ -901,7 +852,7 @@ struct timespec nt_time_to_unix_timespec(NTTIME nt)
 {
 	struct timespec ret;
 
-	if (nt == 0 || nt == (int64_t)-1) {
+	if (nt == 0 || nt == UINT64_MAX) {
 		ret.tv_sec = 0;
 		ret.tv_nsec = 0;
 		return ret;
@@ -1053,7 +1004,7 @@ _PUBLIC_ NTTIME unix_timespec_to_nt_time(struct timespec ts)
 		return 0x7fffffffffffffffLL;
 	}
 	if (ts.tv_sec == (time_t)-1) {
-		return (uint64_t)-1;
+		return UINT64_MAX;
 	}
 
 	d = ts.tv_sec;

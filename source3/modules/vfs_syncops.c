@@ -22,6 +22,7 @@
 #include "includes.h"
 #include "system/filesys.h"
 #include "smbd/smbd.h"
+#include "source3/smbd/dir.h"
 
 /*
 
@@ -143,7 +144,8 @@ static int syncops_renameat(vfs_handle_struct *handle,
 			files_struct *srcfsp,
 			const struct smb_filename *smb_fname_src,
 			files_struct *dstfsp,
-			const struct smb_filename *smb_fname_dst)
+			const struct smb_filename *smb_fname_dst,
+			const struct vfs_rename_how *how)
 {
 
 	int ret;
@@ -159,7 +161,8 @@ static int syncops_renameat(vfs_handle_struct *handle,
 			srcfsp,
 			smb_fname_src,
 			dstfsp,
-			smb_fname_dst);
+			smb_fname_dst,
+			how);
 	if (ret == -1) {
 		return ret;
 	}

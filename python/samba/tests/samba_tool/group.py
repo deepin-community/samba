@@ -31,14 +31,15 @@ class GroupCmdTestCase(SambaToolCmdTest):
     samdb = None
 
     def setUp(self):
-        super(GroupCmdTestCase, self).setUp()
+        super().setUp()
         self.samdb = self.getSamDB("-H", "ldap://%s" % os.environ["DC_SERVER"],
                                    "-U%s%%%s" % (os.environ["DC_USERNAME"], os.environ["DC_PASSWORD"]))
         self.groups = []
         self.groups.append(self._randomGroup({"name": "testgroup1"}))
         self.groups.append(self._randomGroup({"name": "testgroup2"}))
         self.groups.append(self._randomGroup({"name": "testgroup3"}))
-        self.groups.append(self._randomGroup({"name": "testgroup4"}))
+        self.groups.append(self._randomGroup(
+            {"name": "16 character name for bug 15854"[:16]}))
         self.groups.append(self._randomGroup({"name": "testgroup5 (with brackets)"}))
         self.groups.append(self._randomPosixGroup({"name": "posixgroup1"}))
         self.groups.append(self._randomPosixGroup({"name": "posixgroup2"}))
@@ -74,7 +75,7 @@ class GroupCmdTestCase(SambaToolCmdTest):
             self.assertEqual("%s" % found.get("description"), group["description"])
 
     def tearDown(self):
-        super(GroupCmdTestCase, self).tearDown()
+        super().tearDown()
         # clean up all the left over groups, just in case
         for group in self.groups:
             if self._find_group(group["name"]):
@@ -332,8 +333,22 @@ class GroupCmdTestCase(SambaToolCmdTest):
 
         for groupobj in grouplist:
             name = str(groupobj.get("dn", idx=0))
-            found = self.assertMatch(out, name, "group '%s' not found" % name)
+            self.assertMatch(out, name, "group '%s' not found" % name)
 
+    def test_addmember(self):
+        groups = [g['name'] for g in self.groups]
+        for parent, child in zip(groups, groups[1:]):
+            (result, out, err) = self.runsubcmd(
+                "group", "addmembers", parent, child)
+            self.assertCmdSuccess(result, out, err)
+
+        (result, out, err) = self.runsubcmd(
+            "group", "addmembers", groups[-1], ','.join(groups[:-1]))
+        self.assertCmdSuccess(result, out, err)
+
+        (result, out, err) = self.runsubcmd(
+            "group", "addmembers", groups[0], "alice,bob")
+        self.assertCmdSuccess(result, out, err)
 
     def test_move(self):
         full_ou_dn = str(self.samdb.normalize_dn_in_domain("OU=movetest_grp"))
@@ -575,10 +590,10 @@ template """
                         "Total groups not reported correctly")
 
     def _random_user(self, base=None):
-        '''
+        """
         create a user with random attribute values, you can specify
         base attributes
-        '''
+        """
         if base is None:
             base = {}
         user = {

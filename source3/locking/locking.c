@@ -37,6 +37,7 @@
 
 #include "includes.h"
 #include "lib/util/time_basic.h"
+#include "smbd/proto.h"
 #include "system/filesys.h"
 #include "lib/util/server_id.h"
 #include "share_mode_lock.h"
@@ -95,27 +96,54 @@ void init_strict_lock_struct(files_struct *fsp,
 {
 	SMB_ASSERT(lock_type == READ_LOCK || lock_type == WRITE_LOCK);
 
-	plock->context.smblctx = smblctx;
-        plock->context.tid = fsp->conn->cnum;
-        plock->context.pid = messaging_server_id(fsp->conn->sconn->msg_ctx);
-        plock->start = start;
-        plock->size = size;
-        plock->fnum = fsp->fnum;
-        plock->lock_type = lock_type;
-        plock->lock_flav = lp_posix_cifsu_locktype(fsp);
+	*plock = (struct lock_struct) {
+		.context.smblctx = smblctx,
+		.context.tid = fsp->conn->cnum,
+		.context.pid = messaging_server_id(fsp->conn->sconn->msg_ctx),
+		.start = start,
+		.size = size,
+		.fnum = fsp->fnum,
+		.lock_type = lock_type,
+		.lock_flav = lp_posix_cifsu_locktype(fsp),
+	};
+}
+
+struct strict_lock_check_state {
+	bool ret;
+	files_struct *fsp;
+	struct lock_struct *plock;
+};
+
+static void strict_lock_check_default_fn(struct share_mode_lock *lck,
+					 struct byte_range_lock *br_lck,
+					 void *private_data)
+{
+	struct strict_lock_check_state *state = private_data;
+
+	/*
+	 * The caller has checked fsp->fsp_flags.can_lock and lp_locking so
+	 * br_lck has to be there!
+	 */
+	SMB_ASSERT(br_lck != NULL);
+
+	state->ret = brl_locktest(br_lck, state->plock, true);
 }
 
 bool strict_lock_check_default(files_struct *fsp, struct lock_struct *plock)
 {
 	struct byte_range_lock *br_lck;
 	int strict_locking = lp_strict_locking(fsp->conn->params);
+	NTSTATUS status;
 	bool ret = False;
 
 	if (plock->size == 0) {
 		return True;
 	}
 
-	if (!lp_locking(fsp->conn->params) || !strict_locking) {
+	if (!lp_locking(fsp->conn->params) ||
+	    !strict_locking ||
+	    !fsp->fsp_flags.can_lock)
+	{
 		return True;
 	}
 
@@ -143,27 +171,38 @@ bool strict_lock_check_default(files_struct *fsp, struct lock_struct *plock)
 	if (!br_lck) {
 		return true;
 	}
-	ret = brl_locktest(br_lck, plock);
-
+	ret = brl_locktest(br_lck, plock, false);
 	if (!ret) {
 		/*
 		 * We got a lock conflict. Retry with rw locks to enable
 		 * autocleanup. This is the slow path anyway.
 		 */
-		br_lck = brl_get_locks(talloc_tos(), fsp);
-		if (br_lck == NULL) {
-			return true;
+
+		struct strict_lock_check_state state =
+			(struct strict_lock_check_state) {
+			.fsp = fsp,
+			.plock = plock,
+		};
+
+		status = share_mode_do_locked_brl(fsp,
+						  strict_lock_check_default_fn,
+						  &state);
+		if (!NT_STATUS_IS_OK(status)) {
+			DBG_ERR("share_mode_do_locked_brl [%s] failed: %s\n",
+				fsp_str_dbg(fsp), nt_errstr(status));
+			state.ret = false;
 		}
-		ret = brl_locktest(br_lck, plock);
-		TALLOC_FREE(br_lck);
+		ret = state.ret;
 	}
 
-	DEBUG(10, ("strict_lock_default: flavour = %s brl start=%ju "
-		   "len=%ju %s for fnum %ju file %s\n",
-		   lock_flav_name(plock->lock_flav),
-		   (uintmax_t)plock->start, (uintmax_t)plock->size,
-		   ret ? "unlocked" : "locked",
-		   (uintmax_t)plock->fnum, fsp_str_dbg(fsp)));
+	DBG_DEBUG("flavour = %s brl start=%" PRIu64 " "
+		  "len=%" PRIu64 " %s for fnum %" PRIu64 " file %s\n",
+		  lock_flav_name(plock->lock_flav),
+		  plock->start,
+		  plock->size,
+		  ret ? "unlocked" : "locked",
+		  plock->fnum,
+		  fsp_str_dbg(fsp));
 
 	return ret;
 }
@@ -237,52 +276,7 @@ static void decrement_current_lock_count(files_struct *fsp,
  Utility function called by locking requests.
 ****************************************************************************/
 
-struct do_lock_state {
-	struct files_struct *fsp;
-	TALLOC_CTX *req_mem_ctx;
-	const struct GUID *req_guid;
-	uint64_t smblctx;
-	uint64_t count;
-	uint64_t offset;
-	enum brl_type lock_type;
-	enum brl_flavour lock_flav;
-
-	struct server_id blocker_pid;
-	uint64_t blocker_smblctx;
-	NTSTATUS status;
-};
-
-static void do_lock_fn(
-	struct share_mode_lock *lck,
-	void *private_data)
-{
-	struct do_lock_state *state = private_data;
-	struct byte_range_lock *br_lck = NULL;
-
-	br_lck = brl_get_locks_for_locking(talloc_tos(),
-					   state->fsp,
-					   state->req_mem_ctx,
-					   state->req_guid);
-	if (br_lck == NULL) {
-		state->status = NT_STATUS_NO_MEMORY;
-		return;
-	}
-
-	state->status = brl_lock(
-		br_lck,
-		state->smblctx,
-		messaging_server_id(state->fsp->conn->sconn->msg_ctx),
-		state->offset,
-		state->count,
-		state->lock_type,
-		state->lock_flav,
-		&state->blocker_pid,
-		&state->blocker_smblctx);
-
-	TALLOC_FREE(br_lck);
-}
-
-NTSTATUS do_lock(files_struct *fsp,
+NTSTATUS do_lock(struct byte_range_lock *br_lck,
 		 TALLOC_CTX *req_mem_ctx,
 		 const struct GUID *req_guid,
 		 uint64_t smblctx,
@@ -293,22 +287,13 @@ NTSTATUS do_lock(files_struct *fsp,
 		 struct server_id *pblocker_pid,
 		 uint64_t *psmblctx)
 {
-	struct do_lock_state state = {
-		.fsp = fsp,
-		.req_mem_ctx = req_mem_ctx,
-		.req_guid = req_guid,
-		.smblctx = smblctx,
-		.count = count,
-		.offset = offset,
-		.lock_type = lock_type,
-		.lock_flav = lock_flav,
-	};
+	files_struct *fsp = brl_fsp(br_lck);
+	struct server_id blocker_pid;
+	uint64_t blocker_smblctx;
 	NTSTATUS status;
 
-	/* silently return ok on print files as we don't do locking there */
-	if (fsp->print_file) {
-		return NT_STATUS_OK;
-	}
+	SMB_ASSERT(req_mem_ctx != NULL);
+	SMB_ASSERT(req_guid != NULL);
 
 	if (!fsp->fsp_flags.can_lock) {
 		if (fsp->fsp_flags.is_directory) {
@@ -332,41 +317,45 @@ NTSTATUS do_lock(files_struct *fsp,
 		  fsp_fnum_dbg(fsp),
 		  fsp_str_dbg(fsp));
 
-	status = share_mode_do_locked_vfs_allowed(fsp->file_id,
-						  do_lock_fn,
-						  &state);
-	if (!NT_STATUS_IS_OK(status)) {
-		DBG_DEBUG("share_mode_do_locked returned %s\n",
-			  nt_errstr(status));
+	brl_req_set(br_lck, req_mem_ctx, req_guid);
+	status = brl_lock(br_lck,
+			  smblctx,
+			  messaging_server_id(fsp->conn->sconn->msg_ctx),
+			  offset,
+			  count,
+			  lock_type,
+			  lock_flav,
+			  &blocker_pid,
+			  &blocker_smblctx);
+	brl_req_set(br_lck, NULL, NULL);
+        if (!NT_STATUS_IS_OK(status)) {
+		DBG_DEBUG("brl_lock failed: %s\n", nt_errstr(status));
+		if (psmblctx != NULL) {
+			*psmblctx = blocker_smblctx;
+		}
+		if (pblocker_pid != NULL) {
+			*pblocker_pid = blocker_pid;
+		}
 		return status;
-	}
-
-	if (psmblctx != NULL) {
-		*psmblctx = state.blocker_smblctx;
-	}
-	if (pblocker_pid != NULL) {
-		*pblocker_pid = state.blocker_pid;
-	}
-
-	DBG_DEBUG("returning status=%s\n", nt_errstr(state.status));
+        }
 
 	increment_current_lock_count(fsp, lock_flav);
 
-	return state.status;
+	return NT_STATUS_OK;
 }
 
 /****************************************************************************
  Utility function called by unlocking requests.
 ****************************************************************************/
 
-NTSTATUS do_unlock(files_struct *fsp,
+NTSTATUS do_unlock(struct byte_range_lock *br_lck,
 		   uint64_t smblctx,
 		   uint64_t count,
 		   uint64_t offset,
 		   enum brl_flavour lock_flav)
 {
+	files_struct *fsp = brl_fsp(br_lck);
 	bool ok = False;
-	struct byte_range_lock *br_lck = NULL;
 
 	if (!fsp->fsp_flags.can_lock) {
 		return fsp->fsp_flags.is_directory ?
@@ -385,19 +374,12 @@ NTSTATUS do_unlock(files_struct *fsp,
 		  fsp_fnum_dbg(fsp),
 		  fsp_str_dbg(fsp));
 
-	br_lck = brl_get_locks(talloc_tos(), fsp);
-	if (!br_lck) {
-		return NT_STATUS_NO_MEMORY;
-	}
-
 	ok = brl_unlock(br_lck,
 			smblctx,
 			messaging_server_id(fsp->conn->sconn->msg_ctx),
 			offset,
 			count,
 			lock_flav);
-
-	TALLOC_FREE(br_lck);
 
 	if (!ok) {
 		DEBUG(10,("do_unlock: returning ERRlock.\n" ));
@@ -583,8 +565,9 @@ bool rename_share_filename(struct messaging_context *msg_ctx,
 	NTSTATUS status;
 	bool ok;
 
-	DEBUG(10, ("rename_share_filename: servicepath %s newname %s\n",
-		   servicepath, smb_fname_dst->base_name));
+	DBG_DEBUG("servicepath %s newname %s\n",
+		  servicepath,
+		  smb_fname_dst->base_name);
 
 	status = share_mode_lock_access_private_data(lck, &d);
 	if (!NT_STATUS_IS_OK(status)) {
@@ -777,11 +760,12 @@ bool share_entry_stale_pid(struct share_mode_entry *e)
 ****************************************************************************/
 
 static bool add_delete_on_close_token(struct share_mode_data *d,
-			uint32_t name_hash,
+			struct files_struct *fsp,
 			const struct security_token *nt_tok,
 			const struct security_unix_token *tok)
 {
 	struct delete_token *tmp, *dtl;
+	const struct smb2_lease *lease = NULL;
 
 	tmp = talloc_realloc(d, d->delete_tokens, struct delete_token,
 			     d->num_delete_tokens+1);
@@ -791,8 +775,14 @@ static bool add_delete_on_close_token(struct share_mode_data *d,
 	d->delete_tokens = tmp;
 	dtl = &d->delete_tokens[d->num_delete_tokens];
 
-	dtl->name_hash = name_hash;
-	dtl->delete_nt_token = dup_nt_token(d->delete_tokens, nt_tok);
+	dtl->name_hash = fsp->name_hash;
+
+	lease = fsp_get_smb2_lease(fsp);
+	if (lease != NULL) {
+		dtl->parent_lease_key = lease->parent_lease_key;
+	}
+
+	dtl->delete_nt_token = security_token_duplicate(d->delete_tokens, nt_tok);
 	if (dtl->delete_nt_token == NULL) {
 		return false;
 	}
@@ -905,11 +895,19 @@ void set_delete_on_close_lck(files_struct *fsp,
 	for (i=0; i<d->num_delete_tokens; i++) {
 		struct delete_token *dt = &d->delete_tokens[i];
 		if (dt->name_hash == fsp->name_hash) {
+			const struct smb2_lease *lease = NULL;
+
 			d->modified = true;
 
 			/* Replace this token with the given tok. */
+			ZERO_STRUCT(dt->parent_lease_key);
+			lease = fsp_get_smb2_lease(fsp);
+			if (lease != NULL) {
+				dt->parent_lease_key = lease->parent_lease_key;
+			}
+
 			TALLOC_FREE(dt->delete_nt_token);
-			dt->delete_nt_token = dup_nt_token(dt, nt_tok);
+			dt->delete_nt_token = security_token_duplicate(dt, nt_tok);
 			SMB_ASSERT(dt->delete_nt_token != NULL);
 			TALLOC_FREE(dt->delete_token);
 			dt->delete_token = copy_unix_token(dt, tok);
@@ -919,7 +917,7 @@ void set_delete_on_close_lck(files_struct *fsp,
 		}
 	}
 
-	ret = add_delete_on_close_token(d, fsp->name_hash, nt_tok, tok);
+	ret = add_delete_on_close_token(d, fsp, nt_tok, tok);
 	SMB_ASSERT(ret);
 
 	ndr_err = ndr_push_struct_blob(
@@ -1026,7 +1024,8 @@ static struct delete_token *find_delete_on_close_token(
 bool get_delete_on_close_token(struct share_mode_lock *lck,
 					uint32_t name_hash,
 					const struct security_token **pp_nt_tok,
-					const struct security_unix_token **pp_tok)
+					const struct security_unix_token **pp_tok,
+					struct smb2_lease_key *parent_lease_key)
 {
 	struct share_mode_data *d = NULL;
 	struct delete_token *dt;
@@ -1050,6 +1049,7 @@ bool get_delete_on_close_token(struct share_mode_lock *lck,
 	}
 	*pp_nt_tok = dt->delete_nt_token;
 	*pp_tok =  dt->delete_token;
+	*parent_lease_key = dt->parent_lease_key;
 	return true;
 }
 

@@ -31,8 +31,12 @@
 #include "ctdb_private.h"
 #include "ctdb_client.h"
 
+#include "protocol/protocol.h"
+
 #include "common/common.h"
 #include "common/logging.h"
+
+#include "conf/node.h"
 
 /*
   choose the transport we will use
@@ -40,7 +44,10 @@
 int ctdb_set_transport(struct ctdb_context *ctdb, const char *transport)
 {
 	ctdb->transport = talloc_strdup(ctdb, transport);
-	CTDB_NO_MEMORY(ctdb, ctdb->transport);
+	if (ctdb->transport == NULL) {
+		DBG_ERR("Memory allocation error\n");
+		return -1;
+	}
 
 	return 0;
 }
@@ -80,7 +87,7 @@ uint32_t ctdb_ip_to_pnn(struct ctdb_context *ctdb,
 /* Load a nodes list file into a nodes array */
 static int convert_node_map_to_list(struct ctdb_context *ctdb,
 				    TALLOC_CTX *mem_ctx,
-				    struct ctdb_node_map_old *node_map,
+				    struct ctdb_node_map *node_map,
 				    struct ctdb_node ***nodes,
 				    uint32_t *num_nodes)
 {
@@ -88,22 +95,34 @@ static int convert_node_map_to_list(struct ctdb_context *ctdb,
 
 	*nodes = talloc_zero_array(mem_ctx,
 					struct ctdb_node *, node_map->num);
-	CTDB_NO_MEMORY(ctdb, *nodes);
+	if (*nodes == NULL) {
+		DBG_ERR("Memory allocation error\n");
+		return -1;
+	}
 	*num_nodes = node_map->num;
 
 	for (i = 0; i < node_map->num; i++) {
 		struct ctdb_node *node;
 
 		node = talloc_zero(*nodes, struct ctdb_node);
-		CTDB_NO_MEMORY(ctdb, node);
+		if (node == NULL) {
+			DBG_ERR("Memory allocation error\n");
+			TALLOC_FREE(*nodes);
+			return -1;
+		}
 		(*nodes)[i] = node;
 
-		node->address = node_map->nodes[i].addr;
+		node->address = node_map->node[i].addr;
 		node->name = talloc_asprintf(node, "%s:%u",
 					     ctdb_addr_to_str(&node->address),
 					     ctdb_addr_to_port(&node->address));
+		if (node->name == NULL) {
+			DBG_ERR("Memory allocation error\n");
+			TALLOC_FREE(*nodes);
+			return -1;
+		}
 
-		node->flags = node_map->nodes[i].flags;
+		node->flags = node_map->node[i].flags;
 		if (!(node->flags & NODE_FLAGS_DELETED)) {
 			node->flags = NODE_FLAGS_UNHEALTHY;
 		}
@@ -117,13 +136,13 @@ static int convert_node_map_to_list(struct ctdb_context *ctdb,
 	return 0;
 }
 
-/* Load the nodes list from a file */
-void ctdb_load_nodes_file(struct ctdb_context *ctdb)
+/* Load the nodes list from a file or sub-processes' stdout  */
+void ctdb_load_nodes(struct ctdb_context *ctdb)
 {
-	struct ctdb_node_map_old *node_map;
+	struct ctdb_node_map *node_map;
 	int ret;
 
-	node_map = ctdb_read_nodes_file(ctdb, ctdb->nodes_file);
+	node_map = ctdb_read_nodes(ctdb, ctdb->nodes_source);
 	if (node_map == NULL) {
 		goto fail;
 	}
@@ -139,8 +158,8 @@ void ctdb_load_nodes_file(struct ctdb_context *ctdb)
 	return;
 
 fail:
-	DEBUG(DEBUG_ERR, ("Failed to load nodes file \"%s\"\n",
-			  ctdb->nodes_file));
+	DEBUG(DEBUG_ERR, ("Failed to load nodes \"%s\"\n",
+			  ctdb->nodes_source));
 	talloc_free(node_map);
 	exit(1);
 }
@@ -150,16 +169,30 @@ fail:
 */
 int ctdb_set_address(struct ctdb_context *ctdb, const char *address)
 {
-	ctdb->address = talloc(ctdb, ctdb_sock_addr);
-	CTDB_NO_MEMORY(ctdb, ctdb->address);
+	bool ok;
 
-	if (ctdb_parse_address(ctdb, address, ctdb->address) != 0) {
+	ctdb->address = talloc(ctdb, ctdb_sock_addr);
+	if (ctdb->address == NULL) {
+		DBG_ERR("Memory allocation error\n");
+		return -1;
+	}
+
+	ok = ctdb_parse_node_address(address, ctdb->address);
+	if (!ok) {
+		DBG_ERR("Failed to parse node address\n");
+		TALLOC_FREE(ctdb->address);
 		return -1;
 	}
 
 	ctdb->name = talloc_asprintf(ctdb, "%s:%u",
 				     ctdb_addr_to_str(ctdb->address),
 				     ctdb_addr_to_port(ctdb->address));
+	if (ctdb->name == NULL) {
+		DBG_ERR("Memory allocation error\n");
+		TALLOC_FREE(ctdb->address);
+		return -1;
+	}
+
 	return 0;
 }
 

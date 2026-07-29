@@ -2,7 +2,7 @@
 
 import os
 
-VERSION="1.1.4"
+VERSION="1.1.7"
 
 def find_library(library_names, lookup_paths):
     for directory in lookup_paths:
@@ -19,7 +19,10 @@ def configure(conf):
 
         pam_set_items_so_path = find_library(['pam_set_items.so'],
                                              ['/usr/lib64/pam_wrapper', '/usr/lib/pam_wrapper'])
+        pam_matrix_so_path = find_library(['pam_matrix.so'],
+                                          ['/usr/lib64/pam_wrapper', '/usr/lib/pam_wrapper'])
     else:
+        conf.CHECK_HEADERS('gnu/lib-names.h')
 
         if conf.CONFIG_SET("HAVE___THREAD"):
             conf.DEFINE("HAVE_GCC_THREAD_LOCAL_STORAGE", 1)
@@ -79,20 +82,23 @@ def configure(conf):
         blddir = os.path.realpath(conf.bldnode.abspath())
         libpam_wrapper_so_path = blddir + '/default/third_party/pam_wrapper/libpam-wrapper.so'
         pam_set_items_so_path = blddir + '/default/third_party/pam_wrapper/libpam-set-items.so'
+        pam_matrix_so_path = blddir + '/default/third_party/pam_wrapper/libpam-matrix.so'
 
     conf.DEFINE('LIBPAM_WRAPPER_SO_PATH', libpam_wrapper_so_path)
     conf.DEFINE('PAM_SET_ITEMS_SO_PATH', pam_set_items_so_path)
+    conf.DEFINE('PAM_MATRIX_SO_PATH', pam_matrix_so_path)
     conf.DEFINE('PAM_WRAPPER', 1)
 
 def build(bld):
     if not bld.CONFIG_SET("USING_SYSTEM_PAM_WRAPPER"):
         # We need to do it this way or the library wont work.
-        # Using private_library=True will add symbol version which
+        # We need force_unversioned=True as symbol versioning
         # breaks preloading!
         bld.SAMBA_LIBRARY('pam_wrapper',
                           source='pam_wrapper.c',
                           deps='dl pthread',
                           install=False,
+                          force_unversioned=True,
                           realname='libpam-wrapper.so')
 
         bld.SAMBA_SUBSYSTEM('libpamtest',
@@ -103,7 +109,14 @@ def build(bld):
                           source='modules/pam_set_items.c',
                           deps='pam',
                           install=False,
+                          force_unversioned=True,
                           realname='pam_set_items.so')
+        bld.SAMBA_LIBRARY('pam_matrix',
+                          source='modules/pam_matrix.c',
+                          deps='pam',
+                          install=False,
+                          force_unversioned=True,
+                          realname='pam_matrix.so')
 
         pypamtest_cflags = ''
         if bld.CONFIG_SET('HAVE_WNO_ERROR_DECLARATION_AFTER_STATEMENT'):

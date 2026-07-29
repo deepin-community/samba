@@ -35,9 +35,6 @@ int gpfswrap_get_realfilename_path(const char *pathname,
 				   char *filenamep,
 				   int *len);
 int gpfswrap_register_cifs_export(void);
-int gpfswrap_set_winattrs_path(const char *pathname,
-			       int flags,
-			       struct gpfs_winattr *attrs);
 int gpfswrap_set_winattrs(int fd, int flags, struct gpfs_winattr *attrs);
 int gpfswrap_get_winattrs(int fd, struct gpfs_winattr *attrs);
 int gpfswrap_ftruncate(int fd, gpfs_off64_t length);
@@ -49,9 +46,5 @@ int gpfswrap_init_trace(void);
 int gpfswrap_query_trace(void);
 void gpfswrap_add_trace(int level, const char *msg);
 void gpfswrap_fini_trace(void);
-int gpfswrap_fstat_x(int fd, unsigned int *litemask,
-		     struct gpfs_iattr64 *iattr, size_t len);
-int gpfswrap_stat_x(const char *pathname, unsigned int *litemask,
-		    struct gpfs_iattr64 *iattr, size_t len);
 
 #endif

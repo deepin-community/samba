@@ -25,7 +25,7 @@ from samba.common import get_string
 class NTLMAuthHelpersTests(NTLMAuthTestCase):
 
     def setUp(self):
-        super(NTLMAuthHelpersTests, self).setUp()
+        super().setUp()
         self.username = os.environ["DC_USERNAME"]
         self.password = os.environ["DC_PASSWORD"]
         self.domain = os.environ["DOMAIN"]
@@ -133,7 +133,7 @@ class NTLMAuthHelpersTests(NTLMAuthTestCase):
         self.check_exit_code(cache_cmd, 0)
 
         ret = self.run_helper(client_username=self.username,
-                              client_password=self.password,
+                              client_password=None,
                               client_domain=self.domain,
                               client_use_cached_creds=True,
                               client_helper="ntlmssp-client-1",

@@ -645,7 +645,7 @@ static bool test_SetUserPass(struct dcerpc_pipe *p, struct torture_context *tctx
 
 	u.info24.password_expired = 0;
 
-	status = dcerpc_fetch_session_key(p, &session_key);
+	status = dcerpc_binding_handle_transport_session_key(b, tctx, &session_key);
 	if (!NT_STATUS_IS_OK(status)) {
 		torture_result(tctx, TORTURE_FAIL, "SetUserInfo level %u - no session key - %s\n",
 		       s.in.level, nt_errstr(status));
@@ -710,7 +710,7 @@ static bool test_SetUserPass_23(struct dcerpc_pipe *p, struct torture_context *t
 
 	u.info23.info.fields_present = fields_present;
 
-	status = dcerpc_fetch_session_key(p, &session_key);
+	status = dcerpc_binding_handle_transport_session_key(b, tctx, &session_key);
 	if (!NT_STATUS_IS_OK(status)) {
 		torture_result(tctx, TORTURE_FAIL, "SetUserInfo level %u - no session key - %s\n",
 		       s.in.level, nt_errstr(status));
@@ -739,7 +739,7 @@ static bool test_SetUserPass_23(struct dcerpc_pipe *p, struct torture_context *t
 		*password = newpass;
 	}
 
-	status = dcerpc_fetch_session_key(p, &session_key);
+	status = dcerpc_binding_handle_transport_session_key(b, tctx, &session_key);
 	if (!NT_STATUS_IS_OK(status)) {
 		torture_result(tctx, TORTURE_FAIL, "SetUserInfo level %u - no session key - %s\n",
 		       s.in.level, nt_errstr(status));
@@ -813,7 +813,7 @@ static bool test_SetUserPass_32(struct dcerpc_pipe *p, struct torture_context *t
 
 	u.info32.info.fields_present = fields_present;
 
-	status = dcerpc_fetch_session_key(p, &session_key);
+	status = dcerpc_binding_handle_transport_session_key(b, tctx, &session_key);
 	if (!NT_STATUS_IS_OK(status)) {
 		torture_result(tctx,
 			       TORTURE_FAIL,
@@ -938,7 +938,7 @@ static bool test_SetUserPass_31(struct dcerpc_pipe *p, struct torture_context *t
 
 	u.info31.password_expired = 0;
 
-	status = dcerpc_fetch_session_key(p, &session_key);
+	status = dcerpc_binding_handle_transport_session_key(b, tctx, &session_key);
 	if (!NT_STATUS_IS_OK(status)) {
 		torture_result(tctx, TORTURE_FAIL, "SetUserInfo level %u - no session key - %s\n",
 		       s.in.level, nt_errstr(status));
@@ -1040,7 +1040,7 @@ static bool test_SetUserPassEx(struct dcerpc_pipe *p, struct torture_context *tc
 
 	u.info26.password_expired = 0;
 
-	status = dcerpc_fetch_session_key(p, &session_key);
+	status = dcerpc_binding_handle_transport_session_key(b, tctx, &session_key);
 	if (!NT_STATUS_IS_OK(status)) {
 		torture_result(tctx, TORTURE_FAIL, "SetUserInfo level %u - no session key - %s\n",
 		       s.in.level, nt_errstr(status));
@@ -1133,7 +1133,7 @@ static bool test_SetUserPass_25(struct dcerpc_pipe *p, struct torture_context *t
 
 	u.info25.info.fields_present = fields_present;
 
-	status = dcerpc_fetch_session_key(p, &session_key);
+	status = dcerpc_binding_handle_transport_session_key(b, tctx, &session_key);
 	if (!NT_STATUS_IS_OK(status)) {
 		torture_result(tctx, TORTURE_FAIL, "SetUserInfo level %u - no session key - %s\n",
 		       s.in.level, nt_errstr(status));
@@ -1228,7 +1228,7 @@ static bool test_SetUserPass_18(struct dcerpc_pipe *p, struct torture_context *t
 	E_md4hash(newpass, nt_hash);
 	E_deshash(newpass, lm_hash);
 
-	status = dcerpc_fetch_session_key(p, &session_key);
+	status = dcerpc_binding_handle_transport_session_key(b, tctx, &session_key);
 	if (!NT_STATUS_IS_OK(status)) {
 		torture_result(tctx, TORTURE_FAIL, "SetUserInfo level %u - no session key - %s\n",
 		       s.in.level, nt_errstr(status));
@@ -1316,7 +1316,7 @@ static bool test_SetUserPass_21(struct dcerpc_pipe *p, struct torture_context *t
 		u.info21.nt_password_set = true;
 	}
 
-	status = dcerpc_fetch_session_key(p, &session_key);
+	status = dcerpc_binding_handle_transport_session_key(b, tctx, &session_key);
 	if (!NT_STATUS_IS_OK(status)) {
 		torture_result(tctx, TORTURE_FAIL, "SetUserInfo level %u - no session key - %s\n",
 		       s.in.level, nt_errstr(status));
@@ -1506,7 +1506,7 @@ static bool test_SetUserPass_level_ex(struct dcerpc_pipe *p,
 		break;
 	}
 
-	status = dcerpc_fetch_session_key(p, &session_key);
+	status = dcerpc_binding_handle_transport_session_key(b, tctx, &session_key);
 	if (!NT_STATUS_IS_OK(status)) {
 		torture_result(tctx, TORTURE_FAIL, "SetUserInfo level %u - no session key - %s\n",
 		       s.in.level, nt_errstr(status));
@@ -2975,7 +2975,7 @@ bool test_ChangePasswordUser3(struct dcerpc_pipe *p, struct torture_context *tct
 			}
 		}
 
-		/* We tested the order of precendence which is as follows:
+		/* We tested the order of precedence which is as follows:
 
 		* pwd min_age
 		* pwd length
@@ -3218,7 +3218,7 @@ bool test_ChangePasswordRandomBytes(struct dcerpc_pipe *p, struct torture_contex
 
 	pw_data = data_blob_const(u.info25.password.data, 516);
 
-	status = dcerpc_fetch_session_key(p, &session_key);
+	status = dcerpc_binding_handle_transport_session_key(b, tctx, &session_key);
 	if (!NT_STATUS_IS_OK(status)) {
 		torture_result(tctx, TORTURE_FAIL, "SetUserInfo level %u - no session key - %s\n",
 		       s.in.level, nt_errstr(status));
@@ -3598,7 +3598,7 @@ static bool test_SamLogon(struct torture_context *tctx,
 	union netr_LogonLevel logon;
 	union netr_Validation validation;
 	uint8_t authoritative;
-	struct netr_IdentityInfo identity;
+	struct netr_IdentityInfo identity = {};
 	struct netr_NetworkInfo ninfo;
 	struct netr_PasswordInfo pinfo;
 	DATA_BLOB names_blob, chal, lm_resp, nt_resp;
@@ -3607,6 +3607,8 @@ static bool test_SamLogon(struct torture_context *tctx,
 	struct netlogon_creds_CredentialState *creds;
 	struct netr_Authenticator a;
 	struct dcerpc_binding_handle *b = p->binding_handle;
+	enum dcerpc_AuthType auth_type = DCERPC_AUTH_TYPE_NONE;
+	enum dcerpc_AuthLevel auth_level = DCERPC_AUTH_LEVEL_NONE;
 
 	torture_assert(tctx, (creds = cli_credentials_get_netlogon_creds(machine_credentials)), "");
 
@@ -3635,17 +3637,6 @@ static bool test_SamLogon(struct torture_context *tctx,
 			ZERO_STRUCT(pinfo.lmpassword.hash);
 		}
 		E_md4hash(cli_credentials_get_password(test_credentials), pinfo.ntpassword.hash);
-
-		if (creds->negotiate_flags & NETLOGON_NEG_SUPPORTS_AES) {
-			netlogon_creds_aes_encrypt(creds, pinfo.lmpassword.hash, 16);
-			netlogon_creds_aes_encrypt(creds, pinfo.ntpassword.hash, 16);
-		} else if (creds->negotiate_flags & NETLOGON_NEG_ARCFOUR) {
-			netlogon_creds_arcfour_crypt(creds, pinfo.lmpassword.hash, 16);
-			netlogon_creds_arcfour_crypt(creds, pinfo.ntpassword.hash, 16);
-		} else {
-			netlogon_creds_des_encrypt(creds, &pinfo.lmpassword);
-			netlogon_creds_des_encrypt(creds, &pinfo.ntpassword);
-		}
 
 		pinfo.identity_info = identity;
 		logon.password = &pinfo;
@@ -3692,6 +3683,14 @@ static bool test_SamLogon(struct torture_context *tctx,
 	torture_comment(tctx, "Testing LogonSamLogon with name %s\n", identity.account_name.string);
 
 	r.in.validation_level = 6;
+
+	dcerpc_binding_handle_auth_info(b, &auth_type, &auth_level);
+	status = netlogon_creds_encrypt_samlogon_logon(creds,
+						       r.in.logon_level,
+						       r.in.logon,
+						       auth_type,
+						       auth_level);
+	torture_assert_ntstatus_ok(tctx, status, "encrypt_samlogon_logon");
 
 	torture_assert_ntstatus_ok(tctx, dcerpc_netr_LogonSamLogonEx_r(b, tctx, &r),
 		"netr_LogonSamLogonEx failed");
@@ -5742,7 +5741,7 @@ static bool test_user_ops(struct dcerpc_pipe *p,
 				ret = false;
 			}
 
-			/* Try a compleatly random password */
+			/* Try a completely random password */
 			if (!test_ChangePasswordRandomBytes(p, tctx, base_acct_name, user_handle, &password)) {
 				ret = false;
 			}
@@ -7378,13 +7377,17 @@ static bool test_each_DisplayInfo_user(struct dcerpc_binding_handle *b,
 				       struct samr_QueryDisplayInfo *querydisplayinfo,
 				       bool *seen_testuser)
 {
-	struct samr_OpenUser r;
+	struct samr_OpenUser r = {
+		.in = {
+			.domain_handle = querydisplayinfo->in.domain_handle,
+			.access_mask = SEC_FLAG_MAXIMUM_ALLOWED,
+		},
+	};
 	struct samr_QueryUserInfo q;
 	union samr_UserInfo *info;
 	struct policy_handle user_handle;
 	int i, ret = true;
-	r.in.domain_handle = querydisplayinfo->in.domain_handle;
-	r.in.access_mask = SEC_FLAG_MAXIMUM_ALLOWED;
+
 	for (i = 0; ; i++) {
 		switch (querydisplayinfo->in.level) {
 		case 1:
@@ -9031,7 +9034,7 @@ static bool test_samr_ValidatePassword(struct torture_context *tctx,
 
 	torture_comment(tctx, "Testing samr_ValidatePassword\n");
 
-	if (p->conn->transport.transport != NCACN_IP_TCP) {
+	if (dcerpc_binding_handle_get_transport(b) != NCACN_IP_TCP) {
 		torture_comment(tctx, "samr_ValidatePassword only should succeed over NCACN_IP_TCP!\n");
 	}
 

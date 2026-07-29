@@ -48,15 +48,12 @@ struct stream_io {
 static ssize_t get_xattr_size_fsp(struct files_struct *fsp,
 			          const char *xattr_name)
 {
-	NTSTATUS status;
+	int ret;
 	struct ea_struct ea;
 	ssize_t result;
 
-	status = get_ea_value_fsp(talloc_tos(),
-				  fsp,
-				  xattr_name,
-				  &ea);
-	if (!NT_STATUS_IS_OK(status)) {
+	ret = get_ea_value_fsp(talloc_tos(), fsp, xattr_name, &ea);
+	if (ret != 0) {
 		return -1;
 	}
 
@@ -69,17 +66,19 @@ static ssize_t get_xattr_size_fsp(struct files_struct *fsp,
  * Given a stream name, populate xattr_name with the xattr name to use for
  * accessing the stream.
  */
-static NTSTATUS streams_xattr_get_name(vfs_handle_struct *handle,
-				       TALLOC_CTX *ctx,
-				       const char *stream_name,
-				       char **xattr_name)
+static int streams_xattr_get_name(vfs_handle_struct *handle,
+				  TALLOC_CTX *ctx,
+				  const char *stream_name,
+				  char **xattr_name)
 {
 	size_t stream_name_len = strlen(stream_name);
 	char *stype;
 	struct streams_xattr_config *config;
 
-	SMB_VFS_HANDLE_GET_DATA(handle, config, struct streams_xattr_config,
-				return NT_STATUS_UNSUCCESSFUL);
+	SMB_VFS_HANDLE_GET_DATA(handle,
+				config,
+				struct streams_xattr_config,
+				return EACCES);
 
 	SMB_ASSERT(stream_name[0] == ':');
 	stream_name += 1;
@@ -105,7 +104,7 @@ static NTSTATUS streams_xattr_get_name(vfs_handle_struct *handle,
 		 * We only support one stream type: "$DATA"
 		 */
 		if (strcasecmp_m(stype, ":$DATA") != 0) {
-			return NT_STATUS_INVALID_PARAMETER;
+			return EINVAL;
 		}
 
 		/* Split name and type */
@@ -118,18 +117,17 @@ static NTSTATUS streams_xattr_get_name(vfs_handle_struct *handle,
 				      stream_name,
 				      config->store_stream_type ? ":$DATA" : "");
 	if (*xattr_name == NULL) {
-		return NT_STATUS_NO_MEMORY;
+		return ENOMEM;
 	}
 
-	DEBUG(10, ("xattr_name: %s, stream_name: %s\n", *xattr_name,
-		   stream_name));
+	DBG_DEBUG("%s, stream_name: %s\n", *xattr_name, stream_name);
 
-	return NT_STATUS_OK;
+	return 0;
 }
 
 static bool streams_xattr_recheck(struct stream_io *sio)
 {
-	NTSTATUS status;
+	int ret;
 	char *xattr_name = NULL;
 
 	if (sio->fsp->fsp_name == sio->fsp_name_ptr) {
@@ -142,10 +140,11 @@ static bool streams_xattr_recheck(struct stream_io *sio)
 		return false;
 	}
 
-	status = streams_xattr_get_name(sio->handle, talloc_tos(),
-					sio->fsp->fsp_name->stream_name,
-					&xattr_name);
-	if (!NT_STATUS_IS_OK(status)) {
+	ret = streams_xattr_get_name(sio->handle,
+				     talloc_tos(),
+				     sio->fsp->fsp_name->stream_name,
+				     &xattr_name);
+	if (ret != 0) {
 		return false;
 	}
 
@@ -200,7 +199,7 @@ static int streams_xattr_fstat(vfs_handle_struct *handle, files_struct *fsp,
 		return -1;
 	}
 
-	DEBUG(10, ("sbuf->st_ex_size = %d\n", (int)sbuf->st_ex_size));
+	DBG_DEBUG("sbuf->st_ex_size = %jd\n", (intmax_t)sbuf->st_ex_size);
 
 	sbuf->st_ex_ino = hash_inode(sbuf, io->xattr_name);
 	sbuf->st_ex_mode &= ~S_IFMT;
@@ -215,6 +214,7 @@ static int streams_xattr_stat(vfs_handle_struct *handle,
 			      struct smb_filename *smb_fname)
 {
 	NTSTATUS status;
+	int ret;
 	int result = -1;
 	char *xattr_name = NULL;
 	char *tmp_stream_name = NULL;
@@ -241,10 +241,12 @@ static int streams_xattr_stat(vfs_handle_struct *handle,
 	}
 
 	/* Derive the xattr name to lookup. */
-	status = streams_xattr_get_name(handle, talloc_tos(),
-					smb_fname->stream_name, &xattr_name);
-	if (!NT_STATUS_IS_OK(status)) {
-		errno = map_errno_from_nt_status(status);
+	ret = streams_xattr_get_name(handle,
+				     talloc_tos(),
+				     smb_fname->stream_name,
+				     &xattr_name);
+	if (ret != 0) {
+		errno = ret;
 		return -1;
 	}
 
@@ -307,13 +309,90 @@ static int streams_xattr_lstat(vfs_handle_struct *handle,
 	return SMB_VFS_NEXT_LSTAT(handle, smb_fname);
 }
 
+static int streams_xattr_fstatat(struct vfs_handle_struct *handle,
+				 const struct files_struct *dirfsp,
+				 const struct smb_filename *smb_fname,
+				 SMB_STRUCT_STAT *sbuf,
+				 int flags)
+{
+	char *xattr_name = NULL;
+	struct smb_filename *pathref = NULL;
+	struct files_struct *fsp = smb_fname->fsp;
+	ssize_t size;
+	NTSTATUS status;
+	int ret = -1;
+
+	DBG_DEBUG("called for [%s/%s]\n",
+		  dirfsp->fsp_name->base_name,
+		  smb_fname_str_dbg(smb_fname));
+
+	if (!is_named_stream(smb_fname)) {
+		return SMB_VFS_NEXT_FSTATAT(
+			handle, dirfsp, smb_fname, sbuf, flags);
+	}
+
+	SET_STAT_INVALID(*sbuf);
+
+	/* Derive the xattr name to lookup. */
+	ret = streams_xattr_get_name(handle,
+				     talloc_tos(),
+				     smb_fname->stream_name,
+				     &xattr_name);
+	if (ret != 0) {
+		errno = ret;
+		ret = -1;
+		goto done;
+	}
+
+	if (fsp == NULL) {
+		status = synthetic_pathref(talloc_tos(),
+					   dirfsp,
+					   smb_fname->base_name,
+					   NULL,
+					   NULL,
+					   smb_fname->twrp,
+					   smb_fname->flags,
+					   &pathref);
+		if (!NT_STATUS_IS_OK(status)) {
+			errno = ENOENT;
+			ret = -1;
+			goto done;
+		}
+		fsp = pathref->fsp;
+	} else {
+		fsp = fsp->base_fsp;
+	}
+
+	*sbuf = fsp->fsp_name->st;
+
+	size = get_xattr_size_fsp(fsp, xattr_name);
+	if (size == -1) {
+		errno = ENOENT;
+		ret = -1;
+		goto done;
+	}
+	sbuf->st_ex_size = size;
+	sbuf->st_ex_ino = hash_inode(sbuf, xattr_name);
+	sbuf->st_ex_mode &= ~S_IFMT;
+	sbuf->st_ex_mode |= S_IFREG;
+	sbuf->st_ex_blocks = sbuf->st_ex_size / STAT_ST_BLOCKSIZE + 1;
+
+done:
+	{
+		int err = errno;
+		TALLOC_FREE(pathref);
+		TALLOC_FREE(xattr_name);
+		errno = err;
+	}
+	return ret;
+}
+
 static int streams_xattr_openat(struct vfs_handle_struct *handle,
 				const struct files_struct *dirfsp,
 				const struct smb_filename *smb_fname,
 				files_struct *fsp,
 				const struct vfs_open_how *how)
 {
-	NTSTATUS status;
 	struct streams_xattr_config *config = NULL;
 	struct stream_io *sio = NULL;
 	struct ea_struct ea;
@@ -345,35 +424,34 @@ static int streams_xattr_openat(struct vfs_handle_struct *handle,
 	SMB_ASSERT(fsp_is_alternate_stream(fsp));
 	SMB_ASSERT(dirfsp == NULL);
 
-	status = streams_xattr_get_name(handle, talloc_tos(),
-					smb_fname->stream_name, &xattr_name);
-	if (!NT_STATUS_IS_OK(status)) {
-		errno = map_errno_from_nt_status(status);
+	ret = streams_xattr_get_name(handle,
+				     talloc_tos(),
+				     smb_fname->stream_name,
+				     &xattr_name);
+	if (ret != 0) {
+		errno = ret;
 		goto fail;
 	}
 
-	status = get_ea_value_fsp(talloc_tos(),
-				  fsp->base_fsp,
-				  xattr_name,
-				  &ea);
+	ret = get_ea_value_fsp(talloc_tos(), fsp->base_fsp, xattr_name, &ea);
+	if (ret != 0) {
+		DBG_DEBUG("get_ea_value_fsp returned %s\n", strerror(ret));
 
-	DBG_DEBUG("get_ea_value_fsp returned %s\n", nt_errstr(status));
-
-	if (!NT_STATUS_IS_OK(status)) {
-		if (!NT_STATUS_EQUAL(status, NT_STATUS_NOT_FOUND)) {
+		if (ret != ENOATTR) {
 			/*
 			 * The base file is not there. This is an error even if
 			 * we got O_CREAT, the higher levels should have created
 			 * the base file for us.
 			 */
-			DBG_DEBUG("streams_xattr_open: base file %s not around, "
-				  "returning ENOENT\n", smb_fname->base_name);
+			DBG_DEBUG("base file %s not around, "
+				  "returning ENOENT\n",
+				  smb_fname->base_name);
 			errno = ENOENT;
 			goto fail;
 		}
 
 		if (!(how->flags & O_CREAT)) {
-			errno = ENOATTR;
+			errno = ENOENT;
 			goto fail;
 		}
 
@@ -458,8 +536,9 @@ static int streams_xattr_close(vfs_handle_struct *handle,
 
 	fd = fsp_get_pathref_fd(fsp);
 
-	DBG_DEBUG("streams_xattr_close called [%s] fd [%d]\n",
-			smb_fname_str_dbg(fsp->fsp_name), fd);
+	DBG_DEBUG("called [%s] fd [%d]\n",
+		  smb_fname_str_dbg(fsp->fsp_name),
+		  fd);
 
 	if (!fsp_is_alternate_stream(fsp)) {
 		return SMB_VFS_NEXT_CLOSE(handle, fsp);
@@ -492,10 +571,12 @@ static int streams_xattr_unlinkat(vfs_handle_struct *handle,
 	/* A stream can never be rmdir'ed */
 	SMB_ASSERT((flags & AT_REMOVEDIR) == 0);
 
-	status = streams_xattr_get_name(handle, talloc_tos(),
-					smb_fname->stream_name, &xattr_name);
-	if (!NT_STATUS_IS_OK(status)) {
-		errno = map_errno_from_nt_status(status);
+	ret = streams_xattr_get_name(handle,
+				     talloc_tos(),
+				     smb_fname->stream_name,
+				     &xattr_name);
+	if (ret != 0) {
+		errno = ret;
 		goto fail;
 	}
 
@@ -537,7 +618,8 @@ static int streams_xattr_renameat(vfs_handle_struct *handle,
 				files_struct *srcfsp,
 				const struct smb_filename *smb_fname_src,
 				files_struct *dstfsp,
-				const struct smb_filename *smb_fname_dst)
+				const struct smb_filename *smb_fname_dst,
+				const struct vfs_rename_how *how)
 {
 	NTSTATUS status;
 	int ret = -1;
@@ -560,7 +642,13 @@ static int streams_xattr_renameat(vfs_handle_struct *handle,
 					srcfsp,
 					smb_fname_src,
 					dstfsp,
-					smb_fname_dst);
+					smb_fname_dst,
+					how);
+	}
+
+	if (how->flags != 0) {
+		errno = EINVAL;
+		goto done;
 	}
 
 	/* For now don't allow renames from or to the default stream. */
@@ -577,18 +665,20 @@ static int streams_xattr_renameat(vfs_handle_struct *handle,
 	}
 
 	/* Get the xattr names. */
-	status = streams_xattr_get_name(handle, talloc_tos(),
-					smb_fname_src->stream_name,
-					&src_xattr_name);
-	if (!NT_STATUS_IS_OK(status)) {
-		errno = map_errno_from_nt_status(status);
+	ret = streams_xattr_get_name(handle,
+				     talloc_tos(),
+				     smb_fname_src->stream_name,
+				     &src_xattr_name);
+	if (ret != 0) {
+		errno = ret;
 		goto fail;
 	}
-	status = streams_xattr_get_name(handle, talloc_tos(),
-					smb_fname_dst->stream_name,
-					&dst_xattr_name);
-	if (!NT_STATUS_IS_OK(status)) {
-		errno = map_errno_from_nt_status(status);
+	ret = streams_xattr_get_name(handle,
+				     talloc_tos(),
+				     smb_fname_dst->stream_name,
+				     &dst_xattr_name);
+	if (ret != 0) {
+		errno = ret;
 		goto fail;
 	}
 
@@ -622,12 +712,12 @@ static int streams_xattr_renameat(vfs_handle_struct *handle,
 	}
 
 	/* Read the old stream from the base file fsp. */
-	status = get_ea_value_fsp(talloc_tos(),
-				  pathref_src->fsp,
-				  src_xattr_name,
-				  &ea);
-	if (!NT_STATUS_IS_OK(status)) {
-		errno = map_errno_from_nt_status(status);
+	ret = get_ea_value_fsp(talloc_tos(),
+			       pathref_src->fsp,
+			       src_xattr_name,
+			       &ea);
+	if (ret != 0) {
+		errno = ret;
 		goto fail;
 	}
 
@@ -709,6 +799,7 @@ static NTSTATUS walk_xattr_streams(vfs_handle_struct *handle,
 
 	for (i=0; i<num_names; i++) {
 		struct ea_struct ea;
+		int ret;
 
 		/*
 		 * We want to check with samba_private_attr_name()
@@ -733,15 +824,12 @@ static NTSTATUS walk_xattr_streams(vfs_handle_struct *handle,
 			continue;
 		}
 
-		status = get_ea_value_fsp(names,
-					  smb_fname->fsp,
-					  names[i],
-					  &ea);
-		if (!NT_STATUS_IS_OK(status)) {
-			DEBUG(10, ("Could not get ea %s for file %s: %s\n",
-				names[i],
-				smb_fname->base_name,
-				nt_errstr(status)));
+		ret = get_ea_value_fsp(names, smb_fname->fsp, names[i], &ea);
+		if (ret != 0) {
+			DBG_DEBUG("Could not get ea %s for file %s: %s\n",
+				  names[i],
+				  smb_fname->base_name,
+				  strerror(ret));
 			continue;
 		}
 
@@ -915,10 +1003,9 @@ static ssize_t streams_xattr_pwrite(vfs_handle_struct *handle,
         struct stream_io *sio =
 		(struct stream_io *)VFS_FETCH_FSP_EXTENSION(handle, fsp);
 	struct ea_struct ea;
-	NTSTATUS status;
 	int ret;
 
-	DEBUG(10, ("streams_xattr_pwrite called for %d bytes\n", (int)n));
+	DBG_DEBUG("offset=%jd, size=%zu\n", (intmax_t)offset, n);
 
 	if (sio == NULL) {
 		return SMB_VFS_NEXT_PWRITE(handle, fsp, data, n, offset);
@@ -949,25 +1036,29 @@ static ssize_t streams_xattr_pwrite(vfs_handle_struct *handle,
 		return -1;
 	}
 
-	status = get_ea_value_fsp(talloc_tos(),
-				  fsp->base_fsp,
-				  sio->xattr_name,
-				  &ea);
-	if (!NT_STATUS_IS_OK(status)) {
+	ret = get_ea_value_fsp(talloc_tos(),
+			       fsp->base_fsp,
+			       sio->xattr_name,
+			       &ea);
+	if (ret != 0) {
+		errno = ret;
 		return -1;
 	}
 
         if ((offset + n) > ea.value.length-1) {
 		uint8_t *tmp;
+		size_t new_sz = offset + n + 1;
 
 		tmp = talloc_realloc(talloc_tos(), ea.value.data, uint8_t,
-					   offset + n + 1);
+					   new_sz);
 
 		if (tmp == NULL) {
 			TALLOC_FREE(ea.value.data);
                         errno = ENOMEM;
                         return -1;
                 }
+
+		memset(tmp + ea.value.length, 0, new_sz - ea.value.length);
 		ea.value.data = tmp;
 		ea.value.length = offset + n + 1;
 		ea.value.data[offset+n] = 0;
@@ -996,11 +1087,10 @@ static ssize_t streams_xattr_pread(vfs_handle_struct *handle,
         struct stream_io *sio =
 		(struct stream_io *)VFS_FETCH_FSP_EXTENSION(handle, fsp);
 	struct ea_struct ea;
-	NTSTATUS status;
+	int ret;
 	size_t length, overlap;
 
-	DEBUG(10, ("streams_xattr_pread: offset=%d, size=%d\n",
-		   (int)offset, (int)n));
+	DBG_DEBUG("offset=%jd, size=%zu\n", (intmax_t)offset, n);
 
 	if (sio == NULL) {
 		return SMB_VFS_NEXT_PREAD(handle, fsp, data, n, offset);
@@ -1010,18 +1100,18 @@ static ssize_t streams_xattr_pread(vfs_handle_struct *handle,
 		return -1;
 	}
 
-	status = get_ea_value_fsp(talloc_tos(),
-				  fsp->base_fsp,
-				  sio->xattr_name,
-				  &ea);
-	if (!NT_STATUS_IS_OK(status)) {
+	ret = get_ea_value_fsp(talloc_tos(),
+			       fsp->base_fsp,
+			       sio->xattr_name,
+			       &ea);
+	if (ret != 0) {
+		errno = ret;
 		return -1;
 	}
 
 	length = ea.value.length-1;
 
-	DBG_DEBUG("get_ea_value_fsp returned %d bytes\n",
-		   (int)length);
+	DBG_DEBUG("get_ea_value_fsp returned %zu bytes\n", length);
 
         /* Attempt to read past EOF. */
         if (length <= offset) {
@@ -1202,12 +1292,12 @@ static int streams_xattr_ftruncate(struct vfs_handle_struct *handle,
 	int ret;
 	uint8_t *tmp;
 	struct ea_struct ea;
-	NTSTATUS status;
         struct stream_io *sio =
 		(struct stream_io *)VFS_FETCH_FSP_EXTENSION(handle, fsp);
 
-	DEBUG(10, ("streams_xattr_ftruncate called for file %s offset %.0f\n",
-		   fsp_str_dbg(fsp), (double)offset));
+	DBG_DEBUG("called for file %s offset %ju\n",
+		  fsp_str_dbg(fsp),
+		  (intmax_t)offset);
 
 	if (sio == NULL) {
 		return SMB_VFS_NEXT_FTRUNCATE(handle, fsp, offset);
@@ -1217,11 +1307,12 @@ static int streams_xattr_ftruncate(struct vfs_handle_struct *handle,
 		return -1;
 	}
 
-	status = get_ea_value_fsp(talloc_tos(),
-				  fsp->base_fsp,
-				  sio->xattr_name,
-				  &ea);
-	if (!NT_STATUS_IS_OK(status)) {
+	ret = get_ea_value_fsp(talloc_tos(),
+			       fsp->base_fsp,
+			       sio->xattr_name,
+			       &ea);
+	if (ret != 0) {
+		errno = ret;
 		return -1;
 	}
 
@@ -1268,9 +1359,10 @@ static int streams_xattr_fallocate(struct vfs_handle_struct *handle,
         struct stream_io *sio =
 		(struct stream_io *)VFS_FETCH_FSP_EXTENSION(handle, fsp);
 
-	DEBUG(10, ("streams_xattr_fallocate called for file %s offset %.0f"
-		"len = %.0f\n",
-		fsp_str_dbg(fsp), (double)offset, (double)len));
+	DBG_DEBUG("called for file %s offset %jd len=%jd\n",
+		  fsp_str_dbg(fsp),
+		  (intmax_t)offset,
+		  (intmax_t)len);
 
 	if (sio == NULL) {
 		return SMB_VFS_NEXT_FALLOCATE(handle, fsp, mode, offset, len);
@@ -1575,6 +1667,7 @@ static struct vfs_fn_pointers vfs_streams_xattr_fns = {
 	.stat_fn = streams_xattr_stat,
 	.fstat_fn = streams_xattr_fstat,
 	.lstat_fn = streams_xattr_lstat,
+	.fstatat_fn = streams_xattr_fstatat,
 	.pread_fn = streams_xattr_pread,
 	.pwrite_fn = streams_xattr_pwrite,
 	.pread_send_fn = streams_xattr_pread_send,

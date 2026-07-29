@@ -143,7 +143,6 @@ void wcache_invalidate_samlogon(struct winbindd_domain *domain,
 				const struct dom_sid *user_sid);
 bool wcache_invalidate_cache(void);
 bool wcache_invalidate_cache_noinit(void);
-bool initialize_winbindd_cache(void);
 void close_winbindd_cache(void);
 bool lookup_cached_sid(TALLOC_CTX *mem_ctx, const struct dom_sid *sid,
 		       char **domain_name, char **name,
@@ -178,8 +177,6 @@ bool wcache_tdc_fetch_list( struct winbindd_tdc_domain **domains, size_t *num_do
 bool wcache_tdc_add_domain( struct winbindd_domain *domain );
 struct winbindd_tdc_domain * wcache_tdc_fetch_domain( TALLOC_CTX *ctx, const char *name );
 void wcache_tdc_clear( void );
-bool wcache_store_seqnum(const char *domain_name, uint32_t seqnum,
-			 time_t last_seq_check);
 bool wcache_fetch_ndr(TALLOC_CTX *mem_ctx, struct winbindd_domain *domain,
 		      uint32_t opnum, const DATA_BLOB *req, DATA_BLOB *resp);
 void wcache_store_ndr(struct winbindd_domain *domain, uint32_t opnum,
@@ -206,6 +203,18 @@ void winbind_msg_domain_online(struct messaging_context *msg_ctx,
 
 void set_domain_offline(struct winbindd_domain *domain);
 void set_domain_online_request(struct winbindd_domain *domain);
+void winbind_add_failed_connection_entry(
+	const struct winbindd_domain *domain,
+	const char *server,
+	NTSTATUS result);
+void winbind_idmap_add_failed_connection_entry(const char *domain_name);
+
+struct cli_credentials;
+NTSTATUS winbindd_get_trust_credentials(struct winbindd_domain *domain,
+					TALLOC_CTX *mem_ctx,
+					bool netlogon,
+					bool allow_ipc_fallback,
+					struct cli_credentials **_creds);
 
 struct ndr_interface_table;
 NTSTATUS wb_open_internal_pipe(TALLOC_CTX *mem_ctx,
@@ -365,6 +374,7 @@ void winbindd_msg_reload_services_parent(struct messaging_context *msg,
 NTSTATUS winbindd_reinit_after_fork(const struct winbindd_child *myself,
 				    const char *logfilename);
 struct winbindd_domain *wb_child_domain(void);
+bool add_trusted_domains_dc(void);
 
 /* The following definitions come from winbindd/winbindd_group.c  */
 bool fill_grent(TALLOC_CTX *mem_ctx, struct winbindd_gr *gr,
@@ -383,7 +393,7 @@ struct tevent_req *wb_parent_idmap_setup_send(TALLOC_CTX *mem_ctx,
 NTSTATUS wb_parent_idmap_setup_recv(struct tevent_req *req,
 				    const struct wb_parent_idmap_config **_cfg);
 
-void init_idmap_child(void);
+NTSTATUS init_idmap_child(TALLOC_CTX *mem_ctx);
 struct winbindd_child *idmap_child(void);
 bool is_idmap_child(const struct winbindd_child *child);
 pid_t idmap_child_pid(void);
@@ -404,8 +414,9 @@ bool lp_scan_idmap_domains(bool (*fn)(const char *domname,
 
 /* The following definitions come from winbindd/winbindd_locator.c  */
 
-void init_locator_child(void);
+NTSTATUS init_locator_child(TALLOC_CTX *mem_ctx);
 struct winbindd_child *locator_child(void);
+bool is_locator_child(const struct winbindd_child *child);
 struct dcerpc_binding_handle *locator_child_handle(void);
 
 /* The following definitions come from winbindd/winbindd_misc.c  */
@@ -493,8 +504,6 @@ NTSTATUS winbind_dual_SamLogon(struct winbindd_domain *domain,
 
 struct winbindd_domain *domain_list(void);
 struct winbindd_domain *wb_next_domain(struct winbindd_domain *domain);
-bool set_routing_domain(struct winbindd_domain *domain,
-			struct winbindd_domain *routing_domain);
 bool add_trusted_domain_from_auth(uint16_t validation_level,
 				  struct info3_text *info3,
 				  struct info6_text *info6);
@@ -516,14 +525,48 @@ struct winbindd_domain *find_our_domain(void);
 struct winbindd_domain *find_default_route_domain(void);
 struct winbindd_domain *find_lookup_domain_from_sid(const struct dom_sid *sid);
 struct winbindd_domain *find_lookup_domain_from_name(const char *domain_name);
-bool parse_domain_user(const char *domuser,
-		       fstring namespace,
-		       fstring domain,
-		       fstring user);
-bool canonicalize_username(fstring username_inout,
-			   fstring namespace,
-			   fstring domain,
-			   fstring user);
+/**
+ * Parse a DOMAIN\user or UPN string into a domain, namespace and a user
+ *
+ * @param[in] ctx talloc context
+ * @param[in] domuser  a DOMAIN\user or UPN string
+ * @param[out] namespace
+ * @param[out] domain
+ * @param[out] user
+ * @return bool indicating success or failure
+ */
+bool parse_domain_user(TALLOC_CTX *ctx,
+		       const char *domuser,
+		       char **namespace,
+		       char **domain,
+		       char **user);
+/**
+ * Ensure an incoming username from NSS is fully qualified. Replace the
+ * incoming username with DOMAIN <separator> user. Additionally returns
+ * the same values as parse_domain_user() as out params.
+ * Used to ensure all names are fully qualified within winbindd.
+ * Used by the NSS protocols of auth, chauthtok, logoff and ccache_ntlm_auth.
+ * The protocol definitions of auth_crap, chng_pswd_auth_crap
+ * really should be changed to use this instead of doing things
+ * by hand. JRA.
+ *
+ * @param[in] mem_ctx talloc context
+ * @param[in,out] username_inout populated with fully qualified name
+		  with format 'DOMAIN <separator> user' where DOMAIN and
+		  user are determined by the output of parse_domain_user()
+ * @param[out] namespace populated with namespace returned from
+               parse_domain_user()
+ * @param[out] domain populated with domain returned from
+               parse_domain_user()
+ * @param[out] populated with user returned from
+               parse_domain_user()
+ * @return bool indicating success or failure
+ */
+bool canonicalize_username(TALLOC_CTX *mem_ctx,
+			   char **username_inout,
+			   char **namespace,
+			   char **domain,
+			   char **user);
 char *fill_domain_username_talloc(TALLOC_CTX *ctx,
 				  const char *domain,
 				  const char *user,
@@ -567,6 +610,7 @@ bool parse_sidlist(TALLOC_CTX *mem_ctx, const char *sidstr,
 		   struct dom_sid **sids, uint32_t *num_sids);
 bool parse_xidlist(TALLOC_CTX *mem_ctx, const char *xidstr,
 		   struct unixid **pxids, uint32_t *pnum_xids);
+const char *find_dns_domain_name(const char *domain_name);
 
 /* The following definitions come from winbindd/winbindd_wins.c  */
 
@@ -698,24 +742,6 @@ struct tevent_req *winbindd_getgroups_send(TALLOC_CTX *mem_ctx,
 					   struct winbindd_request *request);
 NTSTATUS winbindd_getgroups_recv(struct tevent_req *req,
 				 struct winbindd_response *response);
-
-struct tevent_req *wb_seqnum_send(TALLOC_CTX *mem_ctx,
-				  struct tevent_context *ev,
-				  struct winbindd_domain *domain);
-NTSTATUS wb_seqnum_recv(struct tevent_req *req, uint32_t *seqnum);
-
-struct tevent_req *wb_seqnums_send(TALLOC_CTX *mem_ctx,
-				   struct tevent_context *ev);
-NTSTATUS wb_seqnums_recv(struct tevent_req *req, TALLOC_CTX *mem_ctx,
-			 int *num_domains, struct winbindd_domain ***domains,
-			 NTSTATUS **statuses, uint32_t **seqnums);
-
-struct tevent_req *winbindd_show_sequence_send(TALLOC_CTX *mem_ctx,
-					       struct tevent_context *ev,
-					       struct winbindd_cli_state *cli,
-					       struct winbindd_request *request);
-NTSTATUS winbindd_show_sequence_recv(struct tevent_req *req,
-				     struct winbindd_response *response);
 
 struct tevent_req *wb_group_members_send(TALLOC_CTX *mem_ctx,
 					 struct tevent_context *ev,

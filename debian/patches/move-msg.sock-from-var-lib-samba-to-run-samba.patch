@@ -2,15 +2,74 @@ From: Michael Tokarev <mjt@tls.msk.ru>
 Date: Tue, 26 Apr 2022 16:11:48 +0300
 Subject: move msg.sock from /var/lib/samba to /run/samba
 
-This moves a socket directory from /var/lib/samba to /run/samba.
+Move socket directory from /var/lib/samba to /run/samba,
+exactly like msg.lock.  This directory is only used by various
+samba components to communicate with each other (smbcontrol),
+there's no place for it in /var/lib.
+
+Also remove msg.sock subdir in various tests.
+
+It'd be nice to also move ntp socket and similar somewhere to
+/run/samba too, but this is a bit more difficult since it is
+used in other software.
 
 https://lists.samba.org/archive/samba-technical/2022-April/137322.html
 
+Signed-off-by: Michael Tokarev <mjt@tls.msk.ru>
+---
+ python/samba/tests/blackbox/downgradedatabase.py      | 1 +
+ python/samba/tests/join.py                            | 2 +-
+ python/samba/tests/samdb.py                           | 2 +-
+ source3/lib/messages.c                                | 9 ++-------
+ source4/lib/messaging/messaging.c                     | 2 +-
+ source4/torture/drs/python/samba_tool_drs.py          | 2 +-
+ source4/torture/drs/python/samba_tool_drs_critical.py | 2 +-
+ source4/torture/drs/python/samba_tool_drs_no_dns.py   | 2 +-
+ 8 files changed, 9 insertions(+), 13 deletions(-)
+
+diff --git a/python/samba/tests/blackbox/downgradedatabase.py b/python/samba/tests/blackbox/downgradedatabase.py
+index d850d1b5527..a8f5d98c613 100644
+--- a/python/samba/tests/blackbox/downgradedatabase.py
++++ b/python/samba/tests/blackbox/downgradedatabase.py
+@@ -60,6 +60,7 @@ class DowngradeTestBase(BlackboxTestCase):
+                      "etc",
+                      "state",
+                      "bind-dns",
++                     "msg.sock",
+                      "msg.lock")
+         self.rm_files("names.tdb", "gencache.tdb")
+         super().tearDown()
+diff --git a/python/samba/tests/join.py b/python/samba/tests/join.py
+index b04cb4a506c..e052b4d1e31 100644
+--- a/python/samba/tests/join.py
++++ b/python/samba/tests/join.py
+@@ -74,7 +74,7 @@ class JoinTestCase(DNSTKeyTest):
+         if paths is not None:
+             shutil.rmtree(paths.private_dir)
+             shutil.rmtree(paths.state_dir)
+-            self.rm_dirs("etc", "msg.lock", "bind-dns")
++            self.rm_dirs("etc", "msg.lock", "msg.sock", "bind-dns")
+             self.rm_files("names.tdb")
+ 
+         self.join_ctx.cleanup_old_join(force=True)
+diff --git a/python/samba/tests/samdb.py b/python/samba/tests/samdb.py
+index e8b632bc9e2..3d3b21b6b63 100644
+--- a/python/samba/tests/samdb.py
++++ b/python/samba/tests/samdb.py
+@@ -54,7 +54,7 @@ class SamDBTestCase(TestCaseInTempDir):
+ 
+     def tearDown(self):
+         self.rm_files('names.tdb')
+-        self.rm_dirs('etc', 'msg.lock', 'private', 'state', 'bind-dns')
++        self.rm_dirs('etc', 'msg.lock', 'msg.sock', 'private', 'state', 'bind-dns')
+ 
+         super().tearDown()
+ 
 diff --git a/source3/lib/messages.c b/source3/lib/messages.c
-index 8641a9dad56..bf866e65e44 100644
+index b856a2889b1..46b99cb1c19 100644
 --- a/source3/lib/messages.c
 +++ b/source3/lib/messages.c
-@@ -461,11 +461,6 @@ static int messaging_context_destructor(struct messaging_context *ctx)
+@@ -462,11 +462,6 @@ static int messaging_context_destructor(struct messaging_context *ctx)
  	return 0;
  }
  
@@ -22,7 +81,7 @@ index 8641a9dad56..bf866e65e44 100644
  static NTSTATUS messaging_init_internal(TALLOC_CTX *mem_ctx,
  					struct tevent_context *ev,
  					struct messaging_context **pmsg_ctx)
-@@ -500,7 +495,7 @@ static NTSTATUS messaging_init_internal(TALLOC_CTX *mem_ctx,
+@@ -501,7 +496,7 @@ static NTSTATUS messaging_init_internal(TALLOC_CTX *mem_ctx,
  		return NT_STATUS_ACCESS_DENIED;
  	}
  
@@ -31,7 +90,7 @@ index 8641a9dad56..bf866e65e44 100644
  	if (priv_path == NULL) {
  		return NT_STATUS_NO_MEMORY;
  	}
-@@ -663,7 +658,7 @@ NTSTATUS messaging_reinit(struct messaging_context *msg_ctx)
+@@ -664,7 +659,7 @@ NTSTATUS messaging_reinit(struct messaging_context *msg_ctx)
  		msg_ctx->per_process_talloc_ctx,
  		msg_ctx->event_ctx,
  		&msg_ctx->id.unique_id,
@@ -41,10 +100,10 @@ index 8641a9dad56..bf866e65e44 100644
  		messaging_recv_cb,
  		msg_ctx,
 diff --git a/source4/lib/messaging/messaging.c b/source4/lib/messaging/messaging.c
-index a00c35be0d5..da641bc06aa 100644
+index 6e9c644b9bb..ef522faa456 100644
 --- a/source4/lib/messaging/messaging.c
 +++ b/source4/lib/messaging/messaging.c
-@@ -500,7 +500,7 @@ struct imessaging_context *imessaging_init(TALLOC_CTX *mem_ctx,
+@@ -537,7 +537,7 @@ static struct imessaging_context *imessaging_init_internal(
  		goto fail;
  	}
  
@@ -53,3 +112,45 @@ index a00c35be0d5..da641bc06aa 100644
  	if (msg->sock_dir == NULL) {
  		goto fail;
  	}
+diff --git a/source4/torture/drs/python/samba_tool_drs.py b/source4/torture/drs/python/samba_tool_drs.py
+index e622fe4f598..5a6f5ac8594 100644
+--- a/source4/torture/drs/python/samba_tool_drs.py
++++ b/source4/torture/drs/python/samba_tool_drs.py
+@@ -42,7 +42,7 @@ class SambaToolDrsTests(drs_base.DrsBaseTestCase):
+         self._enable_inbound_repl(self.dnsname_dc2)
+ 
+         self.rm_files('names.tdb', allow_missing=True)
+-        self.rm_dirs('etc', 'msg.lock', 'private', 'state', 'bind-dns',
++        self.rm_dirs('etc', 'msg.lock', 'msg.sock', 'private', 'state', 'bind-dns',
+                      allow_missing=True)
+ 
+         super(SambaToolDrsTests, self).tearDown()
+diff --git a/source4/torture/drs/python/samba_tool_drs_critical.py b/source4/torture/drs/python/samba_tool_drs_critical.py
+index 5260e1588b2..34925c0ae41 100644
+--- a/source4/torture/drs/python/samba_tool_drs_critical.py
++++ b/source4/torture/drs/python/samba_tool_drs_critical.py
+@@ -42,7 +42,7 @@ class SambaToolDrsTests(drs_base.DrsBaseTestCase):
+         self._enable_inbound_repl(self.dnsname_dc2)
+ 
+         self.rm_files('names.tdb', allow_missing=True)
+-        self.rm_dirs('etc', 'msg.lock', 'private', 'state', 'bind-dns',
++        self.rm_dirs('etc', 'msg.lock', 'msg.sock', 'private', 'state', 'bind-dns',
+                      allow_missing=True)
+ 
+         super(SambaToolDrsTests, self).tearDown()
+diff --git a/source4/torture/drs/python/samba_tool_drs_no_dns.py b/source4/torture/drs/python/samba_tool_drs_no_dns.py
+index aad59661757..ebc176abf62 100644
+--- a/source4/torture/drs/python/samba_tool_drs_no_dns.py
++++ b/source4/torture/drs/python/samba_tool_drs_no_dns.py
+@@ -47,7 +47,7 @@ class SambaToolDrsNoDnsTests(drs_base.DrsBaseTestCase):
+     def tearDown(self):
+         self._enable_inbound_repl(self.dnsname_dc1)
+         self.rm_files('names.tdb', allow_missing=True)
+-        self.rm_dirs('etc', 'msg.lock', 'private', 'state', 'bind-dns',
++        self.rm_dirs('etc', 'msg.lock', 'msg.sock', 'private', 'state', 'bind-dns',
+                      allow_missing=True)
+ 
+         super(SambaToolDrsNoDnsTests, self).tearDown()
+-- 
+2.39.5
+

@@ -79,8 +79,12 @@ libldb.so.2 #PACKAGE# #MINVER#
  LDB_2.6.1@LDB_2.6.1 2:2.6.1
  LDB_2.7.0@LDB_2.7.0 2:2.7.0
  LDB_2.8.0@LDB_2.8.0 2:2.8.0
+ LDB_2.9.0@LDB_2.9.0 2:2.9.0
+ LDB_2.10.0@LDB_2.10.0 2:2.10.0
+ LDB_2.11.0@LDB_2.11.0 2:2.11.0
  ldb_check_critical_controls@LDB_0.9.22 0.9.22
  ldb_controls_except_specified@LDB_0.9.22 0.9.22
+ ldb_controls_get_control@LDB_2.10.0 2.10.0
  ldb_control_to_string@LDB_1.0.2 1.0.2~git20110403
  ldb_add@LDB_0.9.10 0.9.21
  ldb_any_comparison@LDB_0.9.10 0.9.21
@@ -106,6 +110,7 @@ libldb.so.2 #PACKAGE# #MINVER#
  ldb_casefold_default@LDB_0.9.10 0.9.21
  ldb_comparison_binary@LDB_0.9.10 0.9.21
  ldb_comparison_fold@LDB_0.9.10 0.9.21
+ ldb_comparison_fold_ascii@LDB_2.10.0 2.10.0
  ldb_connect@LDB_0.9.10 0.9.21
  ldb_control_to_string@LDB_1.0.2 1.0.2
  ldb_debug@LDB_0.9.10 0.9.21
@@ -127,6 +132,7 @@ libldb.so.2 #PACKAGE# #MINVER#
  ldb_dn_compare@LDB_0.9.10 0.9.21
  ldb_dn_compare_base@LDB_0.9.10 0.9.21
  ldb_dn_copy@LDB_0.9.10 0.9.21
+ ldb_dn_copy_with_ldb_context@LDB_2.10.0 2.10.0
  ldb_dn_escape_value@LDB_0.9.10 0.9.21
  ldb_dn_extended_add_syntax@LDB_0.9.10 0.9.21
  ldb_dn_extended_filter@LDB_0.9.10 0.9.21
@@ -355,6 +361,7 @@ libldb.so.2 #PACKAGE# #MINVER#
  ldb_set_timeout_from_prev_req@LDB_0.9.10 0.9.21
  ldb_set_utf8_default@LDB_0.9.10 0.9.21
  ldb_set_utf8_fns@LDB_0.9.10 0.9.21
+ ldb_set_utf8_functions@LDB_2.10.0 2.10.0
  ldb_setup_wellknown_attributes@LDB_0.9.10 0.9.21
  ldb_should_b64_encode@LDB_0.9.10 0.9.21
  ldb_standard_syntax_by_name@LDB_0.9.10 0.9.21

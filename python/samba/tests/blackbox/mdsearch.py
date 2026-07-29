@@ -65,7 +65,7 @@ class MdssvcHTTPRequestHandler(BaseHTTPRequestHandler):
 class MdfindBlackboxTests(BlackboxTestCase):
 
     def setUp(self):
-        super(MdfindBlackboxTests, self).setUp()
+        super().setUp()
 
         self.server = HTTPServer(('10.53.57.35', 8080),
                                  MdssvcHTTPRequestHandler,
@@ -83,7 +83,7 @@ class MdfindBlackboxTests(BlackboxTestCase):
             f.close()
 
     def tearDown(self):
-        super(BlackboxTestCase, self).tearDown()
+        super().tearDown()
         for file in testfiles:
             os.remove("%s/%s" % (self.sharepath, file))
 
@@ -102,8 +102,22 @@ class MdfindBlackboxTests(BlackboxTestCase):
         json_in = r'''{
           "from": 0, "size": 50, "_source": ["path.real"],
           "query": {
-            "query_string": {
-              "query": "(samba*) AND path.real.fulltext:\"%BASEPATH%\""
+            "bool": {
+              "filter": [
+                {
+                  "prefix": {
+                    "path.real": "%BASEPATH%/"
+                  }
+                }
+              ],
+              "must": [
+                {
+                  "query_string": {
+                    "query": "samba*",
+                    "fields": ["file.filename", "content"]
+                  }
+                }
+              ]
             }
           }
         }'''

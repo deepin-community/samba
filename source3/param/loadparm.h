@@ -30,8 +30,12 @@ typedef struct stat_ex SMB_STRUCT_STAT;
 typedef struct files_struct files_struct;
 struct smbd_server_connection;
 struct security_descriptor;
+struct loadparm_context;
 
 /* The following definitions come from param/loadparm.c  */
+
+void loadparm_s3_init_globals(struct loadparm_context *lp_ctx,
+			      bool reinit_globals);
 
 const struct loadparm_substitution *loadparm_s3_global_substitution(void);
 
@@ -62,14 +66,24 @@ int lp_cups_encrypt(void);
 bool lp_widelinks(int );
 int lp_rpc_low_port(void);
 int lp_rpc_high_port(void);
+const char *lp_dns_hostname(void);
 bool lp_lanman_auth(void);
 enum samba_weak_crypto lp_weak_crypto(void);
+bool lp_strict_rename(int snum);
+int lp_smb3_directory_leases(void);
 
 int lp_wi_scan_global_parametrics(
 	const char *regex, size_t max_matches,
 	bool (*cb)(const char *string, regmatch_t matches[],
 		   void *private_data),
 	void *private_data);
+int lp_wi_scan_share_parametrics(int snum,
+				 const char *regex_str,
+				 size_t max_matches,
+				 bool (*cb)(const char *string,
+					    regmatch_t matches[],
+					    void *private_data),
+				 void *private_data);
 
 const char *lp_parm_const_string(int snum, const char *type, const char *option, const char *def);
 struct loadparm_service;
@@ -118,7 +132,6 @@ struct loadparm_service *lp_default_loadparm_service(void);
 void *lp_parm_ptr(struct loadparm_service *service, struct parm_struct *parm);
 void *lp_local_ptr_by_snum(int snum, struct parm_struct *parm);
 bool lp_do_parameter(int snum, const char *pszParmName, const char *pszParmValue);
-bool lp_set_cmdline(const char *pszParmName, const char *pszParmValue);
 bool dump_a_parameter(int snum, char *parm_name, FILE * f, bool isGlobal);
 bool lp_snum_ok(int iService);
 void lp_add_one_printer(const char *name, const char *comment,
@@ -152,6 +165,7 @@ bool lp_load_global_no_reinit(const char *file_name);
 bool lp_load_no_reinit(const char *file_name);
 bool lp_load_client_no_reinit(const char *file_name);
 bool lp_load_with_registry_shares(const char *pszFname);
+bool lp_load_with_registry_without_shares(const char *pszFname);
 int lp_numservices(void);
 void lp_dump(FILE *f, bool show_defaults, int maxtoprint);
 void lp_dump_one(FILE * f, bool show_defaults, int snum);
@@ -183,7 +197,6 @@ void widelinks_warning(int snum);
 const char *lp_ncalrpc_dir(void);
 void _lp_set_server_role(int server_role);
 uint32_t lp_get_async_dns_timeout(void);
-bool lp_smb3_unix_extensions(void);
 
 /* The following definitions come from param/loadparm_ctx.c  */
 

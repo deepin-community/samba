@@ -1425,11 +1425,10 @@ static void share_mode_watch_done(struct tevent_req *subreq);
 struct tevent_req *share_mode_watch_send(
 	TALLOC_CTX *mem_ctx,
 	struct tevent_context *ev,
-	struct share_mode_lock *lck,
+	struct file_id *id,
 	struct server_id blocker)
 {
-	struct file_id id = share_mode_lock_file_id(lck);
-	TDB_DATA key = locking_key(&id);
+	TDB_DATA key = locking_key(id);
 	struct tevent_req *req = NULL, *subreq = NULL;
 	struct share_mode_watch_state *state = NULL;
 
@@ -1743,9 +1742,12 @@ NTSTATUS fetch_share_mode_recv(struct tevent_req *req,
 
 struct share_mode_forall_state {
 	TDB_DATA key;
-	int (*fn)(struct file_id fid,
-		  const struct share_mode_data *data,
-		  void *private_data);
+	int (*ro_fn)(struct file_id fid,
+		     const struct share_mode_data *data,
+		     void *private_data);
+	int (*rw_fn)(struct file_id fid,
+		     struct share_mode_data *data,
+		     void *private_data);
 	void *private_data;
 };
 
@@ -1785,7 +1787,11 @@ static void share_mode_forall_dump_fn(
 		return;
 	}
 
-	state->fn(fid, d, state->private_data);
+	if (state->ro_fn != NULL) {
+		state->ro_fn(fid, d, state->private_data);
+	} else {
+		state->rw_fn(fid, d, state->private_data);
+	}
 	TALLOC_FREE(d);
 }
 
@@ -1806,13 +1812,36 @@ static int share_mode_forall_fn(TDB_DATA key, void *private_data)
 	return 0;
 }
 
+int share_mode_forall_read(int (*fn)(struct file_id fid,
+				     const struct share_mode_data *data,
+				     void *private_data),
+			   void *private_data)
+{
+	struct share_mode_forall_state state = {
+		.ro_fn = fn,
+		.private_data = private_data
+	};
+	int ret;
+
+	if (lock_ctx == NULL) {
+		return 0;
+	}
+
+	ret = g_lock_locks_read(
+		lock_ctx, share_mode_forall_fn, &state);
+	if (ret < 0) {
+		DBG_ERR("g_lock_locks failed\n");
+	}
+	return ret;
+}
+
 int share_mode_forall(int (*fn)(struct file_id fid,
-				const struct share_mode_data *data,
+				struct share_mode_data *data,
 				void *private_data),
 		      void *private_data)
 {
 	struct share_mode_forall_state state = {
-		.fn = fn,
+		.rw_fn = fn,
 		.private_data = private_data
 	};
 	int ret;
@@ -1831,11 +1860,15 @@ int share_mode_forall(int (*fn)(struct file_id fid,
 
 struct share_entry_forall_state {
 	struct file_id fid;
-	const struct share_mode_data *data;
-	int (*fn)(struct file_id fid,
-		  const struct share_mode_data *data,
-		  const struct share_mode_entry *entry,
-		  void *private_data);
+	struct share_mode_data *data;
+	int (*ro_fn)(struct file_id fid,
+		     const struct share_mode_data *data,
+		     const struct share_mode_entry *entry,
+		     void *private_data);
+	int (*rw_fn)(struct file_id fid,
+		     struct share_mode_data *data,
+		     struct share_mode_entry *entry,
+		     void *private_data);
 	void *private_data;
 	int ret;
 };
@@ -1846,15 +1879,37 @@ static bool share_entry_traverse_walker(
 	void *private_data)
 {
 	struct share_entry_forall_state *state = private_data;
+	int ret;
 
-	state->ret = state->fn(
-		state->fid, state->data, e, state->private_data);
-	return (state->ret != 0);
+	if (state->ro_fn != NULL) {
+		ret = state->ro_fn(state->fid,
+				   state->data,
+				   e,
+				   state->private_data);
+	} else {
+		ret = state->rw_fn(state->fid,
+				   state->data,
+				   e,
+				   state->private_data);
+	}
+	if (ret == 0) {
+		/* Continue the whole traverse */
+		return 0;
+	} else if (ret == 1) {
+		/*
+		 * Just stop share_mode_entry loop: by not setting
+		 * state->ret (which was initialized to 0), the
+		 * share_mode_data traverse will continue.
+		 */
+		return 1;
+	}
+	state->ret = ret;
+	return 1;
 }
 
-static int share_entry_traverse_fn(struct file_id fid,
-				   const struct share_mode_data *data,
-				   void *private_data)
+static int share_entry_ro_traverse_fn(struct file_id fid,
+				      const struct share_mode_data *data,
+				      void *private_data)
 {
 	struct share_entry_forall_state *state = private_data;
 	struct share_mode_lock lck = {
@@ -1864,7 +1919,33 @@ static int share_entry_traverse_fn(struct file_id fid,
 	bool ok;
 
 	state->fid = fid;
+	state->data = discard_const_p(struct share_mode_data, data);
+	state->ret = 0;
+
+	ok = share_mode_forall_entries(
+		&lck, share_entry_traverse_walker, state);
+	if (!ok) {
+		DBG_ERR("share_mode_forall_entries failed\n");
+		return false;
+	}
+
+	return state->ret;
+}
+
+static int share_entry_rw_traverse_fn(struct file_id fid,
+				      struct share_mode_data *data,
+				      void *private_data)
+{
+	struct share_entry_forall_state *state = private_data;
+	struct share_mode_lock lck = {
+		.id = fid,
+		.cached_data = data,
+	};
+	bool ok;
+
+	state->fid = fid;
 	state->data = data;
+	state->ret = 0;
 
 	ok = share_mode_forall_entries(
 		&lck, share_entry_traverse_walker, state);
@@ -1878,19 +1959,41 @@ static int share_entry_traverse_fn(struct file_id fid,
 
 /*******************************************************************
  Call the specified function on each entry under management by the
- share mode system.
+ share mode system.  If the callback function returns:
+
+  0 ... continue traverse
+  1 ... stop loop over share_mode_entries, but continue share_mode_data traverse
+ -1 ... stop whole share_mode_data traverse
+
+ Any other return value is treated as -1.
 ********************************************************************/
 
+int share_entry_forall_read(int (*fn)(struct file_id fid,
+				      const struct share_mode_data *data,
+				      const struct share_mode_entry *entry,
+				      void *private_data),
+			    void *private_data)
+{
+	struct share_entry_forall_state state = {
+		.ro_fn = fn,
+		.private_data = private_data,
+	};
+
+	return share_mode_forall_read(share_entry_ro_traverse_fn, &state);
+}
+
 int share_entry_forall(int (*fn)(struct file_id fid,
-				 const struct share_mode_data *data,
-				 const struct share_mode_entry *entry,
+				 struct share_mode_data *data,
+				 struct share_mode_entry *entry,
 				 void *private_data),
 		      void *private_data)
 {
 	struct share_entry_forall_state state = {
-		.fn = fn, .private_data = private_data };
+		.rw_fn = fn,
+		.private_data = private_data,
+	};
 
-	return share_mode_forall(share_entry_traverse_fn, &state);
+	return share_mode_forall(share_entry_rw_traverse_fn, &state);
 }
 
 static int share_mode_entry_cmp(
@@ -2022,7 +2125,7 @@ bool set_share_mode(struct share_mode_lock *lck,
 		.time.tv_usec = fsp->open_time.tv_usec,
 		.share_file_id = fh_get_gen_id(fsp->fh),
 		.uid = (uint32_t)uid,
-		.flags = (fsp->posix_flags & FSP_POSIX_FLAGS_OPEN) ?
+		.flags = fsp->fsp_flags.posix_open ?
 			SHARE_MODE_FLAG_POSIX_OPEN : 0,
 		.name_hash = fsp->name_hash,
 	};
@@ -2703,16 +2806,25 @@ bool reset_share_mode_entry(
 	struct share_mode_data *d = NULL;
 	TDB_DATA key = locking_key(&id);
 	struct locking_tdb_data *ltdb = NULL;
-	struct share_mode_entry e;
+	struct share_mode_entry e = { .pid.pid = 0 };
 	struct share_mode_entry_buf e_buf;
+	size_t old_idx;
+	size_t new_idx;
+	bool found;
 	NTSTATUS status;
-	int cmp;
 	bool ret = false;
 	bool ok;
+	struct file_id_buf id_buf;
+	struct server_id_buf pid_buf1;
+	struct server_id_buf pid_buf2;
+	size_t low_idx1, low_idx2, low_num;
+	size_t mid_idx1, mid_idx2, mid_num;
+	size_t high_idx1, high_idx2, high_num;
+	TDB_DATA dbufs[4];
+	size_t num_dbufs = 0;
 
 	status = share_mode_lock_access_private_data(lck, &d);
 	if (!NT_STATUS_IS_OK(status)) {
-		struct file_id_buf id_buf;
 		/* Any error recovery possible here ? */
 		DBG_ERR("share_mode_lock_access_private_data() failed for "
 			"%s - %s\n",
@@ -2728,29 +2840,54 @@ bool reset_share_mode_entry(
 		return false;
 	}
 
-	if (ltdb->num_share_entries != 1) {
-		DBG_DEBUG("num_share_modes=%zu\n", ltdb->num_share_entries);
+	DBG_DEBUG("%s - num_share_modes=%zu\n",
+		  file_id_str_buf(id, &id_buf),
+		  ltdb->num_share_entries);
+
+	new_idx = share_mode_entry_find(
+		ltdb->share_entries,
+		ltdb->num_share_entries,
+		new_pid,
+		new_share_file_id,
+		&e,
+		&found);
+	if (found) {
+		DBG_ERR("%s - num_share_modes=%zu "
+			"found NEW[%s][%"PRIu64"]\n",
+			file_id_str_buf(id, &id_buf),
+			ltdb->num_share_entries,
+			server_id_str_buf(new_pid, &pid_buf2),
+			new_share_file_id);
 		goto done;
 	}
 
-	ok = share_mode_entry_get(ltdb->share_entries, &e);
-	if (!ok) {
-		DBG_WARNING("share_mode_entry_get failed\n");
+	old_idx = share_mode_entry_find(
+		ltdb->share_entries,
+		ltdb->num_share_entries,
+		old_pid,
+		old_share_file_id,
+		&e,
+		&found);
+	if (!found) {
+		DBG_WARNING("%s - num_share_modes=%zu "
+			    "OLD[%s][%"PRIu64"] not found\n",
+			    file_id_str_buf(id, &id_buf),
+			    ltdb->num_share_entries,
+			    server_id_str_buf(old_pid, &pid_buf1),
+			    old_share_file_id);
 		goto done;
 	}
-
-	cmp = share_mode_entry_cmp(
-		old_pid, old_share_file_id, e.pid, e.share_file_id);
-	if (cmp != 0) {
-		struct server_id_buf tmp1, tmp2;
-		DBG_WARNING("Expected pid=%s, file_id=%"PRIu64", "
-			    "got pid=%s, file_id=%"PRIu64"\n",
-			    server_id_str_buf(old_pid, &tmp1),
-			    old_share_file_id,
-			    server_id_str_buf(e.pid, &tmp2),
-			    e.share_file_id);
-		goto done;
-	}
+	DBG_DEBUG("%s - num_share_modes=%zu "
+		  "OLD[%s][%"PRIu64"] => idx=%zu "
+		  "NEW[%s][%"PRIu64"] => idx=%zu\n",
+		  file_id_str_buf(id, &id_buf),
+		  ltdb->num_share_entries,
+		  server_id_str_buf(old_pid, &pid_buf1),
+		  old_share_file_id,
+		  old_idx,
+		  server_id_str_buf(new_pid, &pid_buf2),
+		  new_share_file_id,
+		  new_idx);
 
 	e.pid = new_pid;
 	if (new_mid != UINT64_MAX) {
@@ -2764,11 +2901,248 @@ bool reset_share_mode_entry(
 		goto done;
 	}
 
-	ltdb->share_entries = e_buf.buf;
+	/*
+	 * The logic to remove the existing
+	 * entry and add the new one at the
+	 * same time is a bit complex because
+	 * we need to keep the entries sorted.
+	 *
+	 * The following examples should catch
+	 * the corner cases and show that
+	 * the {low,mid,high}_{idx1,num} are
+	 * correctly calculated and the new
+	 * entry is put before or after the mid
+	 * elements...
+	 *
+	 * 1.
+	 *    0
+	 *    1
+	 *    2  <- old_idx
+	 *          new_idx -> 3
+	 *    3
+	 *    4
+	 *
+	 *    low_idx1 = 0;
+	 *    low_idx2 = MIN(old_idx, new_idx);  => 2
+	 *    low_num = low_idx2 - low_idx1; => 2
+	 *
+	 *    if (new < old) => new; => no
+	 *
+	 *    mid_idx1 = MIN(old_idx+1, new_idx); => 3
+	 *    mid_idx2 = MAX(old_idx, new_idx); => 3
+	 *    mid_num = mid_idx2 - mid_idx1; => 0
+	 *
+	 *    if (new >= old) => new; => yes
+	 *
+	 *    high_idx1 = MAX(old_idx+1, new_idx); => 3
+	 *    high_idx2 = num_share_entries; => 5
+	 *    high_num = high_idx2 - high_idx1 = 2
+	 *
+	 * 2.
+	 *    0
+	 *    1
+	 *          new_idx -> 2
+	 *    2  <- old_idx
+	 *    3
+	 *    4
+	 *
+	 *    low_idx1 = 0;
+	 *    low_idx2 = MIN(old_idx, new_idx);  => 2
+	 *    low_num = low_idx2 - low_idx1; => 2
+	 *
+	 *    if (new < old) => new; => no
+	 *
+	 *    mid_idx1 = MIN(old_idx+1, new_idx); => 2
+	 *    mid_idx2 = MAX(old_idx, new_idx); => 2
+	 *    mid_num = mid_idx2 - mid_idx1; => 0
+	 *
+	 *    if (new >= old) => new; => yes
+	 *
+	 *    high_idx1 = MAX(old_idx+1, new_idx); => 3
+	 *    high_idx2 = num_share_entries; => 5
+	 *    high_num = high_idx2 - high_idx1 = 2
+	 *
+	 * 3.
+	 *    0
+	 *    1  <- old_idx
+	 *    2
+	 *          new_idx -> 3
+	 *    3
+	 *    4
+	 *
+	 *    low_idx1 = 0;
+	 *    low_idx2 = MIN(old_idx, new_idx);  => 1
+	 *    low_num = low_idx2 - low_idx1; => 1
+	 *
+	 *    if (new < old) => new; => no
+	 *
+	 *    mid_idx1 = MIN(old_idx+1, new_idx); => 2
+	 *    mid_idx2 = MAX(old_idx, new_idx); => 3
+	 *    mid_num = mid_idx2 - mid_idx1; => 1
+	 *
+	 *    if (new >= old) => new; => yes
+	 *
+	 *    high_idx1 = MAX(old_idx+1, new_idx); => 3
+	 *    high_idx2 = num_share_entries; => 5
+	 *    high_num = high_idx2 - high_idx1 = 2
+	 *
+	 * 4.
+	 *    0
+	 *          new_idx -> 1
+	 *    1
+	 *    2
+	 *    3  <- old_idx
+	 *    4
+	 *
+	 *    low_idx1 = 0;
+	 *    low_idx2 = MIN(old_idx, new_idx);  => 1
+	 *    low_num = low_idx2 - low_idx1; => 1
+	 *
+	 *    if (new < old) => new; => yes
+	 *
+	 *    mid_idx1 = MIN(old_idx+1, new_idx); => 1
+	 *    mid_idx2 = MAX(old_idx, new_idx); => 3
+	 *    mid_num = mid_idx2 - mid_idx1; => 2
+	 *
+	 *    if (new >= old) => new; => no
+	 *
+	 *    high_idx1 = MAX(old_idx+1, new_idx); => 4
+	 *    high_idx2 = num_share_entries; => 5
+	 *    high_num = high_idx2 - high_idx1 = 1
+	 *
+	 * 5.
+	 *          new_idx -> 0
+	 *    0
+	 *    1
+	 *    2
+	 *    3
+	 *    4  <- old_idx
+	 *
+	 *    low_idx1 = 0;
+	 *    low_idx2 = MIN(old_idx, new_idx);  => 0
+	 *    low_num = low_idx2 - low_idx1; => 0
+	 *
+	 *    if (new < old) => new; => yes
+	 *
+	 *    mid_idx1 = MIN(old_idx+1, new_idx); => 0
+	 *    mid_idx2 = MAX(old_idx, new_idx); => 4
+	 *    mid_num = mid_idx2 - mid_idx1; => 4
+	 *
+	 *    if (new >= old) => new; => no
+	 *
+	 *    high_idx1 = MAX(old_idx+1, new_idx); => 5
+	 *    high_idx2 = num_share_entries; => 5
+	 *    high_num = high_idx2 - high_idx1 = 0
+	 *
+	 * 6.
+	 *          new_idx -> 0
+	 *    0 <- old_idx
+	 *
+	 *    low_idx1 = 0;
+	 *    low_idx2 = MIN(old_idx, new_idx);  => 0
+	 *    low_num = low_idx2 - low_idx1; => 0
+	 *
+	 *    if (new < old) => new; => no
+	 *
+	 *    mid_idx1 = MIN(old_idx+1, new_idx); => 0
+	 *    mid_idx2 = MAX(old_idx, new_idx); => 0
+	 *    mid_num = mid_idx2 - mid_idx1; => 0
+	 *
+	 *    if (new >= old) => new; => yes
+	 *
+	 *    high_idx1 = MAX(old_idx+1, new_idx); => 1
+	 *    high_idx2 = num_share_entries; => 1
+	 *    high_num = high_idx2 - high_idx1 = 0
+	 *
+	 * 7.
+	 *    0 <- old_idx
+	 *          new_idx -> 1
+	 *
+	 *    low_idx1 = 0;
+	 *    low_idx2 = MIN(old_idx, new_idx);  => 0
+	 *    low_num = low_idx2 - low_idx1; => 0
+	 *
+	 *    if (new < old) => new; => no
+	 *
+	 *    mid_idx1 = MIN(old_idx+1, new_idx); => 1
+	 *    mid_idx2 = MAX(old_idx, new_idx); => 1
+	 *    mid_num = mid_idx2 - mid_idx1; => 0
+	 *
+	 *    if (new >= old) => new; => yes
+	 *
+	 *    high_idx1 = MAX(old_idx+1, new_idx); => 1
+	 *    high_idx2 = num_share_entries; => 1
+	 *    high_num = high_idx2 - high_idx1 = 0
+	 */
+	low_idx1 = 0;
+	low_idx2 = MIN(old_idx, new_idx);
+	low_num = low_idx2 - low_idx1;
+	mid_idx1 = MIN(old_idx+1, new_idx);
+	mid_idx2 = MAX(old_idx, new_idx);
+	mid_num = mid_idx2 - mid_idx1;
+	high_idx1 = MAX(old_idx+1, new_idx);
+	high_idx2 = ltdb->num_share_entries;
+	high_num = high_idx2 - high_idx1;
 
+	if (low_num != 0) {
+		dbufs[num_dbufs] = (TDB_DATA) {
+			.dptr = discard_const_p(uint8_t, ltdb->share_entries) +
+				low_idx1 * SHARE_MODE_ENTRY_SIZE,
+			.dsize = low_num * SHARE_MODE_ENTRY_SIZE,
+		};
+		num_dbufs += 1;
+	}
+
+	if (new_idx < old_idx) {
+		dbufs[num_dbufs] = (TDB_DATA) {
+			.dptr = e_buf.buf, .dsize = SHARE_MODE_ENTRY_SIZE,
+		};
+		num_dbufs += 1;
+	}
+
+	if (mid_num != 0) {
+		dbufs[num_dbufs] = (TDB_DATA) {
+			.dptr = discard_const_p(uint8_t, ltdb->share_entries) +
+				mid_idx1 * SHARE_MODE_ENTRY_SIZE,
+			.dsize = mid_num * SHARE_MODE_ENTRY_SIZE,
+		};
+		num_dbufs += 1;
+	}
+
+	if (new_idx >= old_idx) {
+		dbufs[num_dbufs] = (TDB_DATA) {
+			.dptr = e_buf.buf, .dsize = SHARE_MODE_ENTRY_SIZE,
+		};
+		num_dbufs += 1;
+	}
+
+	if (high_num != 0) {
+		dbufs[num_dbufs] = (TDB_DATA) {
+			.dptr = discard_const_p(uint8_t, ltdb->share_entries) +
+				high_idx1 * SHARE_MODE_ENTRY_SIZE,
+			.dsize = high_num * SHARE_MODE_ENTRY_SIZE,
+		};
+		num_dbufs += 1;
+	}
+
+	{
+		size_t i;
+		for (i=0; i<num_dbufs; i++) {
+			DBG_DEBUG("dbufs[%zu]=(%p, %zu)\n",
+				  i,
+				  dbufs[i].dptr,
+				  dbufs[i].dsize);
+		}
+	}
+
+	/*
+	 * We completely rewrite the entries...
+	 */
+	ltdb->share_entries = NULL;
+	ltdb->num_share_entries = 0;
 	d->modified = true;
 
-	status = share_mode_data_ltdb_store(d, key, ltdb, NULL, 0);
+	status = share_mode_data_ltdb_store(d, key, ltdb, dbufs, num_dbufs);
 	if (!NT_STATUS_IS_OK(status)) {
 		DBG_ERR("share_mode_data_ltdb_store failed: %s\n",
 			nt_errstr(status));

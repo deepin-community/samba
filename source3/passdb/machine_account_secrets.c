@@ -138,11 +138,13 @@ bool secrets_store_domain_sid(const char *domain, const struct dom_sid  *sid)
 			    &clean_sid,
 			    sizeof(struct dom_sid));
 
-	/* Force a re-query, in the case where we modified our domain */
+	/* Force a re-query */
 	if (ret) {
-		if (dom_sid_equal(get_global_sam_sid(), sid) == false) {
-			reset_global_sam_sid();
-		}
+		/*
+		 * Do not call get_global_domain_sid() here, or we will call it
+		 * recursively.
+		 */
+		reset_global_sam_sid();
 	}
 	return ret;
 }
@@ -1035,7 +1037,7 @@ static int secrets_domain_info_kerberos_keys(struct secrets_domain_info1_passwor
 	bool ok;
 #endif /* HAVE_ADS */
 	DATA_BLOB arc4_b = data_blob_null;
-	const uint16_t max_keys = 4;
+	const uint16_t max_keys = 3;
 	struct secrets_domain_info1_kerberos_key *keys = NULL;
 	uint16_t idx = 0;
 	char *salt_data = NULL;
@@ -1045,10 +1047,10 @@ static int secrets_domain_info_kerberos_keys(struct secrets_domain_info1_passwor
 	 * ENCTYPE_AES256_CTS_HMAC_SHA1_96
 	 * ENCTYPE_AES128_CTS_HMAC_SHA1_96
 	 * ENCTYPE_ARCFOUR_HMAC
-	 * ENCTYPE_DES_CBC_MD5
 	 *
 	 * We don't include ENCTYPE_DES_CBC_CRC
-	 * as W2008R2 also doesn't store it anymore.
+	 * and ENCTYPE_DES_CBC_MD5
+	 * as they are no longer supported.
 	 *
 	 * Note we store all enctypes we support,
 	 * including the weak encryption types,
@@ -1671,7 +1673,9 @@ NTSTATUS secrets_prepare_password_change(const char *domain, const char *dcname,
 					 const char *cleartext_unix,
 					 TALLOC_CTX *mem_ctx,
 					 struct secrets_domain_info1 **pinfo,
-					 struct secrets_domain_info1_change **pprev)
+					 struct secrets_domain_info1_change **pprev,
+					 NTSTATUS (*sync_pw2keytabs_fn)(const char *),
+					 const char *opt_host)
 {
 	TALLOC_CTX *frame = talloc_stackframe();
 	struct db_context *db = NULL;
@@ -1764,6 +1768,16 @@ NTSTATUS secrets_prepare_password_change(const char *domain, const char *dcname,
 			domain);
 		TALLOC_FREE(frame);
 		return NT_STATUS_INTERNAL_DB_ERROR;
+	}
+
+	if (prev == NULL && sync_pw2keytabs_fn != NULL) {
+		status = sync_pw2keytabs_fn(opt_host);
+		if (!NT_STATUS_IS_OK(status)) {
+			DBG_ERR("Sync of machine password failed.\n");
+			dbwrap_transaction_cancel(db);
+			TALLOC_FREE(frame);
+			return status;
+		}
 	}
 
 	*pinfo = talloc_move(mem_ctx, &info);
@@ -2009,7 +2023,9 @@ NTSTATUS secrets_defer_password_change(const char *change_server,
 
 NTSTATUS secrets_finish_password_change(const char *change_server,
 					NTTIME change_time,
-					const struct secrets_domain_info1 *cookie)
+					const struct secrets_domain_info1 *cookie,
+					NTSTATUS (*sync_pw2keytabs_fn)(const char *),
+					const char *prefer_dc)
 {
 	const char *domain = cookie->domain_info.name.string;
 	TALLOC_CTX *frame = talloc_stackframe();
@@ -2065,12 +2081,35 @@ NTSTATUS secrets_finish_password_change(const char *change_server,
 		return status;
 	}
 
+	/*
+	 * For the clustered samba, it is important to have following order:
+	 * 1. dbwrap_transaction_commit()
+	 * 2. sync_pw2keytabs()
+	 * Only this order ensures a correct behavior of
+	 * the 'sync machine password script' that does:
+	 * 'onnode all net ads keytab create'
+	 *
+	 * If we would call sync_pw2keytabs() before committing the changes to
+	 * the secrets.tdb, it will not be updated on other nodes, so triggering
+	 * 'net ads keytab create' will not see the new password yet.
+	 *
+	 * This applies also to secrets_prepare_password_change().
+	 */
 	ret = dbwrap_transaction_commit(db);
 	if (ret != 0) {
 		DBG_ERR("dbwrap_transaction_commit() failed for %s\n",
 			domain);
 		TALLOC_FREE(frame);
 		return NT_STATUS_INTERNAL_DB_ERROR;
+	}
+
+	if (sync_pw2keytabs_fn != NULL) {
+		status = sync_pw2keytabs_fn(prefer_dc);
+		if (!NT_STATUS_IS_OK(status)) {
+			DBG_ERR("Sync of machine password failed.\n");
+			TALLOC_FREE(frame);
+			return status;
+		}
 	}
 
 	TALLOC_FREE(frame);

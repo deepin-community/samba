@@ -158,7 +158,7 @@ ctdb_control_reload_nodes_file(struct ctdb_context *ctdb, uint32_t opcode)
 	ctdb->num_nodes = 0;
 
 	/* load the new nodes file */
-	ctdb_load_nodes_file(ctdb);
+	ctdb_load_nodes(ctdb);
 
 	for (i=0; i<ctdb->num_nodes; i++) {
 		/* keep any identical pre-existing nodes and connections */
@@ -977,6 +977,8 @@ static void start_recovery_reclock_callback(struct ctdb_context *ctdb,
 		       local == NULL ? "NULL" : local));
 		talloc_free(state);
 		ctdb_shutdown_sequence(ctdb, 1);
+		/* In case above returns due to duplicate shutdown */
+		return;
 	}
 	DEBUG(DEBUG_INFO,
 	      ("Recovery lock consistency check successful\n"));

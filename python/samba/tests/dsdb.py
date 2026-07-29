@@ -946,7 +946,7 @@ class DsdbTests(TestCase):
         self.samdb.modify(msg)
 
         #
-        # Finally ry the non-linked attribute 'assistant'
+        # Finally try the non-linked attribute 'assistant'
         # but with non existing GUID, SID, DN
         #
         msg = ldb.Message()
@@ -1167,7 +1167,7 @@ class DsdbRemoteNCRootTests(DsdbNCRootTests):
 class DsdbFullScanTests(TestCase):
 
     def setUp(self):
-        super(DsdbFullScanTests, self).setUp()
+        super().setUp()
         self.lp = samba.tests.env_loadparm()
         self.creds = Credentials()
         self.creds.guess(self.lp)

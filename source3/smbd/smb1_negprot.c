@@ -53,7 +53,7 @@ static void get_challenge(struct smbXsrv_connection *xconn, uint8_t buff[8])
 	nt_status = make_auth4_context(
 		xconn, &xconn->smb1.negprot.auth_context);
 	if (!NT_STATUS_IS_OK(nt_status)) {
-		DEBUG(0, ("make_auth_context_subsystem returned %s",
+		DEBUG(0, ("make_auth_context_subsystem returned %s\n",
 			  nt_errstr(nt_status)));
 		smb_panic("cannot make_negprot_global_auth_context!");
 	}
@@ -480,7 +480,7 @@ void reply_negprot(struct smb_request *req)
 	int protocol;
 	const char *p;
 	int protocols = 0;
-	int num_cliprotos;
+	size_t num_cliprotos;
 	char **cliprotos;
 	size_t i;
 	size_t converted_size;
@@ -519,10 +519,10 @@ void reply_negprot(struct smb_request *req)
 
 	while (smbreq_bufrem(req, p) > 0) {
 
-		char **tmp;
-
-		tmp = talloc_realloc(talloc_tos(), cliprotos, char *,
-					   num_cliprotos+1);
+		char **tmp = talloc_realloc(talloc_tos(),
+					    cliprotos,
+					    char *,
+					    num_cliprotos + 1);
 		if (tmp == NULL) {
 			DEBUG(0, ("talloc failed\n"));
 			TALLOC_FREE(cliprotos);

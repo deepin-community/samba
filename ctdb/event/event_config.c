@@ -21,12 +21,13 @@
 
 #include <talloc.h>
 
-#include "common/conf.h"
-#include "common/logging_conf.h"
 #include "common/path.h"
 
+#include "conf/conf.h"
+#include "conf/logging_conf.h"
+#include "conf/event_conf.h"
+
 #include "event/event_private.h"
-#include "event/event_conf.h"
 
 struct event_config {
 	char *config_file;
@@ -84,7 +85,7 @@ int event_config_init(TALLOC_CTX *mem_ctx, struct event_config **result)
 		return EINVAL;
 	}
 
-	ret = conf_load(config->conf, config->config_file, true);
+	ret = conf_load(config->conf, config->config_file, true, true);
 	if (ret != 0 && ret != ENOENT) {
 		talloc_free(config);
 		return ret;

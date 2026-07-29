@@ -22,6 +22,7 @@
 */
 
 #include "includes.h"
+#include "auth/auth.h"
 #include "schannel_util.h"
 #include "param/param.h"
 #include "libcli/security/dom_sid.h"
@@ -34,6 +35,8 @@ struct dcesrv_netr_check_schannel_state {
 	struct dom_sid account_sid;
 	enum dcerpc_AuthType auth_type;
 	enum dcerpc_AuthLevel auth_level;
+
+	bool kerberos_required;
 
 	bool schannel_global_required;
 	bool schannel_required;
@@ -66,11 +69,30 @@ static NTSTATUS dcesrv_netr_check_schannel_get_state(struct dcesrv_call_state *d
 
 	*_s = NULL;
 
+	if (creds->authenticate_kerberos) {
+		struct auth_session_info *session_info =
+			dcesrv_call_session_info(dce_call);
+		const struct dom_sid *auth_sid =
+			&session_info->security_token->sids[0];
+
+		if (auth_type != DCERPC_AUTH_TYPE_KRB5) {
+			return NT_STATUS_ACCESS_DENIED;
+		}
+
+		if (auth_level != DCERPC_AUTH_LEVEL_PRIVACY) {
+			return NT_STATUS_ACCESS_DENIED;
+		}
+
+		if (!dom_sid_equal(auth_sid, &creds->client_sid)) {
+			return NT_STATUS_ACCESS_DENIED;
+		}
+	}
+
 	s = dcesrv_iface_state_find_conn(dce_call,
 			DCESRV_NETR_CHECK_SCHANNEL_STATE_MAGIC,
 			struct dcesrv_netr_check_schannel_state);
 	if (s != NULL) {
-		if (!dom_sid_equal(&s->account_sid, creds->sid)) {
+		if (!dom_sid_equal(&s->account_sid, &creds->client_sid)) {
 			goto new_state;
 		}
 		if (s->auth_type != auth_type) {
@@ -92,7 +114,7 @@ new_state:
 		return NT_STATUS_NO_MEMORY;
 	}
 
-	s->account_sid = *creds->sid;
+	s->account_sid = creds->client_sid;
 	s->auth_type = auth_type;
 	s->auth_level = auth_level;
 	s->result = NT_STATUS_MORE_PROCESSING_REQUIRED;
@@ -131,6 +153,11 @@ new_state:
 	s->seal_required = require_seal;
 	s->seal_explicitly_set = explicit_seal_opt != NULL;
 
+	if (creds->authenticate_kerberos) {
+		s->kerberos_required = true;
+		s->seal_required = true;
+	}
+
 	status = dcesrv_iface_state_store_conn(dce_call,
 			DCESRV_NETR_CHECK_SCHANNEL_STATE_MAGIC,
 			s);
@@ -165,7 +192,22 @@ static NTSTATUS dcesrv_netr_check_schannel_once(struct dcesrv_call_state *dce_ca
 		opname = ndr_table_netlogon.calls[opnum].name;
 	}
 
-	if (s->auth_type == DCERPC_AUTH_TYPE_SCHANNEL) {
+	if (s->auth_type == DCERPC_AUTH_TYPE_KRB5) {
+		if (s->auth_level == DCERPC_AUTH_LEVEL_PRIVACY) {
+			reason = "KRB5 WITH SEALED";
+		} else if (s->auth_level == DCERPC_AUTH_LEVEL_INTEGRITY) {
+			reason = "KRB5 ONLY WITH SIGNED";
+			dbg_lvl = DBGLVL_ERR;
+			s->result = NT_STATUS_ACCESS_DENIED;
+		} else {
+			reason = "KRB5 WITH INVALID";
+			dbg_lvl = DBGLVL_ERR;
+			s->result = NT_STATUS_ACCESS_DENIED;
+		}
+	} else if (s->kerberos_required) {
+		s->result = NT_STATUS_ACCESS_DENIED;
+		reason = "WITHOUT KRB5";
+	} else if (s->auth_type == DCERPC_AUTH_TYPE_SCHANNEL) {
 		if (s->auth_level == DCERPC_AUTH_LEVEL_PRIVACY) {
 			reason = "WITH SEALED";
 		} else if (s->auth_level == DCERPC_AUTH_LEVEL_INTEGRITY) {
@@ -192,6 +234,14 @@ static NTSTATUS dcesrv_netr_check_schannel_once(struct dcesrv_call_state *dce_ca
 		      log_escape(frame, creds->account_name),
 		      log_escape(frame, creds->computer_name),
 		      nt_errstr(s->result)));
+		TALLOC_FREE(frame);
+		return s->result;
+	}
+
+	if (s->auth_type == DCERPC_AUTH_TYPE_KRB5 &&
+	    s->auth_level == DCERPC_AUTH_LEVEL_PRIVACY)
+	{
+		s->result = NT_STATUS_OK;
 		TALLOC_FREE(frame);
 		return s->result;
 	}
@@ -529,6 +579,52 @@ NTSTATUS dcesrv_netr_check_schannel(struct dcesrv_call_state *dce_call,
 	return NT_STATUS_OK;
 }
 
+struct dcesrv_netr_step_access_state {
+	struct dcesrv_call_state *dce_call;
+	enum dcerpc_AuthType auth_type;
+	enum dcerpc_AuthLevel auth_level;
+	uint16_t opnum;
+	NTSTATUS status;
+};
+
+static NTSTATUS dcesrv_netr_step_access_cb(
+		struct netlogon_creds_CredentialState *creds,
+		NTSTATUS step_status,
+		bool *store,
+		void *access_check_private)
+{
+	struct dcesrv_netr_step_access_state *s =
+		(struct dcesrv_netr_step_access_state *)access_check_private;
+	struct dcesrv_call_state *dce_call =
+		talloc_get_type_abort(s->dce_call,
+		struct dcesrv_call_state);
+
+	if (NT_STATUS_EQUAL(step_status, NT_STATUS_ACCESS_DENIED)) {
+		s->status = step_status;
+		*store = true;
+		return NT_STATUS_OK;
+	}
+
+	if (!NT_STATUS_IS_OK(step_status)) {
+		*store = false;
+		return step_status;
+	}
+
+	s->status = dcesrv_netr_check_schannel(dce_call,
+					       creds,
+					       s->auth_type,
+					       s->auth_level,
+					       s->opnum);
+
+	if (!NT_STATUS_IS_OK(s->status)) {
+		*store = false;
+	} else {
+		*store = true;
+	}
+
+	return NT_STATUS_OK;
+}
+
 NTSTATUS dcesrv_netr_creds_server_step_check(struct dcesrv_call_state *dce_call,
 						    TALLOC_CTX *mem_ctx,
 						    const char *computer_name,
@@ -538,27 +634,32 @@ NTSTATUS dcesrv_netr_creds_server_step_check(struct dcesrv_call_state *dce_call,
 {
 	NTSTATUS nt_status;
 	struct netlogon_creds_CredentialState *creds = NULL;
-	enum dcerpc_AuthType auth_type = DCERPC_AUTH_TYPE_NONE;
-	enum dcerpc_AuthLevel auth_level = DCERPC_AUTH_LEVEL_NONE;
+	struct dcesrv_netr_step_access_state state = {
+		.dce_call = dce_call,
+		.auth_type = DCERPC_AUTH_TYPE_NONE,
+		.auth_level = DCERPC_AUTH_LEVEL_NONE,
+		.opnum = dce_call->pkt.u.request.opnum,
+		.status = NT_STATUS_INTERNAL_ERROR,
+	};
 
-	dcesrv_call_auth_info(dce_call, &auth_type, &auth_level);
+	dcesrv_call_auth_info(dce_call, &state.auth_type, &state.auth_level);
 
 	nt_status = schannel_check_creds_state(mem_ctx,
 					       dce_call->conn->dce_ctx->lp_ctx,
 					       computer_name,
 					       received_authenticator,
 					       return_authenticator,
+					       state.auth_type,
+					       state.auth_level,
+					       dcesrv_netr_step_access_cb,
+					       &state,
 					       &creds);
 	if (!NT_STATUS_IS_OK(nt_status)) {
 		ZERO_STRUCTP(return_authenticator);
 		return nt_status;
 	}
 
-	nt_status = dcesrv_netr_check_schannel(dce_call,
-					       creds,
-					       auth_type,
-					       auth_level,
-					       dce_call->pkt.u.request.opnum);
+	nt_status = state.status;
 	if (!NT_STATUS_IS_OK(nt_status)) {
 		TALLOC_FREE(creds);
 		ZERO_STRUCTP(return_authenticator);

@@ -1416,6 +1416,8 @@ NET_API_STATUS libnetapi_set_debuglevel(struct libnetapi_ctx *ctx,
 NET_API_STATUS libnetapi_set_creds(struct libnetapi_ctx *ctx,
 				   struct cli_credentials *creds);
 
+NET_API_STATUS libnetapi_get_creds(struct libnetapi_ctx *ctx,
+				   struct cli_credentials **creds);
 
 NET_API_STATUS libnetapi_set_username(struct libnetapi_ctx *ctx,
 				      const char *username);
@@ -2083,7 +2085,7 @@ NET_API_STATUS NetUserGetLocalGroups(const char * server_name /* [in] */,
  *
  * @param[in] server_name The server name to connect to
  * @param[in] level The enumeration level used for the query
- * @param[in] idx The index to start the the display enumeration at
+ * @param[in] idx The index to start the display enumeration at
  * @param[in] entries_requested The number of entries requested
  * @param[in] prefmaxlen The requested maximal buffer size
  * @param[out] entries_read The number of returned entries

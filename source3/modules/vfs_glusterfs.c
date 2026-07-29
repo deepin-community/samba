@@ -41,6 +41,7 @@
 #include <glusterfs/api/glfs.h>
 #include "lib/util/dlinklist.h"
 #include "lib/util/tevent_unix.h"
+#include "lib/util/util_file.h"
 #include "smbd/globals.h"
 #include "lib/util/sys_rw.h"
 #include "smbprofile.h"
@@ -593,14 +594,10 @@ static int vfs_gluster_statvfs(struct vfs_handle_struct *handle,
 static uint32_t vfs_gluster_fs_capabilities(struct vfs_handle_struct *handle,
 					    enum timestamp_set_resolution *p_ts_res)
 {
-	uint32_t caps = FILE_CASE_SENSITIVE_SEARCH | FILE_CASE_PRESERVED_NAMES;
+	uint32_t caps = vfs_get_fs_capabilities(handle->conn, p_ts_res);
 
 #ifdef HAVE_GFAPI_VER_6
 	caps |= FILE_SUPPORTS_SPARSE_FILES;
-#endif
-
-#ifdef STAT_HAVE_NSEC
-	*p_ts_res = TIMESTAMP_SET_NT_OR_BETTER;
 #endif
 
 	return caps;
@@ -1228,7 +1225,8 @@ static int vfs_gluster_renameat(struct vfs_handle_struct *handle,
 			files_struct *srcfsp,
 			const struct smb_filename *smb_fname_src,
 			files_struct *dstfsp,
-			const struct smb_filename *smb_fname_dst)
+			const struct smb_filename *smb_fname_dst,
+			const struct vfs_rename_how *how)
 {
 	int ret;
 
@@ -1237,6 +1235,12 @@ static int vfs_gluster_renameat(struct vfs_handle_struct *handle,
 	glfs_fd_t *dst_pglfd = NULL;
 
 	START_PROFILE(syscall_renameat);
+
+	if (how->flags != 0) {
+		END_PROFILE(syscall_renameat);
+		errno = EINVAL;
+		return -1;
+	}
 
 	src_pglfd = vfs_gluster_fetch_glfd(handle, srcfsp);
 	if (src_pglfd == NULL) {
@@ -1259,6 +1263,12 @@ static int vfs_gluster_renameat(struct vfs_handle_struct *handle,
 	struct smb_filename *full_fname_dst = NULL;
 
 	START_PROFILE(syscall_renameat);
+
+	if (how->flags != 0) {
+		END_PROFILE(syscall_renameat);
+		errno = EINVAL;
+		return -1;
+	}
 
 	full_fname_src = full_path_from_dirfsp_atname(talloc_tos(),
 						      srcfsp,

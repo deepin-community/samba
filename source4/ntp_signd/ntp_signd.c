@@ -31,6 +31,7 @@
 #include "libcli/util/tstream.h"
 #include "librpc/gen_ndr/ndr_ntp_signd.h"
 #include "param/param.h"
+#include "dsdb/common/util.h"
 #include "dsdb/samdb/samdb.h"
 #include "auth/auth.h"
 #include "libcli/security/security.h"
@@ -111,7 +112,17 @@ static NTSTATUS ntp_signd_process(struct ntp_signd_connection *ntp_signd_conn,
 	struct signed_reply signed_reply;
 	enum ndr_err_code ndr_err;
 	struct ldb_result *res;
-	const char *attrs[] = { "unicodePwd", "userAccountControl", "cn", NULL };
+	static const char *attrs[] = {
+		"unicodePwd",
+		"userAccountControl",
+		"cn",
+		/* Required for Group Managed Service Accounts. */
+		"msDS-ManagedPasswordId",
+		"msDS-ManagedPasswordInterval",
+		"objectClass",
+		"objectSid",
+		"whenCreated",
+		NULL};
 	gnutls_hash_hd_t hash_hnd = NULL;
 	struct samr_Password *nt_hash;
 	uint32_t user_account_control;
@@ -165,13 +176,14 @@ static NTSTATUS ntp_signd_process(struct ntp_signd_connection *ntp_signd_conn,
 				       sign_request.packet_id);
 	}
 
-	ret = ldb_search(ntp_signd_conn->ntp_signd->samdb, mem_ctx,
-				 &res,
-				 ldb_get_default_basedn(ntp_signd_conn->ntp_signd->samdb),
-				 LDB_SCOPE_SUBTREE,
-				 attrs,
-				 "(&(objectSid=%s)(objectClass=user))",
-				 ldap_encode_ndr_dom_sid(mem_ctx, sid));
+	ret = dsdb_search(ntp_signd_conn->ntp_signd->samdb, mem_ctx,
+			  &res,
+			  ldb_get_default_basedn(ntp_signd_conn->ntp_signd->samdb),
+			  LDB_SCOPE_SUBTREE,
+			  attrs,
+			  DSDB_SEARCH_UPDATE_MANAGED_PASSWORDS,
+			  "(&(objectSid=%s)(objectClass=user))",
+			  ldap_encode_ndr_dom_sid(mem_ctx, sid));
 	if (ret != LDB_SUCCESS) {
 		DEBUG(2, ("Failed to search for SID %s in SAM for NTP signing: "
 			  "%s\n",
@@ -398,13 +410,13 @@ static void ntp_signd_call_loop(struct tevent_req *subreq)
 
 	/*
 	 * The NTP tcp pdu's has the length as 4 byte (initial_read_size),
-	 * packet_full_request_u32 provides the pdu length then.
+	 * tstream_full_request_u32 provides the pdu length then.
 	 */
 	subreq = tstream_read_pdu_blob_send(ntp_signd_conn,
 					    ntp_signd_conn->conn->event.ctx,
 					    ntp_signd_conn->tstream,
 					    4, /* initial_read_size */
-					    packet_full_request_u32,
+					    tstream_full_request_u32,
 					    ntp_signd_conn);
 	if (subreq == NULL) {
 		ntp_signd_terminate_connection(ntp_signd_conn, "ntp_signd_call_loop: "
@@ -479,6 +491,8 @@ static void ntp_signd_accept(struct stream_connection *conn)
 				"ntp_signd_accept: out of memory");
 		return;
 	}
+	/* as server we want to fail early */
+	tstream_bsd_fail_readv_first_error(ntp_signd_conn->tstream, true);
 
 	ntp_signd_conn->conn = conn;
 	ntp_signd_conn->ntp_signd = ntp_signd;
@@ -486,13 +500,13 @@ static void ntp_signd_accept(struct stream_connection *conn)
 
 	/*
 	 * The NTP tcp pdu's has the length as 4 byte (initial_read_size),
-	 * packet_full_request_u32 provides the pdu length then.
+	 * tstream_full_request_u32 provides the pdu length then.
 	 */
 	subreq = tstream_read_pdu_blob_send(ntp_signd_conn,
 					    ntp_signd_conn->conn->event.ctx,
 					    ntp_signd_conn->tstream,
 					    4, /* initial_read_size */
-					    packet_full_request_u32,
+					    tstream_full_request_u32,
 					    ntp_signd_conn);
 	if (subreq == NULL) {
 		ntp_signd_terminate_connection(ntp_signd_conn,

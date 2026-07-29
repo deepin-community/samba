@@ -26,8 +26,10 @@
    */
 
 #include "includes.h"
+#include "lib/util/util_file.h"
 #include "smbd/smbd.h"
 #include "smbd/globals.h"
+#include "source3/smbd/smbXsrv_session.h"
 #include "rpc_client/rpc_client.h"
 #include "../librpc/gen_ndr/ndr_samr_c.h"
 #include "../librpc/gen_ndr/ndr_spoolss_c.h"
@@ -2324,7 +2326,7 @@ static bool api_RNetShareAdd(struct smbd_server_connection *sconn,
 	if (!pull_ascii_talloc(talloc_tos(), &pathname,
 			       offset ? (data+offset) : "", &converted_size))
 	{
-		DEBUG(0,("api_RNetShareAdd: pull_ascii_talloc failed: %s",
+		DEBUG(0,("api_RNetShareAdd: pull_ascii_talloc failed: %s\n",
 			 strerror(errno)));
 	}
 

@@ -39,6 +39,34 @@
 NTSTATUS server_service_cldapd_init(TALLOC_CTX *);
 
 /*
+  send an error reply (used on any error, so the client doesn't keep waiting
+  or send the bad request again)
+*/
+static NTSTATUS cldap_error_reply(struct cldap_socket *cldap,
+				  uint32_t message_id,
+				  struct tsocket_address *dest,
+				  int resultcode,
+				  const char *errormessage)
+{
+	NTSTATUS status;
+	struct cldap_reply reply;
+	struct ldap_Result result;
+
+	reply.messageid    = message_id;
+	reply.dest         = dest;
+	reply.response     = NULL;
+	reply.result       = &result;
+
+	ZERO_STRUCT(result);
+	result.resultcode	= resultcode;
+	result.errormessage	= errormessage;
+
+	status = cldap_reply_send(cldap, &reply);
+
+	return status;
+}
+
+/*
   handle incoming cldap requests
 */
 static void cldapd_request_handler(struct cldap_socket *cldap,
@@ -50,7 +78,7 @@ static void cldapd_request_handler(struct cldap_socket *cldap,
 	struct ldap_SearchRequest *search;
 
 	if (in->ldap_msg->type == LDAP_TAG_AbandonRequest) {
-		DEBUG(10,("Got (and ignoring) CLDAP AbandonRequest from %s.",
+		DEBUG(10,("Got (and ignoring) CLDAP AbandonRequest from %s.\n",
 			  tsocket_address_string(in->src, in)));
 		talloc_free(in);
 		return;
@@ -106,15 +134,12 @@ static NTSTATUS cldapd_add_socket(struct cldapd_server *cldapd, struct loadparm_
 	NTSTATUS status;
 	int ret;
 
-	ret = tsocket_address_inet_from_strings(cldapd,
-						"ip",
-						address,
-						lpcfg_cldap_port(lp_ctx),
-						&socket_address);
+	ret = tsocket_address_inet_from_strings(
+		cldapd, "ip", address, 389, &socket_address);
 	if (ret != 0) {
 		status = map_nt_error_from_unix_common(errno);
 		DEBUG(0,("invalid address %s:%d - %s:%s\n",
-			 address, lpcfg_cldap_port(lp_ctx),
+			 address, 389,
 			 gai_strerror(ret), nt_errstr(status)));
 		return status;
 	}

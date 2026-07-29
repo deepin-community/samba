@@ -1,0 +1,2 @@
+# libsamba-security-private is used by freeipa tests, #1099340:
+usr/lib/${DEB_HOST_MULTIARCH}/samba/libsamba-security-private-samba.so.0 usr/lib/${DEB_HOST_MULTIARCH}/samba/libsamba-security-private-samba.so

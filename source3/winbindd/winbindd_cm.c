@@ -88,6 +88,8 @@
 #include "lib/util/string_wrappers.h"
 #include "lib/global_contexts.h"
 #include "librpc/gen_ndr/ndr_winbind_c.h"
+#include "source3/libsmb/namequery.h"
+#include "source3/libsmb/dsgetdcname.h"
 
 #undef DBGC_CLASS
 #define DBGC_CLASS DBGC_WINBIND
@@ -320,7 +322,7 @@ void set_domain_online_request(struct winbindd_domain *domain)
  Add -ve connection cache entries for domain and realm.
 ****************************************************************/
 
-static void winbind_add_failed_connection_entry(
+void winbind_add_failed_connection_entry(
 	const struct winbindd_domain *domain,
 	const char *server,
 	NTSTATUS result)
@@ -334,6 +336,56 @@ static void winbind_add_failed_connection_entry(
 		saf_delete(domain->alt_name);
 	}
 	winbindd_unset_locator_kdc_env(domain);
+}
+
+void winbind_idmap_add_failed_connection_entry(const char *_domain_name)
+{
+	struct netr_DsRGetDCNameInfo *dcinfo = NULL;
+	const char *dc_unc = NULL;
+	const char *dc_address = NULL;
+	char *domain_name = NULL;
+	struct winbindd_domain *domain = NULL;
+	NTSTATUS failed_status = NT_STATUS_HOST_UNREACHABLE;
+	NTSTATUS status;
+
+	domain_name = talloc_strdup_upper(talloc_tos(), _domain_name);
+	if (domain_name == NULL) {
+		DBG_ERR("talloc_strdup_upper failed\n");
+		return;
+	}
+
+	status = wb_dsgetdcname_gencache_get(talloc_tos(), domain_name, &dcinfo);
+	if (!NT_STATUS_IS_OK(status)) {
+		DBG_DEBUG("Missing DC cache for domain '%s'\n", domain_name);
+		goto done;
+	}
+
+	dc_unc = dcinfo->dc_unc;
+	while (dc_unc[0] == '\\') {
+		dc_unc++;
+	}
+	dc_address = dcinfo->dc_address;
+	while (dc_address[0] == '\\') {
+		dc_address++;
+	}
+
+	add_failed_connection_entry(domain_name, dc_unc, failed_status);
+	add_failed_connection_entry(domain_name, dc_address, failed_status);
+
+	domain = find_domain_from_name_noinit(domain_name);
+	if (domain == NULL) {
+		goto done;
+	}
+	if (domain->alt_name == NULL) {
+		goto done;
+	}
+
+	add_failed_connection_entry(domain->alt_name, dc_unc, failed_status);
+	add_failed_connection_entry(domain->alt_name, dc_address, failed_status);
+
+done:
+	TALLOC_FREE(domain_name);
+	TALLOC_FREE(dcinfo);
 }
 
 /* Choose between anonymous or authenticated connections.  We need to use
@@ -475,142 +527,14 @@ static bool cm_is_ipc_credentials(struct cli_credentials *creds)
 	return ret;
 }
 
-static bool get_dc_name_via_netlogon(struct winbindd_domain *domain,
-				     fstring dcname,
-				     struct sockaddr_storage *dc_ss,
-				     uint32_t request_flags)
-{
-	struct winbindd_domain *our_domain = NULL;
-	struct rpc_pipe_client *netlogon_pipe = NULL;
-	NTSTATUS result;
-	WERROR werr;
-	TALLOC_CTX *mem_ctx;
-	unsigned int orig_timeout;
-	const char *tmp = NULL;
-	const char *p;
-	struct dcerpc_binding_handle *b;
-
-	/* Hmmmm. We can only open one connection to the NETLOGON pipe at the
-	 * moment.... */
-
-	if (IS_DC) {
-		return False;
-	}
-
-	if (domain->primary) {
-		return False;
-	}
-
-	our_domain = find_our_domain();
-
-	if ((mem_ctx = talloc_init("get_dc_name_via_netlogon")) == NULL) {
-		return False;
-	}
-
-	result = cm_connect_netlogon(our_domain, &netlogon_pipe);
-	if (!NT_STATUS_IS_OK(result)) {
-		talloc_destroy(mem_ctx);
-		return False;
-	}
-
-	b = netlogon_pipe->binding_handle;
-
-	/* This call can take a long time - allow the server to time out.
-	   35 seconds should do it. */
-
-	orig_timeout = rpccli_set_timeout(netlogon_pipe, 35000);
-
-	if (our_domain->active_directory) {
-		struct netr_DsRGetDCNameInfo *domain_info = NULL;
-
-		/*
-		 * TODO request flags are not respected in the server
-		 * (and in some cases, like REQUIRE_PDC, causes an error)
-		 */
-		result = dcerpc_netr_DsRGetDCName(b,
-						  mem_ctx,
-						  our_domain->dcname,
-						  domain->name,
-						  NULL,
-						  NULL,
-						  request_flags|DS_RETURN_DNS_NAME,
-						  &domain_info,
-						  &werr);
-		if (NT_STATUS_IS_OK(result) && W_ERROR_IS_OK(werr)) {
-			tmp = talloc_strdup(
-				mem_ctx, domain_info->dc_unc);
-			if (tmp == NULL) {
-				DEBUG(0, ("talloc_strdup failed\n"));
-				talloc_destroy(mem_ctx);
-				return false;
-			}
-			if (domain->alt_name == NULL) {
-				domain->alt_name = talloc_strdup(domain,
-								 domain_info->domain_name);
-				if (domain->alt_name == NULL) {
-					DEBUG(0, ("talloc_strdup failed\n"));
-					talloc_destroy(mem_ctx);
-					return false;
-				}
-			}
-			if (domain->forest_name == NULL) {
-				domain->forest_name = talloc_strdup(domain,
-								    domain_info->forest_name);
-				if (domain->forest_name == NULL) {
-					DEBUG(0, ("talloc_strdup failed\n"));
-					talloc_destroy(mem_ctx);
-					return false;
-				}
-			}
-		}
-	} else {
-		result = dcerpc_netr_GetAnyDCName(b, mem_ctx,
-						  our_domain->dcname,
-						  domain->name,
-						  &tmp,
-						  &werr);
-	}
-
-	/* And restore our original timeout. */
-	rpccli_set_timeout(netlogon_pipe, orig_timeout);
-
-	if (!NT_STATUS_IS_OK(result)) {
-		DEBUG(10,("dcerpc_netr_GetAnyDCName failed: %s\n",
-			nt_errstr(result)));
-		talloc_destroy(mem_ctx);
-		return false;
-	}
-
-	if (!W_ERROR_IS_OK(werr)) {
-		DEBUG(10,("dcerpc_netr_GetAnyDCName failed: %s\n",
-			   win_errstr(werr)));
-		talloc_destroy(mem_ctx);
-		return false;
-	}
-
-	/* dcerpc_netr_GetAnyDCName gives us a name with \\ */
-	p = strip_hostname(tmp);
-
-	fstrcpy(dcname, p);
-
-	talloc_destroy(mem_ctx);
-
-	DEBUG(10,("dcerpc_netr_GetAnyDCName returned %s\n", dcname));
-
-	if (!resolve_name(dcname, dc_ss, 0x20, true)) {
-		return False;
-	}
-
-	return True;
-}
-
 /**
  * Helper function to assemble trust password and account name
  */
-static NTSTATUS get_trust_credentials(struct winbindd_domain *domain,
-				      TALLOC_CTX *mem_ctx,
-				      bool netlogon,
-				      struct cli_credentials **_creds)
+NTSTATUS winbindd_get_trust_credentials(struct winbindd_domain *domain,
+					TALLOC_CTX *mem_ctx,
+					bool netlogon,
+					bool allow_ipc_fallback,
+					struct cli_credentials **_creds)
 {
 	const struct winbindd_domain *creds_domain = NULL;
 	struct cli_credentials *creds;
@@ -649,6 +573,12 @@ static NTSTATUS get_trust_credentials(struct winbindd_domain *domain,
 		goto ipc_fallback;
 	}
 
+	if (netlogon) {
+		cli_credentials_add_gensec_features(creds,
+						    GENSEC_FEATURE_NO_DELEGATION,
+						    CRED_SPECIFIED);
+	}
+
 	if (creds_domain != domain) {
 		/*
 		 * We can only use schannel against a direct trust
@@ -663,6 +593,10 @@ static NTSTATUS get_trust_credentials(struct winbindd_domain *domain,
  ipc_fallback:
 	if (netlogon) {
 		return NT_STATUS_CANT_ACCESS_DOMAIN_INFO;
+	}
+
+	if (!allow_ipc_fallback) {
+		return status;
 	}
 
 	status = cm_get_ipc_credentials(mem_ctx, &creds);
@@ -701,7 +635,7 @@ static NTSTATUS cm_prepare_connection(struct winbindd_domain *domain,
 
 	enum smb_signing_setting smb_sign_client_connections = lp_client_ipc_signing();
 
-	if (IS_AD_DC) {
+	if (IS_DC) {
 		if (domain->secure_channel_type == SEC_CHAN_NULL) {
 			/*
 			 * Make sure we don't even try to
@@ -782,9 +716,13 @@ static NTSTATUS cm_prepare_connection(struct winbindd_domain *domain,
 
 	set_socket_options(sockfd, lp_socket_options());
 
-	result = smbXcli_negprot((*cli)->conn, (*cli)->timeout,
+	result = smbXcli_negprot((*cli)->conn,
+				 (*cli)->timeout,
 				 lp_client_ipc_min_protocol(),
-				 lp_client_ipc_max_protocol());
+				 lp_client_ipc_max_protocol(),
+				 NULL,
+				 NULL,
+				 NULL);
 
 	if (!NT_STATUS_IS_OK(result)) {
 		DEBUG(1, ("cli_negprot failed: %s\n", nt_errstr(result)));
@@ -805,7 +743,7 @@ static NTSTATUS cm_prepare_connection(struct winbindd_domain *domain,
 		try_ipc_auth = true;
 	}
 
-	if (IS_AD_DC) {
+	if (IS_DC) {
 		/*
 		 * As AD DC we only use netlogon and lsa
 		 * using schannel over an anonymous transport
@@ -822,10 +760,16 @@ static NTSTATUS cm_prepare_connection(struct winbindd_domain *domain,
 	}
 
 	if (try_ipc_auth) {
-		result = get_trust_credentials(domain, talloc_tos(), false, &creds);
+		result = winbindd_get_trust_credentials(domain,
+							talloc_tos(),
+							false, /* netlogon */
+							true, /* ipc_fallback */
+							&creds);
 		if (!NT_STATUS_IS_OK(result)) {
-			DEBUG(1, ("get_trust_credentials(%s) failed: %s\n",
-				  domain->name, nt_errstr(result)));
+			DBG_WARNING("winbindd_get_trust_credentials(%s) "
+				    "failed: %s\n",
+				    domain->name,
+				    nt_errstr(result));
 			goto done;
 		}
 	} else {
@@ -1052,11 +996,14 @@ static bool add_one_dc_unique(TALLOC_CTX *mem_ctx, const char *domain_name,
 	}
 
 	/* Make sure there's no duplicates in the list */
-	for (i=0; i<*num; i++)
-		if (sockaddr_equal(
-			    (struct sockaddr *)(void *)&(*dcs)[i].ss,
-			    (struct sockaddr *)(void *)pss))
+	for (i=0; i<*num; i++) {
+		struct samba_sockaddr ss1 = { .u = { .ss = (*dcs)[i].ss, }};
+		struct samba_sockaddr ss2 = { .u = { .ss = *pss, }};
+
+		if (sockaddr_equal(&ss1.u.sa, &ss2.u.sa)) {
 			return False;
+		}
+	}
 
 	*dcs = talloc_realloc(mem_ctx, *dcs, struct dc_name_ip, (*num)+1);
 
@@ -1114,11 +1061,10 @@ static bool dcip_check_name_ads(const struct winbindd_domain *domain,
 		ads_status = ADS_ERROR_NT(NT_STATUS_NO_MEMORY);
 		goto out;
 	}
-	ads->auth.flags |= ADS_AUTH_NO_BIND;
-	ads->config.flags |= request_flags;
+	ads->config.required_flags |= request_flags;
 	ads->server.no_fallback = true;
 
-	ads_status = ads_connect(ads);
+	ads_status = ads_connect_cldap_only(ads);
 	if (!ADS_ERR_OK(ads_status)) {
 		goto out;
 	}
@@ -1131,9 +1077,9 @@ static bool dcip_check_name_ads(const struct winbindd_domain *domain,
 	}
 	namecache_store(name, 0x20, 1, sa);
 
-	DBG_DEBUG("CLDAP flags = 0x%"PRIx32"\n", ads->config.flags);
+	DBG_DEBUG("CLDAP flags = 0x%" PRIx32 "\n", ads->config.server_flags);
 
-	if (domain->primary && (ads->config.flags & NBT_SERVER_KDC)) {
+	if (domain->primary && (ads->config.server_flags & NBT_SERVER_KDC)) {
 		if (ads_closest_dc(ads)) {
 			char *sitename = sitename_fetch(tmp_ctx,
 							ads->config.realm);
@@ -1182,7 +1128,7 @@ out:
 
 static bool dcip_check_name(TALLOC_CTX *mem_ctx,
 			    const struct winbindd_domain *domain,
-			    struct sockaddr_storage *pss,
+			    const struct sockaddr_storage *pss,
 			    char **name, uint32_t request_flags)
 {
 	struct samba_sockaddr sa = {0};
@@ -1204,7 +1150,9 @@ static bool dcip_check_name(TALLOC_CTX *mem_ctx,
 
 	if ((lp_security() == SEC_ADS) && (domain->alt_name != NULL)) {
 		is_ad_domain = true;
-	} else if (lp_server_role() == ROLE_ACTIVE_DIRECTORY_DC) {
+	} else if (lp_server_role() == ROLE_ACTIVE_DIRECTORY_DC ||
+		   lp_server_role() == ROLE_IPA_DC)
+	{
 		is_ad_domain = domain->active_directory;
 	}
 
@@ -1279,23 +1227,7 @@ static bool get_dcs(TALLOC_CTX *mem_ctx, struct winbindd_domain *domain,
 	struct  samba_sockaddr *sa_list = NULL;
 	size_t     salist_size = 0;
 	size_t     i;
-	bool    is_our_domain;
 	enum security_types sec = (enum security_types)lp_security();
-
-	is_our_domain = strequal(domain->name, lp_workgroup());
-
-	/* If not our domain, get the preferred DC, by asking our primary DC */
-	if ( !is_our_domain
-		&& get_dc_name_via_netlogon(domain, dcname, &ss, request_flags)
-		&& add_one_dc_unique(mem_ctx, domain->name, dcname, &ss, dcs,
-		       num_dcs) )
-	{
-		char addr[INET6_ADDRSTRLEN];
-		print_sockaddr(addr, sizeof(addr), &ss);
-		DEBUG(10, ("Retrieved DC %s at %s via netlogon\n",
-			   dcname, addr));
-		return True;
-	}
 
 	if ((sec == SEC_ADS) && (domain->alt_name != NULL)) {
 		char *sitename = NULL;
@@ -1429,9 +1361,12 @@ static bool connect_preferred_dc(TALLOC_CTX *mem_ctx,
 	 * Check the negative connection cache before talking to it. It going
 	 * down may have triggered the reconnection.
 	 */
-	status = check_negative_conn_cache(domain->name, saf_servername);
-	if (!NT_STATUS_IS_OK(status)) {
-		saf_servername = NULL;
+	if (saf_servername != NULL) {
+		status = check_negative_conn_cache(domain->name,
+						   saf_servername);
+		if (!NT_STATUS_IS_OK(status)) {
+			saf_servername = NULL;
+		}
 	}
 
 	if (saf_servername != NULL) {
@@ -1477,10 +1412,13 @@ static bool connect_preferred_dc(TALLOC_CTX *mem_ctx,
 	}
 
 	status = smbsock_connect(&domain->dcaddr, 0,
-				 NULL, -1, NULL, -1,
+				 domain->dcname, -1, NULL, -1,
 				 fd, NULL, 10);
 	if (!NT_STATUS_IS_OK(status)) {
-		goto fail;
+		winbind_add_failed_connection_entry(domain,
+						    domain->dcname,
+						    NT_STATUS_UNSUCCESSFUL);
+		return false;
 	}
 	return true;
 
@@ -1636,18 +1574,13 @@ static char *current_dc_key(TALLOC_CTX *mem_ctx, const char *domain_name)
 
 static void store_current_dc_in_gencache(const char *domain_name,
 					 const char *dc_name,
-					 struct cli_state *cli)
+					 const struct sockaddr_storage *dc_addr)
 {
 	char addr[INET6_ADDRSTRLEN];
 	char *key = NULL;
 	char *value = NULL;
 
-	if (!cli_state_is_connected(cli)) {
-		return;
-	}
-
-	print_sockaddr(addr, sizeof(addr),
-		       smbXcli_conn_remote_sockaddr(cli->conn));
+	print_sockaddr(addr, sizeof(addr), dc_addr);
 
 	key = current_dc_key(talloc_tos(), domain_name);
 	if (key == NULL) {
@@ -1811,8 +1744,9 @@ static NTSTATUS cm_open_connection(struct winbindd_domain *domain,
 	 * once we start to connect to multiple DCs, wbcDcInfo is
 	 * already prepared for that.
 	 */
-	store_current_dc_in_gencache(domain->name, domain->dcname,
-				     new_conn->cli);
+	store_current_dc_in_gencache(domain->name,
+				     domain->dcname,
+				     &domain->dcaddr);
 
 	seal_pipes = lp_winbind_sealed_pipes();
 	seal_pipes = lp_parm_bool(-1, "winbind sealed pipes",
@@ -2132,16 +2066,6 @@ static bool set_dc_type_and_flags_trustinfo( struct winbindd_domain *domain )
 			if ( domain->domain_type == LSA_TRUST_TYPE_UPLEVEL )
 				domain->active_directory = True;
 
-			/* This flag is only set if the domain is *our*
-			   primary domain and the primary domain is in
-			   native mode */
-
-			domain->native_mode = (domain->domain_flags & NETR_TRUST_FLAG_NATIVE);
-
-			DEBUG(5, ("set_dc_type_and_flags_trustinfo: domain %s is %sin "
-				  "native mode.\n", domain->name,
-				  domain->native_mode ? "" : "NOT "));
-
 			DEBUG(5,("set_dc_type_and_flags_trustinfo: domain %s is %s"
 				 "running active directory.\n", domain->name,
 				 domain->active_directory ? "" : "NOT "));
@@ -2170,12 +2094,17 @@ static bool set_dc_type_and_flags_trustinfo( struct winbindd_domain *domain )
 static void set_dc_type_and_flags_connect( struct winbindd_domain *domain )
 {
 	NTSTATUS status, result;
-	WERROR werr;
+	NTSTATUS close_status = NT_STATUS_UNSUCCESSFUL;
 	TALLOC_CTX              *mem_ctx = NULL;
 	struct rpc_pipe_client  *cli = NULL;
-	struct policy_handle pol;
-	union dssetup_DsRoleInfo info;
+	struct policy_handle pol = { .handle_type = 0 };
 	union lsa_PolicyInformation *lsa_info = NULL;
+	union lsa_revision_info out_revision_info = {
+		.info1 = {
+			.revision = 0,
+		},
+	};
+	uint32_t out_version = 0;
 
 	if (!domain->internal && !connection_ok(domain)) {
 		return;
@@ -2190,63 +2119,6 @@ static void set_dc_type_and_flags_connect( struct winbindd_domain *domain )
 
 	DEBUG(5, ("set_dc_type_and_flags_connect: domain %s\n", domain->name ));
 
-	if (domain->internal) {
-		status = wb_open_internal_pipe(mem_ctx,
-					       &ndr_table_dssetup,
-					       &cli);
-	} else {
-		status = cli_rpc_pipe_open_noauth(domain->conn.cli,
-						  &ndr_table_dssetup,
-						  &cli);
-	}
-
-	if (!NT_STATUS_IS_OK(status)) {
-		DEBUG(5, ("set_dc_type_and_flags_connect: Could not bind to "
-			  "PI_DSSETUP on domain %s: (%s)\n",
-			  domain->name, nt_errstr(status)));
-
-		/* if this is just a non-AD domain we need to continue
-		 * identifying so that we can in the end return with
-		 * domain->initialized = True - gd */
-
-		goto no_dssetup;
-	}
-
-	status = dcerpc_dssetup_DsRoleGetPrimaryDomainInformation(cli->binding_handle, mem_ctx,
-								  DS_ROLE_BASIC_INFORMATION,
-								  &info,
-								  &werr);
-	TALLOC_FREE(cli);
-
-	if (NT_STATUS_IS_OK(status)) {
-		result = werror_to_ntstatus(werr);
-	}
-	if (!NT_STATUS_IS_OK(status)) {
-		DEBUG(5, ("set_dc_type_and_flags_connect: rpccli_ds_getprimarydominfo "
-			  "on domain %s failed: (%s)\n",
-			  domain->name, nt_errstr(status)));
-
-		/* older samba3 DCs will return DCERPC_FAULT_OP_RNG_ERROR for
-		 * every opcode on the DSSETUP pipe, continue with
-		 * no_dssetup mode here as well to get domain->initialized
-		 * set - gd */
-
-		if (NT_STATUS_EQUAL(status, NT_STATUS_RPC_PROCNUM_OUT_OF_RANGE)) {
-			goto no_dssetup;
-		}
-
-		TALLOC_FREE(mem_ctx);
-		return;
-	}
-
-	if ((info.basic.flags & DS_ROLE_PRIMARY_DS_RUNNING) &&
-	    !(info.basic.flags & DS_ROLE_PRIMARY_DS_MIXED_MODE)) {
-		domain->native_mode = True;
-	} else {
-		domain->native_mode = False;
-	}
-
-no_dssetup:
 	if (domain->internal) {
 		status = wb_open_internal_pipe(mem_ctx,
 					       &ndr_table_lsarpc,
@@ -2264,10 +2136,17 @@ no_dssetup:
 		return;
 	}
 
-	status = rpccli_lsa_open_policy2(cli, mem_ctx, True,
-					 SEC_FLAG_MAXIMUM_ALLOWED, &pol);
+	status = dcerpc_lsa_open_policy_fallback(cli,
+						 mem_ctx,
+						 cli->srv_name_slash,
+						 true,
+						 SEC_FLAG_MAXIMUM_ALLOWED,
+						 &out_version,
+						 &out_revision_info,
+						 &pol,
+						 &result);
 
-	if (NT_STATUS_IS_OK(status)) {
+	if (NT_STATUS_IS_OK(status) && NT_STATUS_IS_OK(result)) {
 		/* This particular query is exactly what Win2k clients use
 		   to determine that the DC is active directory */
 		status = dcerpc_lsa_QueryInfoPolicy2(cli->binding_handle, mem_ctx,
@@ -2277,6 +2156,10 @@ no_dssetup:
 						     &result);
 	}
 
+	/*
+	 * If the status and result will not be OK we will fallback to
+	 * OpenPolicy.
+	 */
 	if (NT_STATUS_IS_OK(status) && NT_STATUS_IS_OK(result)) {
 		domain->active_directory = True;
 
@@ -2427,9 +2310,12 @@ no_dssetup:
 		}
 	}
 done:
-
-	DEBUG(5, ("set_dc_type_and_flags_connect: domain %s is %sin native mode.\n",
-		  domain->name, domain->native_mode ? "" : "NOT "));
+	if (is_valid_policy_hnd(&pol)) {
+		dcerpc_lsa_Close(cli->binding_handle,
+				 mem_ctx,
+				 &pol,
+				 &close_status);
+	}
 
 	DEBUG(5,("set_dc_type_and_flags_connect: domain %s is %srunning active directory.\n",
 		  domain->name, domain->active_directory ? "" : "NOT "));
@@ -2459,11 +2345,18 @@ static void set_dc_type_and_flags( struct winbindd_domain *domain )
 	}
 
 	/* we always have to contact our primary domain */
-
-	if ( domain->primary || domain->internal) {
-		DEBUG(10,("set_dc_type_and_flags: setting up flags for "
-			  "primary or internal domain\n"));
-		set_dc_type_and_flags_connect( domain );
+	if (domain->primary || domain->internal) {
+		/*
+		 * primary and internal domains are
+		 * are already completely
+		 * setup via init_domain_list()
+		 * calling add_trusted_domain()
+		 *
+		 * There's no need to ask the
+		 * server again, if it hosts an AD
+		 * domain...
+		 */
+		domain->initialized = true;
 		return;
 	}
 
@@ -2505,6 +2398,80 @@ static NTSTATUS cm_get_schannel_creds(struct winbindd_domain *domain,
 		return result;
 	}
 
+	return NT_STATUS_OK;
+}
+
+static NTSTATUS cm_connect_schannel_or_krb5(struct cli_state *cli,
+					    const struct ndr_interface_table *table,
+					    enum dcerpc_transport_t transport,
+				            struct cli_credentials *cli_creds,
+					    struct netlogon_creds_cli_context *netlogon_creds,
+					    const char *remote_name,
+					    const struct sockaddr_storage *remote_sockaddr,
+					    struct rpc_pipe_client **_rpccli)
+{
+	TALLOC_CTX *frame = talloc_stackframe();
+	enum netr_SchannelType sec_chan_type;
+	struct netlogon_creds_CredentialState *creds = NULL;
+	bool authenticate_kerberos;
+	NTSTATUS status;
+
+	if (cli_credentials_is_anonymous(cli_creds)) {
+		DBG_WARNING("anonymous credentials "
+			    "unable to make secure connection to %s\n",
+			    remote_name);
+		TALLOC_FREE(frame);
+		return NT_STATUS_CANT_ACCESS_DOMAIN_INFO;
+	}
+
+	sec_chan_type = cli_credentials_get_secure_channel_type(cli_creds);
+	if (sec_chan_type == SEC_CHAN_NULL) {
+		DBG_WARNING("SEC_CHAN_NULL credentials "
+			    "unable to make secure connection to %s\n",
+			    remote_name);
+		TALLOC_FREE(frame);
+		return NT_STATUS_CANT_ACCESS_DOMAIN_INFO;
+	}
+
+	status = netlogon_creds_cli_get(netlogon_creds, frame, &creds);
+	if (!NT_STATUS_IS_OK(status)) {
+		TALLOC_FREE(frame);
+		return status;
+	}
+	authenticate_kerberos = creds->authenticate_kerberos;
+	TALLOC_FREE(creds);
+
+	if (authenticate_kerberos) {
+		status = cli_rpc_pipe_open_with_creds(cli,
+						      table,
+						      transport,
+						      DCERPC_AUTH_TYPE_KRB5,
+						      DCERPC_AUTH_LEVEL_PRIVACY,
+						      "netlogon",
+						      remote_name,
+						      remote_sockaddr,
+						      cli_creds,
+						      _rpccli);
+		if (!NT_STATUS_IS_OK(status)) {
+			TALLOC_FREE(frame);
+			return status;
+		}
+		TALLOC_FREE(frame);
+		return NT_STATUS_OK;
+	}
+
+	status = cli_rpc_pipe_open_schannel_with_creds(cli,
+						       table,
+						       transport,
+						       netlogon_creds,
+						       remote_name,
+						       remote_sockaddr,
+						       _rpccli);
+	if (!NT_STATUS_IS_OK(status)) {
+		TALLOC_FREE(frame);
+		return status;
+	}
+	TALLOC_FREE(frame);
 	return NT_STATUS_OK;
 }
 
@@ -2563,7 +2530,11 @@ retry:
 	 * anonymous.
 	 */
 
-	result = get_trust_credentials(domain, talloc_tos(), false, &creds);
+	result = winbindd_get_trust_credentials(domain,
+						talloc_tos(),
+						false, /* netlogon */
+						true, /* ipc_fallback */
+						&creds);
 	if (!NT_STATUS_IS_OK(result)) {
 		DEBUG(10, ("cm_connect_sam: No user available for "
 			   "domain %s, trying schannel\n", domain->name));
@@ -2586,6 +2557,7 @@ retry:
 					      NCACN_NP,
 					      DCERPC_AUTH_TYPE_SPNEGO,
 					      conn->auth_level,
+					      NULL, /* target_service */
 					      remote_name,
 					      remote_sockaddr,
 					      creds,
@@ -2652,8 +2624,21 @@ retry:
 		goto anonymous;
 	}
 	TALLOC_FREE(creds);
-	status = cli_rpc_pipe_open_schannel_with_creds(
-		conn->cli, &ndr_table_samr, NCACN_NP, p_creds,
+	result = winbindd_get_trust_credentials(domain,
+						talloc_tos(),
+						true, /* netlogon */
+						false, /* ipc_fallback */
+						&creds);
+	if (!NT_STATUS_IS_OK(result)) {
+		goto done;
+	}
+
+	status = cm_connect_schannel_or_krb5(
+		conn->cli,
+		&ndr_table_samr,
+		NCACN_NP,
+		creds,
+		p_creds,
 		remote_name,
 		remote_sockaddr,
 		&conn->samr_pipe);
@@ -2806,6 +2791,7 @@ static NTSTATUS cm_connect_lsa_tcp(struct winbindd_domain *domain,
 				   struct rpc_pipe_client **cli)
 {
 	struct winbindd_cm_conn *conn;
+	struct cli_credentials *cli_creds = NULL;
 	struct netlogon_creds_cli_context *p_creds = NULL;
 	NTSTATUS status;
 	const char *remote_name = NULL;
@@ -2823,9 +2809,7 @@ static NTSTATUS cm_connect_lsa_tcp(struct winbindd_domain *domain,
 	/*
 	 * rpccli_is_connected handles more error cases
 	 */
-	if (rpccli_is_connected(conn->lsa_pipe_tcp) &&
-	    conn->lsa_pipe_tcp->transport->transport == NCACN_IP_TCP &&
-	    conn->lsa_pipe_tcp->auth->auth_level >= DCERPC_AUTH_LEVEL_INTEGRITY) {
+	if (rpccli_is_connected(conn->lsa_pipe_tcp)) {
 		goto done;
 	}
 
@@ -2839,10 +2823,20 @@ static NTSTATUS cm_connect_lsa_tcp(struct winbindd_domain *domain,
 	remote_name = smbXcli_conn_remote_name(conn->cli->conn);
 	remote_sockaddr = smbXcli_conn_remote_sockaddr(conn->cli->conn);
 
-	status = cli_rpc_pipe_open_schannel_with_creds(
+	status = winbindd_get_trust_credentials(domain,
+						talloc_tos(),
+						true, /* netlogon */
+						false, /* ipc_fallback */
+						&cli_creds);
+	if (!NT_STATUS_IS_OK(status)) {
+		goto done;
+	}
+
+	status = cm_connect_schannel_or_krb5(
 			conn->cli,
 			&ndr_table_lsarpc,
 			NCACN_IP_TCP,
+			cli_creds,
 			p_creds,
 			remote_name,
 			remote_sockaddr,
@@ -2876,6 +2870,7 @@ NTSTATUS cm_connect_lsa(struct winbindd_domain *domain, TALLOC_CTX *mem_ctx,
 	const struct sockaddr_storage *remote_sockaddr = NULL;
 	bool sealed_pipes = true;
 	bool strong_key = true;
+	bool require_schannel = false;
 
 retry:
 	result = init_dc_connection_rpc(domain, false);
@@ -2890,14 +2885,22 @@ retry:
 
 	TALLOC_FREE(conn->lsa_pipe);
 
-	if (IS_AD_DC) {
+	if (IS_DC ||
+	    domain->secure_channel_type != SEC_CHAN_NULL)
+	{
 		/*
-		 * Make sure we only use schannel as AD DC.
+		 * Make sure we only use schannel as DC
+		 * or with a direct trust
 		 */
+		require_schannel = true;
 		goto schannel;
 	}
 
-	result = get_trust_credentials(domain, talloc_tos(), false, &creds);
+	result = winbindd_get_trust_credentials(domain,
+						talloc_tos(),
+						false, /* netlogon */
+						true, /* ipc_fallback */
+						&creds);
 	if (!NT_STATUS_IS_OK(result)) {
 		DEBUG(10, ("cm_connect_lsa: No user available for "
 			   "domain %s, trying schannel\n", domain->name));
@@ -2919,6 +2922,7 @@ retry:
 		(conn->cli, &ndr_table_lsarpc, NCACN_NP,
 		 DCERPC_AUTH_TYPE_SPNEGO,
 		 conn->auth_level,
+		 NULL, /* target_service */
 		 remote_name,
 		 remote_sockaddr,
 		 creds,
@@ -2979,8 +2983,21 @@ retry:
 	}
 
 	TALLOC_FREE(creds);
-	result = cli_rpc_pipe_open_schannel_with_creds(
-		conn->cli, &ndr_table_lsarpc, NCACN_NP, p_creds,
+	result = winbindd_get_trust_credentials(domain,
+						talloc_tos(),
+						true, /* netlogon */
+						false, /* ipc_fallback */
+						&creds);
+	if (!NT_STATUS_IS_OK(result)) {
+		goto done;
+	}
+
+	result = cm_connect_schannel_or_krb5(
+		conn->cli,
+		&ndr_table_lsarpc,
+		NCACN_NP,
+		creds,
+		p_creds,
 		remote_name,
 		remote_sockaddr,
 		&conn->lsa_pipe);
@@ -3016,9 +3033,10 @@ retry:
 		goto done;
 	}
 
-	if (IS_AD_DC) {
+	if (require_schannel) {
 		/*
-		 * Make sure we only use schannel as AD DC.
+		 * Make sure we only use schannel as DC
+		 * or with a direct trust
 		 */
 		goto done;
 	}
@@ -3030,9 +3048,10 @@ retry:
 
  anonymous:
 
-	if (IS_AD_DC) {
+	if (require_schannel) {
 		/*
-		 * Make sure we only use schannel as AD DC.
+		 * Make sure we only use schannel as DC
+		 * or with a direct trust
 		 */
 		goto done;
 	}
@@ -3146,10 +3165,12 @@ static NTSTATUS cm_connect_netlogon_transport(struct winbindd_domain *domain,
 	NTSTATUS result;
 	enum netr_SchannelType sec_chan_type;
 	struct cli_credentials *creds = NULL;
+	const char *remote_name = NULL;
+	const struct sockaddr_storage *remote_sockaddr = NULL;
 
 	*cli = NULL;
 
-	if (IS_AD_DC) {
+	if (IS_DC) {
 		if (domain->secure_channel_type == SEC_CHAN_NULL) {
 			/*
 			 * Make sure we don't even try to
@@ -3175,7 +3196,14 @@ static NTSTATUS cm_connect_netlogon_transport(struct winbindd_domain *domain,
 	TALLOC_FREE(conn->netlogon_pipe);
 	TALLOC_FREE(conn->netlogon_creds_ctx);
 
-	result = get_trust_credentials(domain, talloc_tos(), true, &creds);
+	remote_name = smbXcli_conn_remote_name(conn->cli->conn);
+	remote_sockaddr = smbXcli_conn_remote_sockaddr(conn->cli->conn);
+
+	result = winbindd_get_trust_credentials(domain,
+						talloc_tos(),
+						true, /* netlogon */
+						false, /* ipc_fallback */
+						&creds);
 	if (!NT_STATUS_IS_OK(result)) {
 		DBG_DEBUG("No user available for domain %s when trying "
 			  "schannel\n", domain->name);
@@ -3191,11 +3219,6 @@ static NTSTATUS cm_connect_netlogon_transport(struct winbindd_domain *domain,
 
 	sec_chan_type = cli_credentials_get_secure_channel_type(creds);
 	if (sec_chan_type == SEC_CHAN_NULL) {
-		const char *remote_name =
-			smbXcli_conn_remote_name(conn->cli->conn);
-		const struct sockaddr_storage *remote_sockaddr =
-			smbXcli_conn_remote_sockaddr(conn->cli->conn);
-
 		if (transport == NCACN_IP_TCP) {
 			DBG_NOTICE("get_secure_channel_type gave SEC_CHAN_NULL "
 				   "for %s, deny NCACN_IP_TCP and let the "
@@ -3236,10 +3259,13 @@ static NTSTATUS cm_connect_netlogon_transport(struct winbindd_domain *domain,
 		return result;
 	}
 
-	result = rpccli_connect_netlogon(
-		conn->cli, transport,
-		conn->netlogon_creds_ctx, conn->netlogon_force_reauth, creds,
-		&conn->netlogon_pipe);
+	result = rpccli_connect_netlogon(conn->cli,
+					 transport,
+					 remote_name,
+					 remote_sockaddr,
+					 conn->netlogon_creds_ctx,
+					 conn->netlogon_force_reauth, creds,
+					 &conn->netlogon_pipe);
 	conn->netlogon_force_reauth = false;
 	if (!NT_STATUS_IS_OK(result)) {
 		DBG_DEBUG("rpccli_connect_netlogon failed: %s\n",
@@ -3353,7 +3379,7 @@ void winbind_msg_ip_dropped(struct messaging_context *msg_ctx,
 		 */
 		slash = strchr(addr, '/');
 		if (slash == NULL) {
-			DEBUG(1, ("invalid msg_ip_dropped message: %s",
+			DEBUG(1, ("invalid msg_ip_dropped message: %s\n",
 				  addr));
 			return;
 		}

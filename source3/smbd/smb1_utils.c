@@ -41,6 +41,7 @@ struct files_struct *fcb_or_dos_open(
 	struct connection_struct *conn = req->conn;
 	struct file_id id = vfs_file_id_from_sbuf(conn, &smb_fname->st);
 	struct files_struct *fsp = NULL, *new_fsp = NULL;
+	size_t new_refcount;
 	NTSTATUS status;
 
 	if ((private_flags &
@@ -97,10 +98,35 @@ struct files_struct *fcb_or_dos_open(
 		return NULL;
 	}
 
-	status = dup_file_fsp(fsp, access_mask, new_fsp);
+	/*
+	 * Share the fsp->fh between old and new
+	 */
+	TALLOC_FREE(new_fsp->fh);
+	new_fsp->fh = fsp->fh;
+	new_refcount = fh_get_refcount(new_fsp->fh) + 1;
+	fh_set_refcount(new_fsp->fh, new_refcount);
+
+	new_fsp->file_id = fsp->file_id;
+	new_fsp->initial_allocation_size = fsp->initial_allocation_size;
+	new_fsp->file_pid = fsp->file_pid;
+	new_fsp->vuid = fsp->vuid;
+	new_fsp->open_time = fsp->open_time;
+	new_fsp->access_mask = access_mask;
+	new_fsp->oplock_type = fsp->oplock_type;
+	new_fsp->fsp_flags = fsp->fsp_flags;
+	new_fsp->fsp_flags.can_read = ((access_mask & FILE_READ_DATA) != 0);
+	new_fsp->fsp_flags.can_write = CAN_WRITE(fsp->conn) &&
+				       ((access_mask & (FILE_WRITE_DATA |
+							FILE_APPEND_DATA)) !=
+					0);
+	if (fsp->fsp_name->twrp != 0) {
+		new_fsp->fsp_flags.can_write = false;
+	}
+
+	status = fsp_set_smb_fname(new_fsp, fsp->fsp_name);
 
 	if (!NT_STATUS_IS_OK(status)) {
-		DBG_DEBUG("dup_file_fsp failed: %s\n", nt_errstr(status));
+		DBG_DEBUG("fsp_set_smb_fname failed: %s\n", nt_errstr(status));
 		file_free(req, new_fsp);
 		return NULL;
 	}
@@ -175,4 +201,87 @@ ssize_t message_push_string(uint8_t **outbuf, const char *str, int flags)
 	*outbuf = tmp;
 
 	return result;
+}
+
+/*
+ * Deal with the SMB1 semantics of sending a pathname with a
+ * wildcard as the terminal component for a SMB1search or
+ * trans2 findfirst.
+ */
+
+NTSTATUS filename_convert_smb1_search_path(TALLOC_CTX *ctx,
+					   connection_struct *conn,
+					   char *name_in,
+					   uint32_t ucf_flags,
+					   struct files_struct **_dirfsp,
+					   struct smb_filename **_smb_fname_out,
+					   char **_mask_out)
+{
+	NTSTATUS status;
+	char *p = NULL;
+	char *mask = NULL;
+	struct smb_filename *smb_fname = NULL;
+	NTTIME twrp = 0;
+
+	*_smb_fname_out = NULL;
+	*_dirfsp = NULL;
+	*_mask_out = NULL;
+
+	DBG_DEBUG("name_in: %s\n", name_in);
+
+	if (ucf_flags & UCF_GMT_PATHNAME) {
+		extract_snapshot_token(name_in, &twrp);
+		ucf_flags &= ~UCF_GMT_PATHNAME;
+	}
+
+	/* Get the original lcomp. */
+	mask = get_original_lcomp(ctx, conn, name_in, ucf_flags);
+	if (mask == NULL) {
+		return NT_STATUS_NO_MEMORY;
+	}
+
+	if (mask[0] == '\0') {
+		/* Windows and OS/2 systems treat search on the root as * */
+		TALLOC_FREE(mask);
+		mask = talloc_strdup(ctx, "*");
+		if (mask == NULL) {
+			return NT_STATUS_NO_MEMORY;
+		}
+	}
+
+	DBG_DEBUG("mask = %s\n", mask);
+
+	/*
+	 * Remove the terminal component so
+	 * filename_convert_dirfsp never sees the mask.
+	 */
+	p = strrchr_m(name_in, '/');
+	if (p == NULL) {
+		/* filename_convert_dirfsp handles a '\0' name. */
+		name_in[0] = '\0';
+	} else {
+		*p = '\0';
+	}
+
+	DBG_DEBUG("For filename_convert_dirfsp: name_in = %s\n", name_in);
+
+	/* Convert the parent directory path. */
+	status = filename_convert_dirfsp(ctx,
+					 conn,
+					 name_in,
+					 ucf_flags,
+					 twrp,
+					 _dirfsp,
+					 &smb_fname);
+
+	if (!NT_STATUS_IS_OK(status)) {
+		DBG_DEBUG("filename_convert error for %s: %s\n",
+			  name_in,
+			  nt_errstr(status));
+	}
+
+	*_smb_fname_out = talloc_move(ctx, &smb_fname);
+	*_mask_out = talloc_move(ctx, &mask);
+
+	return status;
 }

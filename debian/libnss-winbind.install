@@ -1,2 +1,2 @@
-lib/*/libnss_winbind.so.2
-lib/*/libnss_wins.so.2
+lib/${DEB_HOST_MULTIARCH}/libnss_winbind.so.2
+lib/${DEB_HOST_MULTIARCH}/libnss_wins.so.2

@@ -3984,137 +3984,6 @@ done:
 	return ret;
 }
 
-/* Renaming a directory with open file, should work for OS X AAPL clients */
-static bool test_rename_dir_openfile(struct torture_context *torture,
-				     struct smb2_tree *tree)
-{
-	bool ret = true;
-	NTSTATUS status;
-	union smb_open io;
-	union smb_close cl;
-	union smb_setfileinfo sinfo;
-	struct smb2_handle d1, h1;
-	const char *renamedir = BASEDIR "-new";
-	bool server_is_osx = torture_setting_bool(torture, "osx", false);
-
-	smb2_deltree(tree, BASEDIR);
-	smb2_util_rmdir(tree, BASEDIR);
-	smb2_deltree(tree, renamedir);
-
-	ZERO_STRUCT(io.smb2);
-	io.generic.level = RAW_OPEN_SMB2;
-	io.smb2.in.create_flags = 0;
-	io.smb2.in.desired_access = 0x0017019f;
-	io.smb2.in.create_options = NTCREATEX_OPTIONS_DIRECTORY;
-	io.smb2.in.file_attributes = FILE_ATTRIBUTE_DIRECTORY;
-	io.smb2.in.share_access = 0;
-	io.smb2.in.alloc_size = 0;
-	io.smb2.in.create_disposition = NTCREATEX_DISP_CREATE;
-	io.smb2.in.impersonation_level = SMB2_IMPERSONATION_ANONYMOUS;
-	io.smb2.in.security_flags = 0;
-	io.smb2.in.fname = BASEDIR;
-
-	status = smb2_create(tree, torture, &(io.smb2));
-	torture_assert_ntstatus_ok(torture, status, "smb2_create dir");
-	d1 = io.smb2.out.file.handle;
-
-	ZERO_STRUCT(io.smb2);
-	io.generic.level = RAW_OPEN_SMB2;
-	io.smb2.in.create_flags = 0;
-	io.smb2.in.desired_access = 0x0017019f;
-	io.smb2.in.create_options = NTCREATEX_OPTIONS_NON_DIRECTORY_FILE;
-	io.smb2.in.file_attributes = FILE_ATTRIBUTE_NORMAL;
-	io.smb2.in.share_access = 0;
-	io.smb2.in.alloc_size = 0;
-	io.smb2.in.create_disposition = NTCREATEX_DISP_CREATE;
-	io.smb2.in.impersonation_level = SMB2_IMPERSONATION_ANONYMOUS;
-	io.smb2.in.security_flags = 0;
-	io.smb2.in.fname = BASEDIR "\\file.txt";
-
-	status = smb2_create(tree, torture, &(io.smb2));
-	torture_assert_ntstatus_ok(torture, status, "smb2_create file");
-	h1 = io.smb2.out.file.handle;
-
-	if (!server_is_osx) {
-		torture_comment(torture, "Renaming directory without AAPL, must fail\n");
-
-		ZERO_STRUCT(sinfo);
-		sinfo.rename_information.level = RAW_SFILEINFO_RENAME_INFORMATION;
-		sinfo.rename_information.in.file.handle = d1;
-		sinfo.rename_information.in.overwrite = 0;
-		sinfo.rename_information.in.root_fid = 0;
-		sinfo.rename_information.in.new_name = renamedir;
-		status = smb2_setinfo_file(tree, &sinfo);
-
-		torture_assert_ntstatus_equal(torture, status,
-					      NT_STATUS_ACCESS_DENIED,
-					      "smb2_setinfo_file");
-	}
-
-	status = smb2_util_close(tree, d1);
-	torture_assert_ntstatus_ok(torture, status, "smb2_util_close\n");
-	ZERO_STRUCT(d1);
-
-	torture_comment(torture, "Enabling AAPL\n");
-
-	ret = enable_aapl(torture, tree);
-	torture_assert(torture, ret == true, "enable_aapl failed");
-
-	torture_comment(torture, "Renaming directory with AAPL\n");
-
-	ZERO_STRUCT(io.smb2);
-	io.generic.level = RAW_OPEN_SMB2;
-	io.smb2.in.desired_access = 0x0017019f;
-	io.smb2.in.file_attributes = FILE_ATTRIBUTE_DIRECTORY;
-	io.smb2.in.share_access = 0;
-	io.smb2.in.alloc_size = 0;
-	io.smb2.in.create_disposition = NTCREATEX_DISP_OPEN;
-	io.smb2.in.impersonation_level = SMB2_IMPERSONATION_ANONYMOUS;
-	io.smb2.in.security_flags = 0;
-	io.smb2.in.fname = BASEDIR;
-
-	status = smb2_create(tree, torture, &(io.smb2));
-	torture_assert_ntstatus_ok(torture, status, "smb2_create dir");
-	d1 = io.smb2.out.file.handle;
-
-	ZERO_STRUCT(sinfo);
-	sinfo.rename_information.level = RAW_SFILEINFO_RENAME_INFORMATION;
-	sinfo.rename_information.in.file.handle = d1;
-	sinfo.rename_information.in.overwrite = 0;
-	sinfo.rename_information.in.root_fid = 0;
-	sinfo.rename_information.in.new_name = renamedir;
-
-	status = smb2_setinfo_file(tree, &sinfo);
-	torture_assert_ntstatus_ok(torture, status, "smb2_setinfo_file");
-
-	ZERO_STRUCT(cl.smb2);
-	cl.smb2.level = RAW_CLOSE_SMB2;
-	cl.smb2.in.file.handle = d1;
-	status = smb2_close(tree, &(cl.smb2));
-	torture_assert_ntstatus_ok(torture, status, "smb2_close");
-	ZERO_STRUCT(d1);
-
-	cl.smb2.in.file.handle = h1;
-	status = smb2_close(tree, &(cl.smb2));
-	torture_assert_ntstatus_ok(torture, status, "smb2_close");
-	ZERO_STRUCT(h1);
-
-	torture_comment(torture, "Cleaning up\n");
-
-	if (h1.data[0] || h1.data[1]) {
-		ZERO_STRUCT(cl.smb2);
-		cl.smb2.level = RAW_CLOSE_SMB2;
-		cl.smb2.in.file.handle = h1;
-		status = smb2_close(tree, &(cl.smb2));
-	}
-
-	smb2_util_unlink(tree, BASEDIR "\\file.txt");
-	smb2_util_unlink(tree, BASEDIR "-new\\file.txt");
-	smb2_deltree(tree, renamedir);
-	smb2_deltree(tree, BASEDIR);
-	return ret;
-}
-
 static bool test_afpinfo_enoent(struct torture_context *tctx,
 				struct smb2_tree *tree)
 {
@@ -7971,6 +7840,180 @@ done:
 }
 
 /*
+  test exclusive byte range lock on read-only file
+*/
+static bool test_readonly_exclusive_lock(struct torture_context *tctx,
+					 struct smb2_tree *tree)
+{
+	NTSTATUS status;
+	bool ret = true;
+	struct smb2_handle h;
+	struct smb2_create create;
+	struct smb2_lock lock;
+	struct smb2_lock_element lock_element;
+	const char *fname = "readonly_lock_test.txt";
+
+	torture_comment(tctx, "Testing exclusive lock on read-only opened file\n");
+
+	ret = enable_aapl(tctx, tree);
+	torture_assert_goto(tctx, ret == true, ret, done, "enable_aapl failed");
+
+	/* Clean up any existing file */
+	smb2_util_unlink(tree, fname);
+
+	/* Create the file first with write access to ensure it exists */
+	ZERO_STRUCT(create);
+	create.in.desired_access = SEC_RIGHTS_FILE_ALL;
+	create.in.file_attributes = FILE_ATTRIBUTE_NORMAL;
+	create.in.share_access = NTCREATEX_SHARE_ACCESS_READ |
+				 NTCREATEX_SHARE_ACCESS_WRITE |
+				 NTCREATEX_SHARE_ACCESS_DELETE;
+	create.in.create_disposition = NTCREATEX_DISP_CREATE;
+	create.in.impersonation_level = SMB2_IMPERSONATION_ANONYMOUS;
+	create.in.security_flags = 0;
+	create.in.fname = fname;
+
+	status = smb2_create(tree, tctx, &create);
+	CHECK_STATUS(status, NT_STATUS_OK);
+
+	/* Write some data to the file */
+	status = smb2_util_write(tree, create.out.file.handle, "test data", 0, 9);
+	CHECK_STATUS(status, NT_STATUS_OK);
+
+	/* Close the file */
+	status = smb2_util_close(tree, create.out.file.handle);
+	CHECK_STATUS(status, NT_STATUS_OK);
+
+	/* Now open the file read-only */
+	ZERO_STRUCT(create);
+	create.in.desired_access = SEC_FILE_READ_DATA | SEC_FILE_READ_ATTRIBUTE;
+	create.in.file_attributes = FILE_ATTRIBUTE_NORMAL;
+	create.in.share_access = NTCREATEX_SHARE_ACCESS_READ |
+				 NTCREATEX_SHARE_ACCESS_WRITE |
+				 NTCREATEX_SHARE_ACCESS_DELETE;
+	create.in.create_disposition = NTCREATEX_DISP_OPEN;
+	create.in.impersonation_level = SMB2_IMPERSONATION_ANONYMOUS;
+	create.in.security_flags = 0;
+	create.in.fname = fname;
+
+	status = smb2_create(tree, tctx, &create);
+	CHECK_STATUS(status, NT_STATUS_OK);
+	h = create.out.file.handle;
+
+	torture_comment(tctx, "File opened read-only successfully\n");
+
+	/* Attempt to set an exclusive byte-range lock */
+	ZERO_STRUCT(lock);
+	ZERO_STRUCT(lock_element);
+
+	lock.in.lock_count = 1;
+	lock.in.lock_sequence = 0;
+	lock.in.file.handle = h;
+	lock.in.locks = &lock_element;
+
+	lock_element.offset = 0;
+	lock_element.length = 100;
+	lock_element.flags = SMB2_LOCK_FLAG_EXCLUSIVE | SMB2_LOCK_FLAG_FAIL_IMMEDIATELY;
+
+	torture_comment(tctx, "Attempting to set exclusive lock on read-only file\n");
+
+	status = smb2_lock(tree, &lock);
+	CHECK_STATUS(status, NT_STATUS_OK);
+
+done:
+	/* Close the file */
+	smb2_util_close(tree, h);
+
+	/* Clean up */
+	smb2_util_unlink(tree, fname);
+
+	return ret;
+}
+
+/*
+ * Test case-insensitive file finding with AAPL extensions
+ * Add this function to source4/torture/vfs/fruit.c
+ */
+
+static bool test_case_insensitive_find(struct torture_context *tctx,
+				       struct smb2_tree *tree)
+{
+	NTSTATUS status;
+	bool ret = true;
+	const char *fname = "TestFile.txt";
+	const char *fname_upper = "TESTFILE.TXT";
+	struct smb2_handle testdirh;
+	struct smb2_handle h1;
+	struct smb2_create create;
+	struct smb2_find f;
+	union smb_search_data *d;
+	uint_t count;
+
+	smb2_deltree(tree, BASEDIR);
+
+	status = torture_smb2_testdir(tree, BASEDIR, &testdirh);
+	torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
+					"torture_smb2_testdir failed");
+
+	/* Enable AAPL extensions */
+	ret = enable_aapl(tctx, tree);
+	torture_assert_goto(tctx, ret, ret, done,
+			    "enable_aapl failed");
+
+	/* Create test file */
+	ZERO_STRUCT(create);
+	create.in.desired_access = SEC_RIGHTS_FILE_ALL;
+	create.in.file_attributes = FILE_ATTRIBUTE_NORMAL;
+	create.in.share_access = NTCREATEX_SHARE_ACCESS_READ |
+		NTCREATEX_SHARE_ACCESS_WRITE |
+		NTCREATEX_SHARE_ACCESS_DELETE;
+	create.in.create_disposition = NTCREATEX_DISP_CREATE;
+	create.in.impersonation_level = SMB2_IMPERSONATION_ANONYMOUS;
+	create.in.fname = talloc_asprintf(tctx, "%s\\%s", BASEDIR, fname);
+
+	status = smb2_create(tree, tctx, &create);
+	torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
+					talloc_asprintf(tctx, "failed to create %s", fname));
+	h1 = create.out.file.handle;
+
+	/* Close the file */
+	status = smb2_util_close(tree, h1);
+	torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
+					"failed to close test file");
+
+	/* Search for file using different case */
+	f = (struct smb2_find) {
+		.in.file.handle = testdirh,
+		.in.pattern = fname_upper,
+		.in.max_response_size = 0x1000,
+		.in.level = SMB2_FIND_ID_BOTH_DIRECTORY_INFO,
+	};
+
+	status = smb2_find_level(tree, tctx, &f, &count, &d);
+	torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
+					talloc_asprintf(tctx, "smb2_find_level failed searching for %s", fname_upper));
+
+	/* Verify we found exactly one file */
+	torture_assert_int_equal_goto(tctx, count, 1, ret, done,
+				      talloc_asprintf(tctx, "Expected 1 file, got %u", count));
+
+	/* Verify the filename matches our original file (case may differ) */
+	torture_assert_str_equal_goto(tctx,
+				      d[0].id_both_directory_info.name.s, fname, ret, done,
+				      talloc_asprintf(tctx, "Found file name '%s' doesn't match expected '%s'",
+						      d[0].directory_info.name.s, fname));
+
+	torture_comment(tctx, "Case-insensitive find test passed: "
+			"searched for '%s', found '%s'\n",
+			fname_upper, d[0].id_both_directory_info.name.s);
+
+done:
+	smb2_util_close(tree, testdirh);
+	smb2_deltree(tree, BASEDIR);
+	return ret;
+}
+
+/*
  * Note: This test depends on "vfs objects = catia fruit streams_xattr".  For
  * some tests torture must be run on the host it tests and takes an additional
  * argument with the local path to the share:
@@ -7994,7 +8037,6 @@ struct torture_suite *torture_vfs_fruit(TALLOC_CTX *ctx)
 	torture_suite_add_1smb2_test(suite, "truncate resource fork to 0 bytes", test_rfork_truncate);
 	torture_suite_add_1smb2_test(suite, "opening and creating resource fork", test_rfork_create);
 	torture_suite_add_1smb2_test(suite, "fsync_resource_fork", test_rfork_fsync);
-	torture_suite_add_1smb2_test(suite, "rename_dir_openfile", test_rename_dir_openfile);
 	torture_suite_add_1smb2_test(suite, "File without AFP_AfpInfo", test_afpinfo_enoent);
 	torture_suite_add_1smb2_test(suite, "create delete-on-close AFP_AfpInfo", test_create_delete_on_close);
 	torture_suite_add_1smb2_test(suite, "setinfo delete-on-close AFP_AfpInfo", test_setinfo_delete_on_close);
@@ -8017,7 +8059,8 @@ struct torture_suite *torture_vfs_fruit(TALLOC_CTX *ctx)
 	torture_suite_add_1smb2_test(suite, "empty_stream", test_empty_stream);
 	torture_suite_add_1smb2_test(suite, "writing_afpinfo", test_writing_afpinfo);
 	torture_suite_add_1smb2_test(suite, "delete_trigger_convert_sharing_violation", test_delete_trigger_convert_sharing_violation);
-
+	torture_suite_add_1smb2_test(suite, "readonly-exclusive-lock", test_readonly_exclusive_lock);
+	torture_suite_add_1smb2_test(suite, "case_insensitive_find", test_case_insensitive_find);
 	return suite;
 }
 
@@ -8134,7 +8177,7 @@ static bool test_fruit_locking_conflict(struct torture_context *tctx,
 
 	/* Add AD_FILELOCK_RSRC_DENY_WR lock. */
 	el = (struct smb2_lock_element) {
-		.offset = 0xfffffffffffffffc,
+		.offset = 0x7ffffffffffffffc,
 		.length = 1,
 		.flags = SMB2_LOCK_FLAG_EXCLUSIVE,
 	};
@@ -8257,14 +8300,23 @@ static bool test_timemachine_volsize(struct torture_context *tctx,
 	torture_assert_ntstatus_ok_goto(tctx, status, ok, done,
 					"smb2_util_mkdir\n");
 
+	status = smb2_util_roothandle(tree, &h);
+	torture_assert_ntstatus_ok(tctx, status, "Unable to create root handle");
+
+	/* Test that smbd does not crash if number of bands is 0 */
+	ZERO_STRUCT(fsinfo);
+	fsinfo.generic.level = RAW_QFS_SIZE_INFORMATION;
+	fsinfo.generic.handle = h;
+
+	status = smb2_getinfo_fs(tree, tree, &fsinfo);
+	torture_assert_ntstatus_ok(tctx, status, "smb2_getinfo_fs failed");
+
+	/* Setup 2 bands and test again */
 	ok = torture_setup_file(tctx, tree, "test.sparsebundle/bands/1", false);
 	torture_assert_goto(tctx, ok, ok, done, "torture_setup_file failed\n");
 
 	ok = torture_setup_file(tctx, tree, "test.sparsebundle/bands/2", false);
 	torture_assert_goto(tctx, ok, ok, done, "torture_setup_file failed\n");
-
-	status = smb2_util_roothandle(tree, &h);
-	torture_assert_ntstatus_ok(tctx, status, "Unable to create root handle");
 
 	ZERO_STRUCT(fsinfo);
 	fsinfo.generic.level = RAW_QFS_SIZE_INFORMATION;
@@ -8767,4 +8819,73 @@ struct torture_suite *torture_vfs_fruit_unfruit(TALLOC_CTX *ctx)
 					test_unconvert);
 
 	return suite;
+}
+
+/*
+ * Write an invalid AFP_AfpInfo stream header
+ */
+bool test_fruit_validate_afpinfo(struct torture_context *tctx,
+				 struct smb2_tree *tree)
+{
+	bool expect_invalid_param = torture_setting_bool(tctx, "validate_afpinfo", true);
+	const char *fname = "test_fruit_validate_afpinfo";
+	const char *sname = "test_fruit_validate_afpinfo" AFPINFO_STREAM_NAME;
+	struct smb2_handle handle;
+	AfpInfo *afpinfo = NULL;
+	char *afpinfo_buf = NULL;
+	uint8_t valbuf[8];
+	NTSTATUS status;
+	bool ret = true;
+
+	torture_comment(tctx, "Checking create of AfpInfo stream\n");
+
+	smb2_util_unlink(tree, fname);
+
+	ret = torture_setup_file(tctx, tree, fname, false);
+	torture_assert_goto(tctx, ret == true, ret, done, "torture_setup_file failed");
+
+	afpinfo = torture_afpinfo_new(tctx);
+	torture_assert_not_null_goto(tctx, afpinfo, ret, done,
+				     "torture_afpinfo_new failed\n");
+
+	memcpy(afpinfo->afpi_FinderInfo, "FOO BAR ", 8);
+
+	ret = torture_write_afpinfo(tree, tctx, tctx, fname, afpinfo);
+	torture_assert_goto(tctx, ret == true, ret, done,
+			    "torture_write_afpinfo failed\n");
+
+	afpinfo_buf = talloc_zero_size(tctx, 60);
+	torture_assert_goto(tctx, afpinfo_buf != NULL, ret, done,
+			    "torture_afpinfo_new failed");
+	memcpy(afpinfo_buf + 16, "FOO ", 4);
+
+	status = torture_smb2_testfile_access(
+		tree, sname, &handle, SEC_FILE_ALL);
+	torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
+					"smb2_create failed\n");
+
+	status = smb2_util_write(tree, handle, afpinfo_buf, 0, AFP_INFO_SIZE);
+	if (expect_invalid_param) {
+		torture_assert_ntstatus_equal_goto(
+			tctx, status, NT_STATUS_INVALID_PARAMETER, ret, done,
+			"write didn't fail as expected\n");
+	} else {
+		torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
+						"smb2_util_write failed");
+	}
+
+	smb2_util_close(tree, handle);
+
+	/*
+	 * Verify the server fixed the header
+	 */
+	PUSH_BE_U32(valbuf, 0, AFP_Signature);
+	PUSH_BE_U32(valbuf + 4, 0, AFP_Version);
+	ret = check_stream(tree, __location__, tctx, tctx, fname,
+			   AFPINFO_STREAM, 0, 60, 0, 8, (char *)valbuf);
+	torture_assert_goto(tctx, ret == true, ret, done, "check_stream failed");
+
+done:
+	smb2_util_unlink(tree, fname);
+	return ret;
 }

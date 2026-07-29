@@ -47,7 +47,7 @@ from samba.dcerpc.windows_event_ids import (
 class AuthLogTestsNetLogonBadCreds(samba.tests.auth_log_base.AuthLogTestBase):
 
     def setUp(self):
-        super(AuthLogTestsNetLogonBadCreds, self).setUp()
+        super().setUp()
         self.lp = samba.tests.env_loadparm()
         self.session = system_session()
         self.ldb = SamDB(
@@ -71,7 +71,7 @@ class AuthLogTestsNetLogonBadCreds(samba.tests.auth_log_base.AuthLogTestBase):
             "unicodePwd": utf16pw})
 
     def tearDown(self):
-        super(AuthLogTestsNetLogonBadCreds, self).tearDown()
+        super().tearDown()
         delete_force(self.ldb, self.dn)
 
     def _test_netlogon(self, name, pwd, status, checkFunction, event_id):
@@ -159,6 +159,8 @@ class AuthLogTestsNetLogonBadCreds(samba.tests.auth_log_base.AuthLogTestBase):
                                        0)
         except NTSTATUSError:
             pass
+        else:
+            self.fail()
         self.waitForMessages(isLastExpectedMessage)
 
     def test_netlogon_password_HMAC_MD5(self):
@@ -187,4 +189,6 @@ class AuthLogTestsNetLogonBadCreds(samba.tests.auth_log_base.AuthLogTestBase):
                                        NETLOGON_NEG_STRONG_KEYS)
         except NTSTATUSError:
             pass
+        else:
+            self.fail()
         self.waitForMessages(isLastExpectedMessage)

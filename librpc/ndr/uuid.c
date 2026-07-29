@@ -22,21 +22,22 @@
 */
 
 #include "replace.h"
+#include "lib/util/debug.h"
 #include "lib/util/samba_util.h"
 #include "lib/util/genrand.h"
 #include "librpc/ndr/libndr.h"
 #include "librpc/gen_ndr/ndr_misc.h"
 #include "lib/util/util_str_hex.h"
 
-_PUBLIC_ NTSTATUS GUID_to_ndr_buf(
-	const struct GUID *guid, struct GUID_ndr_buf *buf)
+_PUBLIC_ void GUID_to_ndr_buf(const struct GUID *guid,
+			      struct GUID_ndr_buf *buf)
 {
 	DATA_BLOB b = { .data = buf->buf, .length = sizeof(buf->buf), };
 	enum ndr_err_code ndr_err;
 
 	ndr_err = ndr_push_struct_into_fixed_blob(
 		&b, guid, (ndr_push_flags_fn_t)ndr_push_GUID);
-	return ndr_map_error2ntstatus(ndr_err);
+	SMB_ASSERT(NDR_ERR_CODE_IS_SUCCESS(ndr_err));
 }
 
 /**
@@ -45,12 +46,8 @@ _PUBLIC_ NTSTATUS GUID_to_ndr_buf(
 _PUBLIC_ NTSTATUS GUID_to_ndr_blob(const struct GUID *guid, TALLOC_CTX *mem_ctx, DATA_BLOB *b)
 {
 	struct GUID_ndr_buf buf = { .buf = {0}, };
-	NTSTATUS status;
 
-	status = GUID_to_ndr_buf(guid, &buf);
-	if (!NT_STATUS_IS_OK(status)) {
-		return status;
-	}
+	GUID_to_ndr_buf(guid, &buf);
 
 	*b = data_blob_talloc(mem_ctx, buf.buf, sizeof(buf.buf));
 	if (b->data == NULL) {
@@ -208,15 +205,58 @@ _PUBLIC_ char* GUID_buf_string(const struct GUID *guid,
 	if (!guid) {
 		return NULL;
 	}
-	snprintf(dst->buf, sizeof(dst->buf),
-		 "%08x-%04x-%04x-%02x%02x-%02x%02x%02x%02x%02x%02x",
-		 guid->time_low, guid->time_mid,
-		 guid->time_hi_and_version,
-		 guid->clock_seq[0],
-		 guid->clock_seq[1],
-		 guid->node[0], guid->node[1],
-		 guid->node[2], guid->node[3],
-		 guid->node[4], guid->node[5]);
+
+	if (sizeof(dst->buf) < 37) {
+		return NULL;
+	}
+
+	dst->buf[0] = nybble_to_hex_lower(guid->time_low >> 28);
+	dst->buf[1] = nybble_to_hex_lower(guid->time_low >> 24);
+	dst->buf[2] = nybble_to_hex_lower(guid->time_low >> 20);
+	dst->buf[3] = nybble_to_hex_lower(guid->time_low >> 16);
+	dst->buf[4] = nybble_to_hex_lower(guid->time_low >> 12);
+	dst->buf[5] = nybble_to_hex_lower(guid->time_low >> 8);
+	dst->buf[6] = nybble_to_hex_lower(guid->time_low >> 4);
+	dst->buf[7] = nybble_to_hex_lower(guid->time_low);
+
+	dst->buf[8] = '-';
+
+	dst->buf[9] = nybble_to_hex_lower(guid->time_mid >> 12);
+	dst->buf[10] = nybble_to_hex_lower(guid->time_mid >> 8);
+	dst->buf[11] = nybble_to_hex_lower(guid->time_mid >> 4);
+	dst->buf[12] = nybble_to_hex_lower(guid->time_mid);
+
+	dst->buf[13] = '-';
+
+	dst->buf[14] = nybble_to_hex_lower(guid->time_hi_and_version >> 12);
+	dst->buf[15] = nybble_to_hex_lower(guid->time_hi_and_version >> 8);
+	dst->buf[16] = nybble_to_hex_lower(guid->time_hi_and_version >> 4);
+	dst->buf[17] = nybble_to_hex_lower(guid->time_hi_and_version);
+
+	dst->buf[18] = '-';
+
+	dst->buf[19] = nybble_to_hex_lower(guid->clock_seq[0] >> 4);
+	dst->buf[20] = nybble_to_hex_lower(guid->clock_seq[0]);
+	dst->buf[21] = nybble_to_hex_lower(guid->clock_seq[1] >> 4);
+	dst->buf[22] = nybble_to_hex_lower(guid->clock_seq[1]);
+
+	dst->buf[23] = '-';
+
+	dst->buf[24] = nybble_to_hex_lower(guid->node[0] >> 4);
+	dst->buf[25] = nybble_to_hex_lower(guid->node[0]);
+	dst->buf[26] = nybble_to_hex_lower(guid->node[1] >> 4);
+	dst->buf[27] = nybble_to_hex_lower(guid->node[1]);
+	dst->buf[28] = nybble_to_hex_lower(guid->node[2] >> 4);
+	dst->buf[29] = nybble_to_hex_lower(guid->node[2]);
+	dst->buf[30] = nybble_to_hex_lower(guid->node[3] >> 4);
+	dst->buf[31] = nybble_to_hex_lower(guid->node[3]);
+	dst->buf[32] = nybble_to_hex_lower(guid->node[4] >> 4);
+	dst->buf[33] = nybble_to_hex_lower(guid->node[4]);
+	dst->buf[34] = nybble_to_hex_lower(guid->node[5] >> 4);
+	dst->buf[35] = nybble_to_hex_lower(guid->node[5]);
+
+	dst->buf[36] = '\0';
+
 	return dst->buf;
 }
 

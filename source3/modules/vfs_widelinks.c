@@ -354,15 +354,17 @@ static int widelinks_openat(vfs_handle_struct *handle,
 				struct widelinks_config,
 				return -1);
 
-	if (config->active &&
-	    (config->cwd != NULL) &&
-	    !(smb_fname->flags & SMB_FILENAME_POSIX_PATH))
-	{
+	if (config->active && (config->cwd != NULL)) {
 		/*
 		 * Module active, openat after chdir (see note 1b above) and not
 		 * a POSIX open (POSIX sees symlinks), so remove O_NOFOLLOW.
 		 */
 		how.flags = (how.flags & ~O_NOFOLLOW);
+#ifdef O_PATH
+		how.flags = (how.flags & ~O_PATH);
+#endif
+		how.resolve = (how.resolve &
+			       ~(VFS_OPEN_HOW_RESOLVE_NO_SYMLINKS));
 	}
 
 	ret = SMB_VFS_NEXT_OPENAT(handle,
@@ -383,13 +385,22 @@ static int widelinks_openat(vfs_handle_struct *handle,
 		}
 		lstat_ret = SMB_VFS_NEXT_LSTAT(handle,
 				full_fname);
-		if (lstat_ret != -1 &&
-		    VALID_STAT(full_fname->st) &&
+		if (lstat_ret == -1) {
+			/*
+			 * Path doesn't exist. We must
+			 * return errno from LSTAT.
+			 */
+			int saved_errno = errno;
+			TALLOC_FREE(full_fname);
+			errno = saved_errno;
+			return -1;
+		}
+		if (VALID_STAT(full_fname->st) &&
 		    S_ISLNK(full_fname->st.st_ex_mode)) {
 			fsp->fsp_name->st = full_fname->st;
 		}
 		TALLOC_FREE(full_fname);
-		errno = ENOENT;
+		errno = ELOOP;
 	}
 	return ret;
 }

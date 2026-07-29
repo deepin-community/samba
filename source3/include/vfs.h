@@ -381,9 +381,16 @@
  * Change to Version 49 - will ship with 4.19
  * Version 49 - remove seekdir and telldir
  * Version 49 - remove "sbuf" argument from readdir_fn()
+ * Change to Version 50 - will ship with 4.22
+ * Version 50 - Change SMB_VFS_RENAMEAT() add vfs_rename_how
+ * Version 50 - Add VFS_RENAME_HOW_NO_REPLACE to vfs_rename_how
+ * Version 50 - Remove FSP_POSIX_FLAGS_PATHNAMES, remove FSP_POSIX_FLAGS_RENAME
+ *              and convert struct files_struct.posix_flags to
+ *              struct files_struct.fsp_flags.posix_open
+ * Version 50 - Add struct files_struct.fsp_flags.posix_append
  */
 
-#define SMB_VFS_INTERFACE_VERSION 49
+#define SMB_VFS_INTERFACE_VERSION 50
 
 /*
     All intercepted VFS operations must be declared as static functions inside module source
@@ -455,6 +462,17 @@ typedef struct files_struct {
 		bool lock_failure_seen : 1;
 		bool encryption_required : 1;
 		bool fstat_before_close : 1;
+		/*
+		 * For POSIX clients struct files_struct.fsp_flags.posix_open
+		 * and struct smb_filename.flags SMB_FILENAME_POSIX_PATH will
+		 * always be set to the same value.
+		 *
+		 * For macOS clients vfs_fruit with fruit:posix_open=yes, we
+		 * deliberately set both flags to fsp_flags.posix_open=true
+		 * while SMB_FILENAME_POSIX_PATH will not be set.
+		 */
+		bool posix_open : 1;
+		bool posix_append : 1;
 	} fsp_flags;
 
 	struct tevent_timer *update_write_time_event;
@@ -474,7 +492,6 @@ typedef struct files_struct {
 	struct tevent_timer *oplock_timeout;
 	int current_lock_count; /* Count the number of outstanding locks and pending locks. */
 
-	uint64_t posix_flags;
 	struct smb_filename *fsp_name;
 	uint32_t name_hash;		/* Jenkins hash of full pathname. */
 	uint64_t mid;			/* Mid of the operation that created us. */
@@ -681,17 +698,10 @@ typedef struct files_struct {
  * In any other case use fsp_get_io_fd().
  */
 
-#define FSP_POSIX_FLAGS_OPEN		0x01
-#define FSP_POSIX_FLAGS_RENAME		0x02
-#define FSP_POSIX_FLAGS_PATHNAMES	0x04
-
-#define FSP_POSIX_FLAGS_ALL			\
-	(FSP_POSIX_FLAGS_OPEN |			\
-	 FSP_POSIX_FLAGS_PATHNAMES |		\
-	 FSP_POSIX_FLAGS_RENAME)
-
 struct vuid_cache_entry {
 	struct auth_session_info *session_info;
+	struct name_compare_entry *hide_list;
+	struct name_compare_entry *veto_list;
 	uint64_t vuid; /* SMB2 compat */
 	bool read_only;
 	uint32_t share_access;
@@ -702,10 +712,10 @@ struct vuid_cache {
 	struct vuid_cache_entry array[VUID_CACHE_SIZE];
 };
 
-typedef struct {
-	char *name;
+struct name_compare_entry {
+	const char *name;
 	bool is_wild;
-} name_compare_entry;
+};
 
 struct share_params {
 	int service;
@@ -767,10 +777,10 @@ typedef struct connection_struct {
 	   Used to ensure unique FileIndex returns. */
 	SMB_DEV_T base_share_dev;
 
-	name_compare_entry *hide_list; /* Per-share list of files to return as hidden. */
-	name_compare_entry *veto_list; /* Per-share list of files to veto (never show). */
-	name_compare_entry *veto_oplock_list; /* Per-share list of files to refuse oplocks on. */
-	name_compare_entry *aio_write_behind_list; /* Per-share list of files to use aio write behind on. */
+	struct name_compare_entry *hide_list; /* Per-share list of files to return as hidden. */
+	struct name_compare_entry *veto_list; /* Per-share list of files to veto (never show). */
+	struct name_compare_entry *veto_oplock_list; /* Per-share list of files to refuse oplocks on. */
+	struct name_compare_entry *aio_write_behind_list; /* Per-share list of files to use aio write behind on. */
 	struct trans_state *pending_trans;
 
 	struct rpc_pipe_client *spoolss_pipe;
@@ -886,11 +896,15 @@ struct smb_filename {
 };
 
 /*
- * smb_filename flags. Define in terms of the FSP_POSIX_FLAGS_XX
- * to keep the numeric values consistent.
+ * For POSIX clients struct files_struct.fsp_flags.posix_open
+ * and struct smb_filename.flags SMB_FILENAME_POSIX_PATH will
+ * always be set to the same value.
+ *
+ * For macOS clients vfs_fruit with fruit:posix_open=yes, we
+ * deliberately set both flags to fsp_flags.posix_open=true
+ * while SMB_FILENAME_POSIX_PATH will not be set.
  */
-
-#define SMB_FILENAME_POSIX_PATH		FSP_POSIX_FLAGS_PATHNAMES
+#define SMB_FILENAME_POSIX_PATH		0x01
 
 enum vfs_translate_direction {
 	vfs_translate_to_unix = 0,
@@ -908,12 +922,21 @@ struct vfs_aio_state {
 };
 
 #define VFS_OPEN_HOW_RESOLVE_NO_SYMLINKS 1
+#define VFS_OPEN_HOW_WITH_BACKUP_INTENT 2
 
 struct vfs_open_how {
 	int flags;
 	mode_t mode;
 	uint64_t resolve;
 };
+
+#define VFS_RENAME_HOW_NO_REPLACE 1
+
+struct vfs_rename_how {
+	int flags;
+};
+
+#define VFS_PWRITE_APPEND_OFFSET -1
 
 /*
     Available VFS operations. These values must be in sync with vfs_ops struct
@@ -1026,7 +1049,8 @@ struct vfs_fn_pointers {
 			 struct files_struct *srcdir_fsp,
 			 const struct smb_filename *smb_fname_src,
 			 struct files_struct *dstdir_fsp,
-			 const struct smb_filename *smb_fname_dst);
+			 const struct smb_filename *smb_fname_dst,
+			 const struct vfs_rename_how *how);
 	struct tevent_req *(*fsync_send_fn)(struct vfs_handle_struct *handle,
 					    TALLOC_CTX *mem_ctx,
 					    struct tevent_context *ev,
@@ -1532,7 +1556,8 @@ int smb_vfs_call_renameat(struct vfs_handle_struct *handle,
 			struct files_struct *srcfsp,
 			const struct smb_filename *smb_fname_src,
 			struct files_struct *dstfsp,
-			const struct smb_filename *smb_fname_dst);
+			const struct smb_filename *smb_fname_dst,
+			const struct vfs_rename_how *how);
 
 struct tevent_req *smb_vfs_call_fsync_send(struct vfs_handle_struct *handle,
 					   TALLOC_CTX *mem_ctx,
@@ -1967,7 +1992,8 @@ int vfs_not_implemented_renameat(vfs_handle_struct *handle,
 			       files_struct *srcfsp,
 			       const struct smb_filename *smb_fname_src,
 			       files_struct *dstfsp,
-			       const struct smb_filename *smb_fname_dst);
+			       const struct smb_filename *smb_fname_dst,
+			       const struct vfs_rename_how *how);
 struct tevent_req *vfs_not_implemented_fsync_send(struct vfs_handle_struct *handle,
 						  TALLOC_CTX *mem_ctx,
 						  struct tevent_context *ev,

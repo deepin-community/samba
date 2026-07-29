@@ -1,7 +1,7 @@
-From a4f5852f55439bcc1aaaa6762d230a28599298d2 Mon Sep 17 00:00:00 2001
 From: Michael Tokarev <mjt@tls.msk.ru>
 Date: Fri, 2 Dec 2022 11:45:01 +0300
 Subject: ctdb: use /run/ctdb instead of /var/run/ctdb
+Forwarded: not-needed
 
 Whole upstream path assignment needs a review.
 ---

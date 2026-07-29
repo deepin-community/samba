@@ -1,0 +1,5 @@
+usr/include/tdb.h
+usr/lib/${DEB_HOST_MULTIARCH}/libtdb.so
+#usr/lib/${DEB_HOST_MULTIARCH}/libtdb.a
+usr/lib/${DEB_HOST_MULTIARCH}/pkgconfig/tdb.pc
+debian/manpages/tdb*.3 usr/share/man/man3/

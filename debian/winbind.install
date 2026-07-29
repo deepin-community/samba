@@ -1,17 +1,17 @@
 #!/usr/bin/dh-exec --with-scripts=filter-arch,filter-build-profiles
-<pkg.samba.mitkrb5> usr/lib/*/samba/krb5/winbind_krb5_localauth.so
+<pkg.samba.mitkrb5> usr/lib/${DEB_HOST_MULTIARCH}/samba/krb5/winbind_krb5_localauth.so
 <pkg.samba.mitkrb5> usr/share/man/man8/winbind_krb5_localauth.8
 usr/bin/ntlm_auth
 usr/bin/wbinfo
-usr/lib/*/samba/idmap
-usr/lib/*/samba/krb5/async_dns_krb5_locator.so
-usr/lib/*/samba/krb5/winbind_krb5_locator.so
-usr/lib/*/samba/libidmap-samba4.so.0
-usr/lib/*/samba/libnss-info-samba4.so.0
-usr/lib/*/samba/nss_info/hash.so
-usr/lib/*/samba/nss_info/rfc2307.so
-usr/lib/*/samba/nss_info/sfu.so
-usr/lib/*/samba/nss_info/sfu20.so
+usr/lib/${DEB_HOST_MULTIARCH}/samba/idmap
+usr/lib/${DEB_HOST_MULTIARCH}/samba/krb5/async_dns_krb5_locator.so
+usr/lib/${DEB_HOST_MULTIARCH}/samba/krb5/winbind_krb5_locator.so
+usr/lib/${DEB_HOST_MULTIARCH}/samba/libidmap-private-samba.so.0
+usr/lib/${DEB_HOST_MULTIARCH}/samba/libnss-info-private-samba.so.0
+usr/lib/${DEB_HOST_MULTIARCH}/samba/nss_info/hash.so
+usr/lib/${DEB_HOST_MULTIARCH}/samba/nss_info/rfc2307.so
+usr/lib/${DEB_HOST_MULTIARCH}/samba/nss_info/sfu.so
+usr/lib/${DEB_HOST_MULTIARCH}/samba/nss_info/sfu20.so
 usr/sbin/winbindd
 usr/share/man/man1/ntlm_auth.1
 usr/share/man/man1/wbinfo.1

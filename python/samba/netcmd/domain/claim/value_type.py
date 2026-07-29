@@ -21,9 +21,9 @@
 #
 
 import samba.getopt as options
+from samba.domain.models import ValueType
+from samba.domain.models.exceptions import ModelError
 from samba.netcmd import Command, CommandError, Option, SuperCommand
-from samba.netcmd.domain.models import ValueType
-from samba.netcmd.domain.models.exceptions import ModelError
 
 
 class cmd_domain_claim_value_type_list(Command):
@@ -34,33 +34,31 @@ class cmd_domain_claim_value_type_list(Command):
     takes_optiongroups = {
         "sambaopts": options.SambaOptions,
         "credopts": options.CredentialsOptions,
+        "hostopts": options.HostOptions,
     }
 
     takes_options = [
-        Option("-H", "--URL", help="LDB URL for database or target server.",
-               type=str, metavar="URL", dest="ldap_url"),
         Option("--json", help="Output results in JSON format.",
                dest="output_format", action="store_const", const="json"),
     ]
 
-    def run(self, ldap_url=None, sambaopts=None, credopts=None,
+    def run(self, hostopts=None, sambaopts=None, credopts=None,
             output_format=None):
 
-        ldb = self.ldb_connect(ldap_url, sambaopts, credopts)
+        ldb = self.ldb_connect(hostopts, sambaopts, credopts)
 
-        # Value types grouped by display name.
         try:
-            value_types = {value_type.display_name: value_type.as_dict()
-                           for value_type in ValueType.query(ldb)}
+            value_types = ValueType.query(ldb)
         except ModelError as e:
             raise CommandError(e)
 
         # Using json output format gives more detail.
         if output_format == "json":
-            self.print_json(value_types)
+            self.print_json({value_type.display_name: value_type
+                             for value_type in value_types})
         else:
-            for value_type in value_types.keys():
-                self.outf.write(f"{value_type}\n")
+            for value_type in value_types:
+                print(value_type.display_name, file=self.outf)
 
 
 class cmd_domain_claim_value_type_view(Command):
@@ -71,22 +69,18 @@ class cmd_domain_claim_value_type_view(Command):
     takes_optiongroups = {
         "sambaopts": options.SambaOptions,
         "credopts": options.CredentialsOptions,
+        "hostopts": options.HostOptions,
     }
 
     takes_options = [
-        Option("-H", "--URL", help="LDB URL for database or target server.",
-               type=str, metavar="URL", dest="ldap_url"),
         Option("--name",
                help="Display name of claim value type to view (required).",
-               dest="name", action="store", type=str),
+               dest="name", action="store", type=str, required=True),
     ]
 
-    def run(self, ldap_url=None, sambaopts=None, credopts=None, name=None):
+    def run(self, hostopts=None, sambaopts=None, credopts=None, name=None):
 
-        if not name:
-            raise CommandError("Argument --name is required.")
-
-        ldb = self.ldb_connect(ldap_url, sambaopts, credopts)
+        ldb = self.ldb_connect(hostopts, sambaopts, credopts)
 
         try:
             value_type = ValueType.get(ldb, display_name=name)

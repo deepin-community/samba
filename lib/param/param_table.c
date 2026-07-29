@@ -91,6 +91,18 @@ static const struct enum_list enum_bool_auto[] = {
 	{-1, NULL}
 };
 
+static const struct enum_list enum_bool_auto_default[] = {
+	{false, "No"},
+	{false, "False"},
+	{false, "0"},
+	{true, "Yes"},
+	{true, "True"},
+	{true, "1"},
+	{Auto, "Auto"},
+	{LP_ENUM_Default, "default"},
+	{-1, NULL}
+};
+
 static const struct enum_list enum_csc_policy[] = {
 	{CSC_POLICY_MANUAL, "manual"},
 	{CSC_POLICY_DOCUMENTS, "documents"},
@@ -309,6 +321,8 @@ static const struct enum_list enum_ldap_sasl_wrapping[] = {
 	{0, "plain"},
 	{ADS_AUTH_SASL_SIGN, "sign"},
 	{ADS_AUTH_SASL_SEAL, "seal"},
+	{ADS_AUTH_SASL_STARTTLS, "starttls"},
+	{ADS_AUTH_SASL_LDAPS, "ldaps"},
 	{-1, NULL}
 };
 
@@ -318,6 +332,8 @@ static const struct enum_list enum_ldap_server_require_strong_auth_vals[] = {
 	{ LDAP_SERVER_REQUIRE_STRONG_AUTH_NO, "0" },
 	{ LDAP_SERVER_REQUIRE_STRONG_AUTH_ALLOW_SASL_OVER_TLS,
 	  "allow_sasl_over_tls" },
+	{ LDAP_SERVER_REQUIRE_STRONG_AUTH_ALLOW_SASL_WITHOUT_TLS_CB,
+	  "allow_sasl_without_tls_channel_bindings" },
 	{ LDAP_SERVER_REQUIRE_STRONG_AUTH_YES, "Yes" },
 	{ LDAP_SERVER_REQUIRE_STRONG_AUTH_YES, "True" },
 	{ LDAP_SERVER_REQUIRE_STRONG_AUTH_YES, "1" },
@@ -436,6 +452,20 @@ static const struct enum_list enum_ad_functional_level[] = {
 	{DS_DOMAIN_FUNCTION_2012, "2012"},
 	{DS_DOMAIN_FUNCTION_2012_R2, "2012_R2"},
 	{DS_DOMAIN_FUNCTION_2016, "2016"},
+	{-1, NULL}
+};
+
+static const struct enum_list enum_acl_claims_evaluation[] = {
+	{ACL_CLAIMS_EVALUATION_AD_DC_ONLY, "AD DC only"},
+	{ACL_CLAIMS_EVALUATION_NEVER, "never"},
+	{-1, NULL}
+};
+
+static const struct enum_list enum_client_netlogon_ping_protocol[] = {
+	{CLIENT_NETLOGON_PING_CLDAP, "cldap"},
+	{CLIENT_NETLOGON_PING_LDAP, "ldap"},
+	{CLIENT_NETLOGON_PING_LDAPS, "ldaps"},
+	{CLIENT_NETLOGON_PING_STARTTLS, "starttls"},
 	{-1, NULL}
 };
 

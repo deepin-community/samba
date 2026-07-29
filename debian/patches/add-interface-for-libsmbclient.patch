@@ -3,11 +3,9 @@ Author: rong wang <wangrong@uniontech.com>
 Bug: https://pms.uniontech.com/bug-view-210139.html
 Forwarded: not-needed
 ---
-Index: samba-4.17.12.2/source3/include/libsmbclient.h
-===================================================================
---- samba-4.17.12.2.orig/source3/include/libsmbclient.h
-+++ samba-4.17.12.2/source3/include/libsmbclient.h
-@@ -3279,4 +3279,65 @@ struct _SMBCCTX
+--- a/source3/include/libsmbclient.h
++++ b/source3/include/libsmbclient.h
+@@ -3269,4 +3269,65 @@
  };
  
  
@@ -73,10 +71,8 @@ Index: samba-4.17.12.2/source3/include/libsmbclient.h
 +
 +
  #endif /* SMBCLIENT_H_INCLUDED */
-Index: samba-4.17.12.2/source3/libsmb/libsmb_context.c
-===================================================================
---- samba-4.17.12.2.orig/source3/libsmb/libsmb_context.c
-+++ samba-4.17.12.2/source3/libsmb/libsmb_context.c
+--- a/source3/libsmb/libsmb_context.c
++++ b/source3/libsmb/libsmb_context.c
 @@ -33,6 +33,9 @@
  #include "lib/param/param.h"
  #include "../lib/util/smb_threads.h"
@@ -87,7 +83,7 @@ Index: samba-4.17.12.2/source3/libsmb/libsmb_context.c
  
  /*
   * Is the logging working / configfile read ?
-@@ -801,3 +804,178 @@ void smbc_set_credentials_with_fallback(
+@@ -801,3 +804,200 @@
  	TALLOC_FREE(context->internal->creds);
  	context->internal->creds = creds;
  }
@@ -120,6 +116,24 @@ Index: samba-4.17.12.2/source3/libsmb/libsmb_context.c
 +        return "DEFAULT";
 +}
 +
++static enum protocol_types
++get_protocol_value(const char *name)
++{
++        const struct enum_list *p = enum_protocol;
++
++        if (name == NULL) {
++                return (enum protocol_types)-1;
++        }
++
++        for (; p->name; ++p) {
++                if (strcmp(p->name, name) == 0) {
++                        return (enum protocol_types)p->value;
++                }
++        }
++
++        return (enum protocol_types)-1;
++}
++
 +const char *
 +smbc_negprot(const char *host,
 +             uint16_t port,
@@ -131,14 +145,15 @@ Index: samba-4.17.12.2/source3/libsmb/libsmb_context.c
 +        NTSTATUS status;
 +        TALLOC_CTX *frame = talloc_stackframe();
 +        const char *protocol = NULL;
++        enum protocol_types min_protocol_value = get_protocol_value(min_protocol);
++        enum protocol_types max_protocol_value = get_protocol_value(max_protocol);
 +
-+        if (!lp_set_cmdline("client min protocol", min_protocol) ||
-+            !lp_set_cmdline("client max protocol", max_protocol)) {
++        if (min_protocol_value == -1 || max_protocol_value == -1) {
 +                errno = EINVAL;
 +                goto quit;
 +        }
 +
-+        status = cli_connect_nb(host, NULL, port, 0x20, NULL,
++        status = cli_connect_nb(talloc_tos(), host, NULL, port, 0x20, NULL,
 +                                SMB_SIGNING_IPC_DEFAULT, 0, &cli);
 +        if (!NT_STATUS_IS_OK(status)) {
 +                errno = map_errno_from_nt_status(status);
@@ -146,8 +161,11 @@ Index: samba-4.17.12.2/source3/libsmb/libsmb_context.c
 +        }
 +
 +        status = smbXcli_negprot(cli->conn, timeout_msec,
-+                                 lp_client_min_protocol(),
-+                                 lp_client_max_protocol());
++                                 min_protocol_value,
++                                 max_protocol_value,
++                                 NULL,
++                                 NULL,
++                                 NULL);
 +        if (!NT_STATUS_IS_OK(status)) {
 +                errno = map_errno_from_nt_status(status);
 +                goto quit;

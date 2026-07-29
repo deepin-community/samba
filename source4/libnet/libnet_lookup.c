@@ -201,6 +201,7 @@ struct tevent_req *libnet_LookupDCs_send(struct libnet_context *ctx,
 		finddcs_io.in.domain_name = io->in.domain_name;
 	}
 	finddcs_io.in.minimum_dc_flags = NBT_SERVER_LDAP | NBT_SERVER_DS | NBT_SERVER_WRITABLE;
+	finddcs_io.in.proto = lpcfg_client_netlogon_ping_protocol(ctx->lp_ctx);
 	finddcs_io.in.server_address = ctx->server_address;
 
 	req = finddcs_cldap_send(mem_ctx, &finddcs_io, ctx->resolve_ctx, ctx->event_ctx);
@@ -223,11 +224,14 @@ NTSTATUS libnet_LookupDCs_recv(struct tevent_req *req, TALLOC_CTX *mem_ctx,
 	struct finddcs finddcs_io;
 	status = finddcs_cldap_recv(req, mem_ctx, &finddcs_io);
 	talloc_free(req);
+	if (!NT_STATUS_IS_OK(status)) {
+		return status;
+	}
 	io->out.num_dcs = 1;
 	io->out.dcs = talloc(mem_ctx, struct nbt_dc_name);
 	NT_STATUS_HAVE_NO_MEMORY(io->out.dcs);
 	io->out.dcs[0].address = finddcs_io.out.address;
-	io->out.dcs[0].name = finddcs_io.out.netlogon.data.nt5_ex.pdc_dns_name;
+	io->out.dcs[0].name = finddcs_io.out.netlogon->data.nt5_ex.pdc_dns_name;
 	return status;
 }
 

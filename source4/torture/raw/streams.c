@@ -1,20 +1,20 @@
-/* 
+/*
    Unix SMB/CIFS implementation.
 
    test alternate data streams
 
    Copyright (C) Andrew Tridgell 2004
-   
+
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
    the Free Software Foundation; either version 3 of the License, or
    (at your option) any later version.
-   
+
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
    GNU General Public License for more details.
-   
+
    You should have received a copy of the GNU General Public License
    along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
@@ -42,30 +42,15 @@
 #define CHECK_NTTIME(v, correct) \
 	torture_assert_u64_equal(tctx,v,correct,"CHECK_NTTIME")
 
-#define CHECK_STR(v, correct) do { \
-	bool ok; \
-	if ((v) && !(correct)) { \
-		ok = false; \
-	} else if (!(v) && (correct)) { \
-		ok = false; \
-	} else if (!(v) && !(correct)) { \
-		ok = true; \
-	} else if (strcmp((v), (correct)) == 0) { \
-		ok = true; \
-	} else { \
-		ok = false; \
-	} \
-	torture_assert(tctx,ok,\
-		       talloc_asprintf(tctx, "got '%s', expected '%s'",\
-		       (v)?(v):"NULL", (correct)?(correct):"NULL")); \
-} while (0)
+#define CHECK_STR(v, correct) \
+	torture_assert_str_equal(tctx,v,correct,"CHECK_STR")
 
 /*
   check that a stream has the right contents
 */
 static bool check_stream(struct smbcli_state *cli, const char *location,
 			 TALLOC_CTX *mem_ctx,
-			 const char *fname, const char *sname, 
+			 const char *fname, const char *sname,
 			 const char *value)
 {
 	int fnum;
@@ -85,7 +70,7 @@ static bool check_stream(struct smbcli_state *cli, const char *location,
 		}
 		return true;
 	}
-	    
+
 	if (fnum == -1) {
 		printf("(%s) Failed to open stream '%s' - %s\n",
 		       location, full_name, smbcli_errstr(cli->tree));
@@ -93,7 +78,7 @@ static bool check_stream(struct smbcli_state *cli, const char *location,
 	}
 
 	buf = talloc_array(mem_ctx, uint8_t, strlen(value)+11);
-	
+
 	ret = smbcli_read(cli->tree, fnum, buf, 0, strlen(value)+11);
 	if (ret != strlen(value)) {
 		printf("(%s) Failed to read %lu bytes from stream '%s' - got %d\n",
@@ -188,7 +173,7 @@ show_streams:
 }
 
 /*
-  test bahavior of streams on directories
+  test behavior of streams on directories
 */
 static bool test_stream_dir(struct torture_context *tctx,
 			   struct smbcli_state *cli)
@@ -373,7 +358,7 @@ static bool test_stream_io(struct torture_context *tctx,
 	status = smb_raw_open(cli->tree, tctx, &io);
 	CHECK_STATUS(status, NT_STATUS_OK);
 	fnum = io.ntcreatex.out.file.fnum;
-	
+
 	smbcli_close(cli->tree, fnum);
 	status = smbcli_unlink(cli->tree, sname2);
 	CHECK_STATUS(status, NT_STATUS_OBJECT_NAME_NOT_FOUND);
@@ -468,7 +453,7 @@ done:
 	return ret;
 }
 
-/* 
+/*
  *  Test FILE_SHARE_DELETE on streams
  *
  * A stream opened with !FILE_SHARE_DELETE prevents the main file to be opened
@@ -601,7 +586,7 @@ static bool test_stream_delete(struct torture_context *tctx,
 
 	/* w2k and w2k3 return 0 and w2k8 returns 1 */
 	if (TARGET_IS_WINXP(tctx) || TARGET_IS_W2K3(tctx) ||
-	    TARGET_IS_SAMBA3(tctx)) {
+	    TARGET_IS_SAMBA3(tctx) || TARGET_IS_SAMBA4(tctx)) {
 		CHECK_VALUE(finfo.all_info.out.delete_pending, 0);
 	} else {
 		CHECK_VALUE(finfo.all_info.out.delete_pending, 1);
@@ -879,7 +864,9 @@ static bool test_stream_names(struct torture_context *tctx,
 		stinfo.generic.in.file.fnum = fnum1;
 		status = smb_raw_fileinfo(cli->tree, tctx, &stinfo);
 		CHECK_STATUS(status, NT_STATUS_OK);
-		if (!torture_setting_bool(tctx, "samba3", false)) {
+		if (!(torture_setting_bool(tctx, "samba3", false) ||
+		      torture_setting_bool(tctx, "samba4", false)))
+		{
 			CHECK_NTTIME(stinfo.all_info.out.create_time,
 				     finfo.all_info.out.create_time);
 			CHECK_NTTIME(stinfo.all_info.out.access_time,
@@ -904,7 +891,8 @@ static bool test_stream_names(struct torture_context *tctx,
 		stinfo.generic.in.file.fnum = fnum1;
 		status = smb_raw_fileinfo(cli->tree, tctx, &stinfo);
 		CHECK_STATUS(status, NT_STATUS_OK);
-		if (!torture_setting_bool(tctx, "samba3", false)) {
+		if (!(torture_setting_bool(tctx, "samba3", false) ||
+		      torture_setting_bool(tctx, "samba4", false))) {
 			CHECK_STR(stinfo.name_info.out.fname.s, rpath);
 		}
 
@@ -934,7 +922,8 @@ static bool test_stream_names(struct torture_context *tctx,
 		stinfo.generic.in.file.fnum = fnum1;
 		status = smb_raw_fileinfo(cli->tree, tctx, &stinfo);
 		CHECK_STATUS(status, NT_STATUS_OK);
-		if (!torture_setting_bool(tctx, "samba3", false)) {
+		if (!(torture_setting_bool(tctx, "samba3", false) ||
+		      torture_setting_bool(tctx, "samba4", false))) {
 			CHECK_NTTIME(stinfo.all_info.out.write_time,
 				     write_time);
 			CHECK_VALUE(stinfo.all_info.out.attrib,
@@ -1092,18 +1081,12 @@ done:
         sfinfo.generic.level = RAW_SFILEINFO_ ## call; \
         sfinfo.generic.in.file.fnum = fnum; \
         status = smb_raw_setfileinfo(cli->tree, &sfinfo); \
-        if (!NT_STATUS_EQUAL(status, rightstatus)) { \
-                printf("(%s) %s - %s (should be %s)\n", __location__, #call, \
-                        nt_errstr(status), nt_errstr(rightstatus)); \
-                ret = false; \
-        } \
+        torture_assert_ntstatus_equal_goto(tctx, status, rightstatus, ret, done, #call); \
         finfo1.generic.level = RAW_FILEINFO_ALL_INFO; \
         finfo1.generic.in.file.fnum = fnum; \
         status2 = smb_raw_fileinfo(cli->tree, tctx, &finfo1); \
-        if (!NT_STATUS_IS_OK(status2)) { \
-                printf("(%s) %s pathinfo - %s\n", __location__, #call, nt_errstr(status)); \
-                ret = false; \
-        }} while (0)
+        torture_assert_ntstatus_ok_goto(tctx, status2, ret, done, "ALL_INFO"); \
+} while (0)
 
 /*
   test stream renames
@@ -1901,7 +1884,7 @@ static bool test_stream_permissions(struct torture_context *tctx,
 	int fnum = -1;
 	union smb_fileinfo q;
 	union smb_setfileinfo set;
-	struct security_ace ace;
+	struct security_ace ace = {};
 	struct security_descriptor *sd;
 
 	torture_assert(tctx, torture_setup_dir(cli, BASEDIR),
@@ -2006,7 +1989,7 @@ static bool test_stream_permissions(struct torture_context *tctx,
 	ace.type = SEC_ACE_TYPE_ACCESS_DENIED;
 	ace.flags = 0;
 	ace.access_mask = SEC_FILE_WRITE_DATA;
-	ace.trustee = *dom_sid_parse_talloc(tctx, SID_WORLD);
+	ace.trustee = global_sid_World;
 
 	status = security_descriptor_dacl_add(sd, &ace);
 	CHECK_STATUS(status, NT_STATUS_OK);
@@ -2060,7 +2043,7 @@ static bool test_stream_permissions(struct torture_context *tctx,
 	return ret;
 }
 
-/* 
+/*
    basic testing of streams calls
 */
 struct torture_suite *torture_raw_streams(TALLOC_CTX *tctx)

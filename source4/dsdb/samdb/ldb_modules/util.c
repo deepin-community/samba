@@ -1,4 +1,4 @@
-/* 
+/*
    Unix SMB/CIFS implementation.
    Samba utility functions
 
@@ -48,6 +48,9 @@ int dsdb_module_search_dn(struct ldb_module *module,
 	struct ldb_result *res;
 
 	tmp_ctx = talloc_new(mem_ctx);
+	if (tmp_ctx == NULL) {
+		return ldb_oom(ldb_module_get_ctx(module));
+	}
 
 	res = talloc_zero(tmp_ctx, struct ldb_result);
 	if (!res) {
@@ -102,8 +105,8 @@ int dsdb_module_search_dn(struct ldb_module *module,
 	if (res->count != 1) {
 		/* we may be reading a DB that does not have the 'check base on search' option... */
 		ret = LDB_ERR_NO_SUCH_OBJECT;
-		ldb_asprintf_errstring(ldb_module_get_ctx(module), 
-				       "dsdb_module_search_dn: did not find base dn %s (%d results)", 
+		ldb_asprintf_errstring(ldb_module_get_ctx(module),
+				       "dsdb_module_search_dn: did not find base dn %s (%d results)",
 				       ldb_dn_get_linearized(basedn), res->count);
 	} else {
 		*_res = talloc_steal(mem_ctx, res);
@@ -128,6 +131,9 @@ int dsdb_module_search_tree(struct ldb_module *module,
 	struct ldb_result *res;
 
 	tmp_ctx = talloc_new(mem_ctx);
+	if (tmp_ctx == NULL) {
+		return ldb_oom(ldb_module_get_ctx(module));
+	}
 
 	/* cross-partitions searches with a basedn break multi-domain support */
 	SMB_ASSERT(basedn == NULL || (dsdb_flags & DSDB_SEARCH_SEARCH_ALL_PARTITIONS) == 0);
@@ -218,6 +224,9 @@ int dsdb_module_search(struct ldb_module *module,
 	SMB_ASSERT(basedn == NULL || (dsdb_flags & DSDB_SEARCH_SEARCH_ALL_PARTITIONS) == 0);
 
 	tmp_ctx = talloc_new(mem_ctx);
+	if (tmp_ctx == NULL) {
+		return ldb_oom(ldb_module_get_ctx(module));
+	}
 
 	if (format) {
 		va_start(ap, format);
@@ -766,7 +775,7 @@ int dsdb_check_samba_compatible_feature(struct ldb_module *module,
 
   Note that features can be marked as enabled in more than one
   place. For example, the recyclebin feature is marked as enabled both
-  on the CN=Partitions,CN=Configurration object and on the NTDS DN of
+  on the CN=Partitions,CN=Configuration object and on the NTDS DN of
   each DC in the forest. It seems likely that it is the job of the KCC
   to propagate between the two
  */
@@ -878,6 +887,7 @@ int dsdb_module_reference_dn(struct ldb_module *module, TALLOC_CTX *mem_ctx, str
 	ret = dsdb_module_search_dn(module, mem_ctx, &res, base, attrs,
 	                            DSDB_FLAG_NEXT_MODULE | DSDB_SEARCH_SHOW_EXTENDED_DN, parent);
 	if (ret != LDB_SUCCESS) {
+		*dn = NULL;
 		return ret;
 	}
 
@@ -1144,6 +1154,33 @@ bool dsdb_module_am_administrator(struct ldb_module *module)
 			ldb_get_opaque(ldb, DSDB_SESSION_INFO),
 			struct auth_session_info);
 	return security_session_user_level(session_info, NULL) == SECURITY_ADMINISTRATOR;
+}
+
+/*
+ * Return ‘true’ if the caller has system access. The ‘acl’ module passes
+ * SYSTEM_CONTROL_STRIP_CRITICAL when it wants to strip the critical flag.
+ */
+bool dsdb_have_system_access(
+	struct ldb_module *module,
+	struct ldb_request *req,
+	const enum system_control_strip_critical strip_critical)
+{
+	struct ldb_control *as_system = NULL;
+
+	as_system = ldb_request_get_control(req, LDB_CONTROL_AS_SYSTEM_OID);
+	if (as_system != NULL) {
+		switch (strip_critical) {
+		case SYSTEM_CONTROL_KEEP_CRITICAL:
+			break;
+		case SYSTEM_CONTROL_STRIP_CRITICAL:
+			as_system->critical = 0;
+			break;
+		}
+
+		return true;
+	}
+
+	return dsdb_module_am_system(module);
 }
 
 /*
@@ -1562,7 +1599,7 @@ int dsdb_get_expected_new_values(TALLOC_CTX *mem_ctx,
 			el_count++;
 			tmp = val_count + msg->elements[i].num_values;
 			if (unlikely(tmp < val_count)) {
-				DBG_ERR("too many values for one element!");
+				DBG_ERR("too many values for one element!\n");
 				return LDB_ERR_OPERATIONS_ERROR;
 			}
 			val_count = tmp;
@@ -1828,8 +1865,8 @@ bool dsdb_is_subclass_of(const struct dsdb_schema *schema,
 }
 
 /* Fix the DN so that the relative attribute names are in upper case so that the DN:
-   cn=Adminstrator,cn=users,dc=samba,dc=example,dc=com becomes
-   CN=Adminstrator,CN=users,DC=samba,DC=example,DC=com
+   cn=Administrator,cn=users,dc=samba,dc=example,dc=com becomes
+   CN=Administrator,CN=users,DC=samba,DC=example,DC=com
 */
 int dsdb_fix_dn_rdncase(struct ldb_context *ldb, struct ldb_dn *dn)
 {
@@ -1862,7 +1899,7 @@ int dsdb_fix_dn_rdncase(struct ldb_context *ldb, struct ldb_dn *dn)
  * @param ldb	ldb context
  * @param schema cached schema for ldb. We may get it, but it is very time consuming.
  * 			Hence leave the responsibility to the caller.
- * @param obj	AD object to determint objectCategory for
+ * @param obj	AD object to determine objectCategory for
  * @param mem_ctx Memory context - usually it is obj actually
  * @param pobjectcategory location to store found objectCategory
  *
@@ -1918,4 +1955,22 @@ int dsdb_make_object_category(struct ldb_context *ldb, const struct dsdb_schema 
 	}
 
 	return LDB_SUCCESS;
+}
+
+/*
+ * Remove all password related attributes.
+ */
+void dsdb_remove_password_related_attrs(struct ldb_message *msg,
+					bool userPassword)
+{
+	if (userPassword) {
+		ldb_msg_remove_attr(msg, "userPassword");
+	}
+	ldb_msg_remove_attr(msg, "clearTextPassword");
+	ldb_msg_remove_attr(msg, "unicodePwd");
+	ldb_msg_remove_attr(msg, "ntPwdHistory");
+	ldb_msg_remove_attr(msg, "dBCSPwd");
+	ldb_msg_remove_attr(msg, "lmPwdHistory");
+	ldb_msg_remove_attr(msg, "supplementalCredentials");
+	ldb_msg_remove_attr(msg, "pwdLastSet");
 }

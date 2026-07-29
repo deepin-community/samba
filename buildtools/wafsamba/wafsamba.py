@@ -19,6 +19,7 @@ from samba_autoproto import *
 from samba_python import *
 from samba_perl import *
 from samba_deps import *
+from samba_rust import *
 from samba_bundled import *
 from samba_third_party import *
 import samba_cross
@@ -33,12 +34,13 @@ import symbols
 import pkgconfig
 import configure_file
 import samba_waf18
+import samba_bundled
 
 LIB_PATH="shared"
 
 os.environ['PYTHONUNBUFFERED'] = '1'
 
-if Context.HEXVERSION not in (0x2001900,):
+if Context.HEXVERSION not in (0x2001a00,):
     Logs.error('''
 Please use the version of waf that comes with Samba, not
 a system installed version. See http://wiki.samba.org/index.php/Waf
@@ -82,7 +84,7 @@ def ADD_INIT_FUNCTION(bld, subsystem, target, init_function):
         return
     bld.ASSERT(subsystem is not None, "You must specify a subsystem for init_function '%s'" % init_function)
     cache = LOCAL_CACHE(bld, 'INIT_FUNCTIONS')
-    if not subsystem in cache:
+    if subsystem not in cache:
         cache[subsystem] = []
     cache[subsystem].append( { 'TARGET':target, 'INIT_FUNCTION':init_function } )
 Build.BuildContext.ADD_INIT_FUNCTION = ADD_INIT_FUNCTION
@@ -109,7 +111,6 @@ def SAMBA_LIBRARY(bld, libname, source,
                   ldflags='',
                   external_library=False,
                   realname=None,
-                  keep_underscore=False,
                   autoproto=None,
                   autoproto_extra_source='',
                   group='main',
@@ -135,13 +136,14 @@ def SAMBA_LIBRARY(bld, libname, source,
                   require_builtin_deps=False,
                   provide_builtin_linking=False,
                   builtin_cflags='',
+                  force_unversioned=False,
                   allow_undefined_symbols=False,
                   allow_warnings=False,
                   enabled=True):
     '''define a Samba library'''
 
     # We support:
-    # - LIBRARY: this can be use to link via -llibname
+    # - LIBRARY: this can be used to link via -llibname
     # - MODULE:  this is module from SAMBA_MODULE()
     # - PLUGIN:  this is plugin for external consumers to be
     #            loaded via dlopen()
@@ -172,8 +174,20 @@ def SAMBA_LIBRARY(bld, libname, source,
         raise Errors.WafError("private library '%s' with orig_vscript_map must not have abi_match" %
                              libname)
 
+    if force_unversioned and private_library:
+        raise Errors.WafError("private library '%s': can't have force_unversioned=True" %
+                             libname)
+
+    if force_unversioned and realname is None:
+        raise Errors.WafError("library '%s': force_unversioned=True needs realname too" %
+                             libname)
+
     if LIB_MUST_BE_PRIVATE(bld, libname) and target_type not in ['PLUGIN']:
         private_library = True
+        public_headers_install = False
+
+    if force_unversioned:
+        private_library = False
 
     if not enabled:
         SET_TARGET_TYPE(bld, libname, 'DISABLED')
@@ -298,12 +312,9 @@ def SAMBA_LIBRARY(bld, libname, source,
     if bundled_name is not None:
         pass
     elif target_type == 'PYTHON' or realname or not private_library:
-        if keep_underscore:
-            bundled_name = libname
-        else:
-            bundled_name = libname.replace('_', '-')
+        bundled_name = libname.replace('_', '-')
     else:
-        assert (private_library == True and realname is None)
+        assert (private_library is True and realname is None)
         bundled_name = PRIVATE_NAME(bld, libname.replace('_', '-'))
         vnum = None
 
@@ -331,7 +342,9 @@ def SAMBA_LIBRARY(bld, libname, source,
 
     vscript = None
     if bld.env.HAVE_LD_VERSION_SCRIPT:
-        if private_library:
+        if force_unversioned:
+            version = None
+        elif private_library:
             version = bld.env.PRIVATE_VERSION
         elif vnum:
             version = "%s_%s" % (libname, vnum)
@@ -561,8 +574,7 @@ def SAMBA_MODULE(bld, modname, source,
                  manpages=None,
                  allow_undefined_symbols=False,
                  allow_warnings=False,
-                 install=True
-                 ):
+                 install=True):
     '''define a Samba module.'''
 
     bld.ASSERT(subsystem, "You must specify a subsystem for SAMBA_MODULE(%s)" % modname)
@@ -613,6 +625,11 @@ def SAMBA_MODULE(bld, modname, source,
 
     build_link_name = "modules/%s/%s" % (subsystem, realname)
 
+    if f'{subsystem}_modules_install_dir' in bld.env:
+        install_path = bld.env[f'{subsystem}_modules_install_dir']
+    else:
+        install_path = "${MODULESDIR}/%s" % subsystem
+
     if init_function:
         cflags += " -D%s=%s" % (init_function, module_init_name)
 
@@ -629,7 +646,7 @@ def SAMBA_MODULE(bld, modname, source,
                       vars=vars,
                       bundled_name=build_name,
                       link_name=build_link_name,
-                      install_path="${MODULESDIR}/%s" % subsystem,
+                      install_path=install_path,
                       pyembed=pyembed,
                       manpages=manpages,
                       allow_undefined_symbols=allow_undefined_symbols,
@@ -654,7 +671,6 @@ def SAMBA_PLUGIN(bld, pluginname, source,
                  vars=None,
                  subdir=None,
                  realname=None,
-                 keep_underscore=False,
                  autoproto=None,
                  autoproto_extra_source='',
                  install_path=None,
@@ -1058,7 +1074,7 @@ def copy_and_fix_perl_path(task):
     lineno = 0
     for line in source_file:
         newline = line
-        if lineno == 0 and task.env["PERL_SPECIFIED"] == True and line[:2] == "#!":
+        if lineno == 0 and task.env["PERL_SPECIFIED"] is True and line[:2] == "#!":
             newline = replacement_shebang
         elif pattern in line:
             newline = line.replace(pattern, replacement)
@@ -1133,7 +1149,7 @@ def INSTALL_WILDCARD(bld, destdir, pattern, chmod=MODE_644, flat=False,
                   python_fixup=python_fixup, base_name=trim_path)
 Build.BuildContext.INSTALL_WILDCARD = INSTALL_WILDCARD
 
-def INSTALL_DIR(bld, path, chmod=0o755, env=None):
+def INSTALL_DIR(bld, path, chmod=0o755):
     """Install a directory if it doesn't exist, always set permissions."""
 
     if not path:
@@ -1154,12 +1170,12 @@ def INSTALL_DIR(bld, path, chmod=0o755, env=None):
                     raise Errors.WafError("Cannot create the folder '%s' (error: %s)" % (path, e))
 Build.BuildContext.INSTALL_DIR = INSTALL_DIR
 
-def INSTALL_DIRS(bld, destdir, dirs, chmod=0o755, env=None):
+def INSTALL_DIRS(bld, destdir, dirs, chmod=0o755):
     '''install a set of directories'''
     destdir = bld.EXPAND_VARIABLES(destdir)
     dirs = bld.EXPAND_VARIABLES(dirs)
     for d in TO_LIST(dirs):
-        INSTALL_DIR(bld, os.path.join(destdir, d), chmod, env)
+        INSTALL_DIR(bld, os.path.join(destdir, d), chmod)
 Build.BuildContext.INSTALL_DIRS = INSTALL_DIRS
 
 

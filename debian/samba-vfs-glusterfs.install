@@ -1,0 +1,4 @@
+usr/lib/${DEB_HOST_MULTIARCH}/samba/vfs/glusterfs.so
+usr/lib/${DEB_HOST_MULTIARCH}/samba/vfs/glusterfs_fuse.so
+usr/share/man/man8/vfs_glusterfs.8
+usr/share/man/man8/vfs_glusterfs_fuse.8

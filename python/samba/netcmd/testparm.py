@@ -145,14 +145,12 @@ class cmd_testparm(Command):
         lockdir = lp.get("lockdir")
 
         if not os.path.isdir(lockdir):
-            logger.error("lock directory %s does not exist", lockdir)
-            valid = False
+            logger.warning("lock directory %s does not exist", lockdir)
 
         piddir = lp.get("pid directory")
 
         if not os.path.isdir(piddir):
-            logger.error("pid directory %s does not exist", piddir)
-            valid = False
+            logger.warning("pid directory %s does not exist", piddir)
 
         winbind_separator = lp.get("winbind separator")
 
@@ -182,6 +180,26 @@ class cmd_testparm(Command):
                         logger.warning(
                             "When acting as Active Directory domain controller, " +
                             entry + " should be in vfs objects.")
+
+        strong_auth = lp.get("ldap server require strong auth")
+        if strong_auth == "allow_sasl_over_tls":
+            logger.warning(
+                "WARNING: You have not configured "
+                "'ldap server require strong auth = "
+                "allow_sasl_over_tls'.\n"
+                "Please change to 'yes' (preferred) or "
+                "'allow_sasl_without_tls_channel_bindings' "
+                "(if really needed).")
+
+        cli_krb5_netlogon = lp.get("client use krb5 netlogon")
+        if cli_krb5_netlogon not in ["no", "default"]:
+            logger.error(
+                "You have configured "
+                "'client use krb5 netlogon = %s'.\n"
+                "This is experimental in Samba %s "
+                "and should not be used in production!\n\n" %
+                (cli_krb5_netlogon, samba.version))
+            valid = False
 
         return valid
 

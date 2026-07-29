@@ -33,6 +33,7 @@
 #include "system/kerberos.h"
 
 struct PAC_DATA_CTR;
+struct samr_Password;
 
 #define DEFAULT_KRB5_PORT 88
 
@@ -53,11 +54,21 @@ int kerberos_kinit_password_ext(const char *given_principal,
 				char **_canon_principal,
 				char **_canon_realm,
 				NTSTATUS *ntstatus);
+int kerberos_kinit_passwords_ext(const char *given_principal,
+				 uint8_t num_passwords,
+				 const char * const *passwords,
+				 const struct samr_Password * const *nt_hashes,
+				 uint8_t *used_idx,
+				 const char *explicit_kdc,
+				 const char *cache_name,
+				 TALLOC_CTX *mem_ctx,
+				 char **_canon_principal,
+				 char **_canon_realm,
+				 NTSTATUS *ntstatus);
 int ads_kdestroy(const char *cc_name);
 
 int kerberos_kinit_password(const char *principal,
 			    const char *password,
-			    int time_offset,
 			    const char *cache_name);
 bool create_local_private_krb5_conf_for_domain(const char *realm,
 						const char *domain,
@@ -84,12 +95,13 @@ NTSTATUS kerberos_return_pac(TALLOC_CTX *mem_ctx,
 
 /* The following definitions come from libads/krb5_setpw.c  */
 
-ADS_STATUS ads_krb5_set_password(const char *kdc_host, const char *princ,
-				 const char *newpw, int time_offset);
-ADS_STATUS kerberos_set_password(const char *kpasswd_server,
-				 const char *auth_principal, const char *auth_password,
-				 const char *target_principal, const char *new_password,
-				 int time_offset);
+ADS_STATUS ads_krb5_set_password(const char *princ,
+				 const char *newpw,
+				 const char *ccname);
+ADS_STATUS kerberos_set_password(const char *auth_principal,
+				 const char *auth_password,
+				 const char *target_principal,
+				 const char *new_password);
 
 #ifdef HAVE_KRB5
 int create_kerberos_key_from_string(krb5_context context,

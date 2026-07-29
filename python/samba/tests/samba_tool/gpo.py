@@ -30,10 +30,8 @@ from samba.dcerpc import preg
 from samba.ndr import ndr_pack, ndr_unpack
 from samba.common import get_string
 from configparser import ConfigParser
-from io import StringIO
 import xml.etree.ElementTree as etree
 from tempfile import NamedTemporaryFile
-from time import sleep
 import re
 from samba.gp.gpclass import check_guid
 from samba.gp_parse.gp_ini import GPTIniParser
@@ -143,21 +141,27 @@ source_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../
 provision_path = os.path.join(source_path, "source4/selftest/provisions/")
 
 def has_difference(path1, path2, binary=True, xml=True, sortlines=False):
-    """Use this function to determine if the GPO backup differs from another.
+    """Use this function to determine if the GPO backup differs from
+    another. It can compare pairs of files or pairs of directories.
 
     xml=True checks whether any xml files are equal
     binary=True checks whether any .SAMBABACKUP files are equal
+    sortlines=True ignore order of lines in comparison of single
+    files.
+
+    returns None if there is no difference between the paths,
+    otherwise *something*.
     """
     if os.path.isfile(path1):
-        if sortlines:
-            file1 = open(path1).readlines()
-            file1.sort()
-            file2 = open(path1).readlines()
-            file2.sort()
-            if file1 != file2:
-                return path1
+        with open(path1) as f1, open(path2) as f2:
+            lines1 = f1.readlines()
+            lines2 = f2.readlines()
 
-        elif open(path1).read() != open(path2).read():
+        if sortlines:
+            lines1.sort()
+            lines2.sort()
+
+        if lines1 != lines2:
             return path1
 
         return None
@@ -714,7 +718,7 @@ class GpoCmdTestCase(SambaToolCmdTest):
         self.assertTrue(os.path.exists(reg_pol),
                         'The Registry.pol does not exist')
         reg_data = ndr_unpack(preg.file, open(reg_pol, 'rb').read())
-        ret = any([get_string(e.valuename) == policy and e.data == 1 \
+        ret = any([get_string(e.valuename) == policy and e.data == 1
             for e in reg_data.entries])
         self.assertTrue(ret, 'The sudoers entry was not added')
 
@@ -733,7 +737,7 @@ class GpoCmdTestCase(SambaToolCmdTest):
         self.assertGreater(after_vers, before_vers, 'GPT.INI was not updated')
 
         reg_data = ndr_unpack(preg.file, open(reg_pol, 'rb').read())
-        ret = not any([get_string(e.valuename) == policy and e.data == 1 \
+        ret = not any([get_string(e.valuename) == policy and e.data == 1
             for e in reg_data.entries])
         self.assertTrue(ret, 'The sudoers entry was not removed')
 
@@ -1574,6 +1578,42 @@ class GpoCmdTestCase(SambaToolCmdTest):
                                                  os.environ["PASSWORD"]))
         self.assertNotIn(text, out, 'The test entry was still found!')
 
+    def test_vgp_motd_set_thrice(self):
+        url = f'ldap://{os.environ["SERVER"]}'
+        creds = f'-U{os.environ["USERNAME"]}%{os.environ["PASSWORD"]}'
+        old_version = gpt_ini_version(self.gpo_guid)
+
+        for i in range(1, 4):
+            msg = f"message {i}\n"
+            result, out, err = self.runcmd("gpo", "manage", "motd", "set",
+                                           "-H", url,
+                                           creds,
+                                           self.gpo_guid,
+                                           msg.format(i))
+
+            self.assertCmdSuccess(result, out, err, f'MOTD set {i} failed')
+            self.assertEqual(err, "", f"not expecting errors (round {i})")
+            new_version = gpt_ini_version(self.gpo_guid)
+            self.assertGreater(new_version, old_version,
+                               f'GPT.INI was not updated in round {i}')
+            old_version = new_version
+
+            result, out, err = self.runcmd("gpo", "manage", "motd", "list",
+                                           "-H", url,
+                                           creds,
+                                           self.gpo_guid)
+
+            self.assertCmdSuccess(result, out, err, f'MOTD list {i} failed')
+            self.assertIn(msg, out)
+
+        # unset, by setting with no value
+        result, out, err = self.runcmd("gpo", "manage", "motd", "set",
+                                       "-H", url,
+                                       creds,
+                                       self.gpo_guid)
+        self.assertCmdSuccess(result, out, err, f'MOTD set {i} failed')
+        self.assertEqual(err, "", f"not expecting errors (round {i})")
+
     def test_vgp_motd(self):
         lp = LoadParm()
         lp.load(os.environ['SERVERCONFFILE'])
@@ -1807,8 +1847,8 @@ class GpoCmdTestCase(SambaToolCmdTest):
             self.assertIn('UserPolicy         : False', out,
                           'The test cse should not have User policy enabled')
             cse_ext = re.findall(r'^UniqueGUID\s+:\s+(.*)', out)
-            self.assertEquals(len(cse_ext), 1,
-                              'The test cse GUID was not found')
+            self.assertEqual(len(cse_ext), 1,
+                             'The test cse GUID was not found')
             cse_ext = cse_ext[0]
             self.assertTrue(check_guid(cse_ext),
                             'The test cse GUID was not formatted correctly')
@@ -1824,7 +1864,7 @@ class GpoCmdTestCase(SambaToolCmdTest):
 
     def setUp(self):
         """set up a temporary GPO to work with"""
-        super(GpoCmdTestCase, self).setUp()
+        super().setUp()
         (result, out, err) = self.runsubcmd("gpo", "create", self.gpo_name,
                                             "-H", "ldap://%s" % os.environ["SERVER"],
                                             "-U%s%%%s" % (os.environ["USERNAME"], os.environ["PASSWORD"]),
@@ -1846,4 +1886,4 @@ class GpoCmdTestCase(SambaToolCmdTest):
         """remove the temporary GPO to work with"""
         (result, out, err) = self.runsubcmd("gpo", "del", self.gpo_guid, "-H", "ldap://%s" % os.environ["SERVER"], "-U%s%%%s" % (os.environ["USERNAME"], os.environ["PASSWORD"]))
         self.assertCmdSuccess(result, out, err, "Ensuring gpo deleted successfully")
-        super(GpoCmdTestCase, self).tearDown()
+        super().tearDown()

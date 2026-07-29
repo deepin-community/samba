@@ -1,19 +1,19 @@
-/* 
+/*
    Unix SMB/CIFS implementation.
    Utility functions for Samba
    Copyright (C) Andrew Tridgell 1992-1999
    Copyright (C) Jelmer Vernooij 2005
-    
+
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
    the Free Software Foundation; either version 3 of the License, or
    (at your option) any later version.
-   
+
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
    GNU General Public License for more details.
-   
+
    You should have received a copy of the GNU General Public License
    along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
@@ -127,5 +127,19 @@ bool sockaddr_storage_to_samba_sockaddr(
 	struct samba_sockaddr *sa, const struct sockaddr_storage *ss);
 bool samba_sockaddr_set_port(struct samba_sockaddr *sa, uint16_t port);
 bool samba_sockaddr_get_port(const struct samba_sockaddr *sa, uint16_t *port);
+
+/*
+ * check for POLLERR or POLL*HUP
+ */
+int samba_socket_poll_error(int fd);
+/*
+ * getsockopt(fd, SOL_SOCKET, SO_ERROR, &error, &len)
+ */
+int samba_socket_sock_error(int fd);
+/*
+ * check for POLL*HUP and fallback to
+ * getsockopt(fd, SOL_SOCKET, SO_ERROR, &error, &len)
+ */
+int samba_socket_poll_or_sock_error(int fd);
 
 #endif /* _SAMBA_UTIL_NET_H_ */

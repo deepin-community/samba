@@ -43,9 +43,9 @@ static krb5_error_code kpasswd_change_password(struct kdc_server *kdc,
 {
 	NTSTATUS status;
 	NTSTATUS result = NT_STATUS_UNSUCCESSFUL;
-	enum samPwdChangeReason reject_reason;
+	enum samPwdChangeReason reject_reason = SAM_PWD_CHANGE_NO_ERROR;
 	const char *reject_string = NULL;
-	struct samr_DomInfo1 *dominfo;
+	struct samr_DomInfo1 *dominfo = NULL;
 	bool ok;
 	int ret;
 
@@ -136,9 +136,9 @@ static krb5_error_code kpasswd_set_password(struct kdc_server *kdc,
 					  lpcfg_iconv_handle(kdc->task->lp_ctx),
 					  CH_UTF8,
 					  CH_UTF16,
-					  (const char *)chpw.newpasswd.data,
+					  chpw.newpasswd.data,
 					  chpw.newpasswd.length,
-					  (void **)&password.data,
+					  &password.data,
 					  &password.length);
 	if (!ok) {
 		free_ChangePasswdDataMS(&chpw);
@@ -213,6 +213,7 @@ static krb5_error_code kpasswd_set_password(struct kdc_server *kdc,
 					      "Failed to parse principal",
 					      kpasswd_reply);
 		if (!ok) {
+			krb5_xfree(target_principal_string);
 			*error_string = "Failed to create reply";
 			return KRB5_KPASSWD_HARDERROR;
 		}
@@ -227,6 +228,7 @@ static krb5_error_code kpasswd_set_password(struct kdc_server *kdc,
 					    &password,
 					    &reject_reason,
 					    &dominfo);
+	krb5_xfree(target_principal_string);
 	if (!NT_STATUS_IS_OK(status)) {
 		DBG_ERR("kpasswd_samdb_set_password failed - %s\n",
 			nt_errstr(status));
@@ -288,9 +290,9 @@ krb5_error_code kpasswd_handle_request(struct kdc_server *kdc,
 						  lpcfg_iconv_handle(kdc->task->lp_ctx),
 						  CH_UTF8,
 						  CH_UTF16,
-						  (const char *)decoded_data->data,
+						  decoded_data->data,
 						  decoded_data->length,
-						  (void **)&password.data,
+						  &password.data,
 						  &password.length);
 		if (!ok) {
 			*error_string = "String conversion failed!";

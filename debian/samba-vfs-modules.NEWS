@@ -1,0 +1,15 @@
+samba-vfs-modules (2:4.20.2+dfsg-3) unstable; urgency=medium
+
+  samba-vfs-modules package has been dropped in this release.
+  Instead, all common vfs modules are now part of regular samba
+  package, so are always installed (so there is not need to install
+  samba-vfs-modules for, say, wide links = yes to work, ad-dc always
+  works too and so on).
+
+  At the same time, glusterfs and ceph vfs modules are now shipped in
+  their own separate packages, samba-vfs-glusterfs and samba-vfs-ceph
+  (samba-vfs-glusterfs in universe in ubuntu).  If you need ceph or
+  glusterfs functionality, please install samba-vfs-ceph and/or
+  samba-vfs-glusterfs package(s) separately.
+
+ -- Michael Tokarev <mjt@tls.msk.ru>  Mon, 24 Jun 2024 12:48:23 +0300

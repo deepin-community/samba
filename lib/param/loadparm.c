@@ -1132,7 +1132,7 @@ bool handle_include(struct loadparm_context *lp_ctx, struct loadparm_service *se
 
 	DEBUG(2, ("Can't find include file %s\n", fname));
 
-	return false;
+	return true;
 }
 
 /***************************************************************************
@@ -1273,6 +1273,9 @@ bool handle_printing(struct loadparm_context *lp_ctx, struct loadparm_service *s
 
 	if (parm_num == -1) {
 		parm_num = lpcfg_map_parameter("printing");
+		if (parm_num == -1) {
+			return false;
+		}
 	}
 
 	if (!lp_set_enum_parm(&parm_table[parm_num], pszParmValue, (int*)ptr)) {
@@ -2707,6 +2710,7 @@ struct loadparm_context *loadparm_init(TALLOC_CTX *mem_ctx)
 	lpcfg_do_global_parameter(lp_ctx, "debug pid", "No");
 	lpcfg_do_global_parameter(lp_ctx, "debug uid", "No");
 	lpcfg_do_global_parameter(lp_ctx, "debug class", "No");
+	lpcfg_do_global_parameter(lp_ctx, "winbind debug traceid", "Yes");
 
 	lpcfg_do_global_parameter(lp_ctx, "server role", "auto");
 	lpcfg_do_global_parameter(lp_ctx, "domain logons", "No");
@@ -2795,7 +2799,6 @@ struct loadparm_context *loadparm_init(TALLOC_CTX *mem_ctx)
 	lpcfg_do_global_parameter(lp_ctx, "NTLMAuth", "ntlmv2-only");
 	lpcfg_do_global_parameter(lp_ctx, "NT hash store", "always");
 	lpcfg_do_global_parameter(lp_ctx, "RawNTLMv2Auth", "False");
-	lpcfg_do_global_parameter(lp_ctx, "client use spnego principal", "False");
 
 	lpcfg_do_global_parameter(lp_ctx, "allow dcerpc auth level connect", "False");
 
@@ -2837,7 +2840,6 @@ struct loadparm_context *loadparm_init(TALLOC_CTX *mem_ctx)
 	lpcfg_do_global_parameter(lp_ctx, "smb ports", "445 139");
 	lpcfg_do_global_parameter_var(lp_ctx, "nbt port", "%d", NBT_NAME_SERVICE_PORT);
 	lpcfg_do_global_parameter_var(lp_ctx, "dgram port", "%d", NBT_DGRAM_SERVICE_PORT);
-	lpcfg_do_global_parameter(lp_ctx, "cldap port", "389");
 	lpcfg_do_global_parameter(lp_ctx, "krb5 port", "88");
 	lpcfg_do_global_parameter(lp_ctx, "kpasswd port", "464");
 	lpcfg_do_global_parameter_var(lp_ctx, "dns port", "%d", DNS_SERVICE_PORT);
@@ -2929,6 +2931,8 @@ struct loadparm_context *loadparm_init(TALLOC_CTX *mem_ctx)
 	lpcfg_do_global_parameter(lp_ctx, "guest account", GUEST_ACCOUNT);
 
 	lpcfg_do_global_parameter(lp_ctx, "client schannel", "True");
+
+	lpcfg_do_global_parameter(lp_ctx, "client use krb5 netlogon", "default");
 
 	lpcfg_do_global_parameter(lp_ctx, "smb encrypt", "default");
 
@@ -3074,6 +3078,8 @@ struct loadparm_context *loadparm_init(TALLOC_CTX *mem_ctx)
 
 	lpcfg_do_global_parameter(lp_ctx, "smb2 leases", "yes");
 
+	lpcfg_do_global_parameter(lp_ctx, "smb3 directory leases", "Auto");
+
 	lpcfg_do_global_parameter(lp_ctx, "server multi channel support", "yes");
 
 	lpcfg_do_global_parameter(lp_ctx, "kerberos encryption types", "all");
@@ -3091,6 +3097,8 @@ struct loadparm_context *loadparm_init(TALLOC_CTX *mem_ctx)
 	lpcfg_do_global_parameter(lp_ctx, "ea support", "yes");
 
 	lpcfg_do_global_parameter(lp_ctx, "store dos attributes", "yes");
+
+	lpcfg_do_global_parameter(lp_ctx, "vfs mkdir use tmp name", "Auto");
 
 	lpcfg_do_global_parameter(lp_ctx, "debug encryption", "no");
 
@@ -3156,6 +3164,21 @@ struct loadparm_context *loadparm_init(TALLOC_CTX *mem_ctx)
 				  "ad dc functional level",
 				  "2008_R2");
 
+	lpcfg_do_global_parameter(lp_ctx,
+				  "acl claims evaluation",
+				  "AD DC only");
+
+	/* Set the default Himmelblaud globals */
+	lpcfg_do_global_parameter(lp_ctx,
+				  "himmelblaud hsm pin path",
+				  get_dyn_HIMMELBLAUD_HSM_PIN_PATH());
+	lpcfg_do_global_parameter(lp_ctx,
+				  "himmelblaud hello enabled",
+				  "false");
+	lpcfg_do_global_parameter(lp_ctx,
+				  "himmelblaud sfa fallback",
+				  "false");
+
 	for (i = 0; parm_table[i].label; i++) {
 		if (!(lp_ctx->flags[i] & FLAG_CMDLINE)) {
 			lp_ctx->flags[i] |= FLAG_DEFAULT;
@@ -3197,7 +3220,16 @@ struct loadparm_context *loadparm_init_global(bool load_default)
 }
 
 /**
- * Initialise the global parameter structure.
+ * @brief Initialise the global parameter structure.
+ *
+ * This function initialized the globals if needed. Make sure that
+ * gfree_loadparm() is called before the application exits.
+ *
+ * @param mem_ctx   The talloc memory context to allocate lp_ctx on.
+ *
+ * @param s3_fns    The loadparm helper functions to use
+ *
+ * @return An initialized lp_ctx pointer or NULL on error.
  */
 struct loadparm_context *loadparm_init_s3(TALLOC_CTX *mem_ctx,
 					  const struct loadparm_s3_helpers *s3_fns)
@@ -3209,6 +3241,9 @@ struct loadparm_context *loadparm_init_s3(TALLOC_CTX *mem_ctx,
 	loadparm_context->s3_fns = s3_fns;
 	loadparm_context->globals = s3_fns->globals;
 	loadparm_context->flags = s3_fns->flags;
+
+	/* Make sure globals are correctly initialized */
+	loadparm_context->s3_fns->init_globals(loadparm_context, false);
 
 	return loadparm_context;
 }
@@ -3648,6 +3683,17 @@ bool lpcfg_server_signing_allowed(struct loadparm_context *lp_ctx, bool *mandato
 	return allowed;
 }
 
+int lpcfg_client_use_krb5_netlogon(struct loadparm_context *lp_ctx)
+{
+	int val = lpcfg__client_use_krb5_netlogon(lp_ctx);
+
+	if (val == LP_ENUM_Default) {
+		val = false;
+	}
+
+	return val;
+}
+
 int lpcfg_tdb_hash_size(struct loadparm_context *lp_ctx, const char *name)
 {
 	const char *base;
@@ -3746,4 +3792,41 @@ int32_t lpcfg_parse_enum_vals(const char *param_name,
 	}
 
 	return ret;
+}
+
+const char *lpcfg_dns_hostname(struct loadparm_context *lp_ctx)
+{
+	const char *dns_hostname = lpcfg__dns_hostname(lp_ctx);
+	const char *dns_domain = lpcfg_dnsdomain(lp_ctx);
+	char *netbios_name = NULL;
+	char *hostname = NULL;
+
+	if (dns_hostname != NULL && dns_hostname[0] != '\0') {
+		return dns_hostname;
+	}
+
+	netbios_name = strlower_talloc(lp_ctx, lpcfg_netbios_name(lp_ctx));
+	if (netbios_name == NULL) {
+		return NULL;
+	}
+
+	/* If it isn't set, try to initialize with [netbios name].[realm] */
+	if (dns_domain != NULL && dns_domain[0] != '\0') {
+		hostname = talloc_asprintf(lp_ctx,
+					   "%s.%s",
+					   netbios_name,
+					   dns_domain);
+	} else {
+		hostname = talloc_strdup(lp_ctx, netbios_name);
+	}
+	TALLOC_FREE(netbios_name);
+	if (hostname == NULL) {
+		return NULL;
+	}
+
+	lpcfg_string_set(lp_ctx->globals->ctx,
+			 &lp_ctx->globals->_dns_hostname,
+			 hostname);
+
+	return hostname;
 }

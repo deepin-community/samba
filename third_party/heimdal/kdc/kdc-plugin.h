@@ -57,9 +57,7 @@ typedef krb5_error_code
 
 /*
  * Verify the PAC KDC signatures by fetching the appropriate TGS key
- * and calling krb5_pac_verify() with that key. The possibly-NULL
- * is_trusted may be set by the plugin to indicate that the PAC was
- * issued by a trusted server, and not, for example, by an RODC.
+ * and calling krb5_pac_verify() with that key.
  */
 
 typedef krb5_error_code
@@ -71,8 +69,7 @@ typedef krb5_error_code
 					   hdb_entry *,/* server */
 					   hdb_entry *,/* krbtgt */
 					   EncTicketPart *, /* ticket */
-					   krb5_pac, /* pac */
-					   krb5_boolean *); /* is_trusted */
+					   krb5_pac); /* pac */
 
 /*
  * Update the KDC PAC buffers. This function may be used after verifying the PAC
@@ -117,6 +114,16 @@ typedef krb5_error_code
 (KRB5_CALLCONV *krb5plugin_kdc_referral_policy)(void *, astgs_request_t);
 
 /*
+ * A hardware authentication policy plugin can indicate what is to
+ * happen when a client authenticates using a method other than
+ * hardware authentication. It can return zero to allow the
+ * authentication, or an appropriate error code to deny it.
+ */
+
+typedef krb5_error_code
+(KRB5_CALLCONV *krb5plugin_kdc_hwauth_policy)(void *, astgs_request_t);
+
+/*
  * Update the AS or TGS reply immediately prior to encoding.
  */
 
@@ -138,7 +145,7 @@ typedef krb5_error_code
  * Plugins should carefully check API contract notes for changes
  * between plugin API versions.
  */
-#define KRB5_PLUGIN_KDC_VERSION_11	11
+#define KRB5_PLUGIN_KDC_VERSION_12	12
 
 typedef struct krb5plugin_kdc_ftable {
     HEIM_PLUGIN_FTABLE_COMMON_ELEMENTS(krb5_context);
@@ -147,6 +154,7 @@ typedef struct krb5plugin_kdc_ftable {
     krb5plugin_kdc_pac_update		pac_update;
     krb5plugin_kdc_client_access	client_access;
     krb5plugin_kdc_referral_policy	referral_policy;
+    krb5plugin_kdc_hwauth_policy	hwauth_policy;
     krb5plugin_kdc_finalize_reply	finalize_reply;
     krb5plugin_kdc_audit		audit;
 } krb5plugin_kdc_ftable;

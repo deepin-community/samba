@@ -336,7 +336,7 @@ test_update()
 
 	echo "modified" >>testfile
 	# touch source to trigger new download
-	sleep 2
+	sleep 1
 	touch -m $WORKDIR/testfile
 	$SMBGET --verbose --update -U${SERVER}/${USERNAME}%$PASSWORD smb://$SERVER_IP/smbget/testfile
 	if [ $? -ne 0 ]; then
@@ -510,7 +510,7 @@ test_kerberos_trust()
 
 # TODO FIXME
 # This test does not work, as we can't tell the libsmb code that the
-# principal is an enterprice principal. We need support for enterprise
+# principal is an enterprise principal. We need support for enterprise
 # principals in kerberos_kinit_password_ext() and a way to pass it via the
 # credenitals structure and commandline options.
 # It works if you do: kinit -E testdenied_upn@${REALM}.upn

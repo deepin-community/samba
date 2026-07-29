@@ -1127,9 +1127,11 @@ NTSTATUS change_oem_password(struct samu *hnd, const char *rhost,
 	}
 
 	if (pdb_get_account_policy(PDB_POLICY_MIN_PASSWORD_LEN, &min_len) && (str_charnum(new_passwd) < min_len)) {
-		DEBUG(1, ("user %s cannot change password - password too short\n",
-			  username));
-		DEBUGADD(1, (" account policy min password len = %d\n", min_len));
+		DBG_WARNING("user %s cannot change password - "
+			    "password too short\n"
+			    " account policy min password len = %"PRIu32"\n",
+			    username,
+			    min_len);
 		if (samr_reject_reason) {
 			*samr_reject_reason = SAM_PWD_CHANGE_PASSWORD_TOO_SHORT;
 		}
@@ -1216,7 +1218,7 @@ NTSTATUS pass_oem_change(char *user, const char *rhost,
 	ret = pdb_getsampwnam(sampass, user);
 	unbecome_root();
 
-	if (ret == false) {
+	if (!ret) {
 		DEBUG(0,("pass_oem_change: getsmbpwnam returned NULL\n"));
 		nt_status = NT_STATUS_NO_SUCH_USER;
 		goto done;

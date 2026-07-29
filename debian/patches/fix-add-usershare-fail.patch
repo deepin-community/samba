@@ -8,16 +8,14 @@ Author: rong wang <wangrong@uniontech.com>
 Bug: https://pms.uniontech.com/bug-view-181833.html
 Forwarded: not-needed
 ---
-Index: samba-4.17.12.2/source3/utils/netlookup.c
-===================================================================
---- samba-4.17.12.2.orig/source3/utils/netlookup.c
-+++ samba-4.17.12.2/source3/utils/netlookup.c
-@@ -96,7 +96,7 @@ static struct con_struct *create_cs(stru
- 	talloc_set_destructor(cs, cs_destructor);
- 
- 	nt_status = cli_full_connection_creds(&cs->cli, lp_netbios_name(), lp_netbios_name(),
--					&loopback_ss, 0,
-+					&loopback_ss, c->opt_port,
- 					"IPC$", "IPC",
- 					anon_creds,
- 					CLI_FULL_CONNECTION_IPC);
+--- a/source3/utils/netlookup.c
++++ b/source3/utils/netlookup.c
+@@ -100,7 +100,7 @@
+ 					      lp_netbios_name(),
+ 					      lp_netbios_name(),
+ 					      &loopback_ss,
+-					      0,
++					      c->opt_port,
+ 					      "IPC$",
+ 					      "IPC",
+ 					      anon_creds,

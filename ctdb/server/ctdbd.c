@@ -40,9 +40,10 @@
 #include "common/common.h"
 #include "common/path.h"
 #include "common/logging.h"
-#include "common/logging_conf.h"
 
-#include "ctdb_config.h"
+#include "conf/logging_conf.h"
+#include "conf/cluster_conf.h"
+#include "conf/ctdb_config.h"
 
 int script_log_level;
 bool fast_start;
@@ -164,7 +165,6 @@ int main(int argc, const char *argv[])
 	const char **extra_argv;
 	poptContext pc;
 	struct tevent_context *ev;
-	const char *ctdb_base;
 	struct conf_context *conf;
 	const char *logging_location;
 	const char *test_mode;
@@ -194,10 +194,9 @@ int main(int argc, const char *argv[])
 	}
 
 	/* Default value for CTDB_BASE - don't override */
-	setenv("CTDB_BASE", CTDB_ETCDIR, 0);
-	ctdb_base = getenv("CTDB_BASE");
-	if (ctdb_base == NULL) {
-		D_ERR("CTDB_BASE not set\n");
+	ret = setenv("CTDB_BASE", CTDB_ETCDIR, 0);
+	if (ret != 0) {
+		D_ERR("Unable to set CTDB_BASE (errno=%d)\n", errno);
 		exit(1);
 	}
 
@@ -232,9 +231,9 @@ int main(int argc, const char *argv[])
 	 * Configuration file handling
 	 */
 
-	ret = ctdbd_config_load(ctdb, &conf);
+	ret = ctdb_config_load(ctdb, &conf, true);
 	if (ret != 0) {
-		/* ctdbd_config_load() logs the failure */
+		/* ctdb_config_load() logs the failure */
 		goto fail;
 	}
 
@@ -242,6 +241,13 @@ int main(int argc, const char *argv[])
 	 * Logging setup/options
 	 */
 
+
+	/*
+	 * Do not use CTDB_TEST_MODE outside a test environment to
+	 * attempt to (for example) improve installation flexibility.
+	 * This is unsupported, may cause unwanted security issues and
+	 * may break in future releases.
+	 */
 	test_mode = getenv("CTDB_TEST_MODE");
 
 	/* Log to stderr (ignoring configuration) when running as interactive */
@@ -280,7 +286,7 @@ int main(int argc, const char *argv[])
 
 	ret = ctdb_set_transport(ctdb, ctdb_config.transport);
 	if (ret == -1) {
-		D_ERR("ctdb_set_transport failed - %s\n", ctdb_errstr(ctdb));
+		D_ERR("Failed to setup transport\n");
 		goto fail;
 	}
 
@@ -296,19 +302,18 @@ int main(int argc, const char *argv[])
 	if (ctdb_config.node_address) {
 		ret = ctdb_set_address(ctdb, ctdb_config.node_address);
 		if (ret == -1) {
-			D_ERR("ctdb_set_address failed - %s\n",
-			      ctdb_errstr(ctdb));
+			D_ERR("Failed to set node address\n");
 			goto fail;
 		}
 	}
 
 	/* tell ctdb what nodes are available */
-	ctdb->nodes_file = talloc_asprintf(ctdb, "%s/nodes", ctdb_base);
-	if (ctdb->nodes_file == NULL) {
+	ctdb->nodes_source = cluster_conf_nodes_list(ctdb, conf);
+	if (ctdb->nodes_source == NULL) {
 		DBG_ERR(" Out of memory\n");
 		goto fail;
 	}
-	ctdb_load_nodes_file(ctdb);
+	ctdb_load_nodes(ctdb);
 
 	/*
 	 * Database setup/options
@@ -372,17 +377,13 @@ int main(int argc, const char *argv[])
 
 	ctdb_tunables_load(ctdb);
 
-	ctdb->event_script_dir = talloc_asprintf(ctdb,
-						 "%s/events/legacy",
-						 ctdb_base);
+	ctdb->event_script_dir = path_etcdir_append(ctdb, "events/legacy");
 	if (ctdb->event_script_dir == NULL) {
 		DBG_ERR("Out of memory\n");
 		goto fail;
 	}
 
-	ctdb->notification_script = talloc_asprintf(ctdb,
-						    "%s/notify.sh",
-						    ctdb_base);
+	ctdb->notification_script = path_etcdir_append(ctdb, "notify.sh");
 	if (ctdb->notification_script == NULL) {
 		D_ERR("Unable to set notification script\n");
 		goto fail;

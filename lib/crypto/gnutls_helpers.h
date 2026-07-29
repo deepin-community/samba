@@ -24,15 +24,6 @@
 #include "libcli/util/werror.h"
 #include "lib/util/data_blob.h"
 
-/* Those macros are only available in GnuTLS >= 3.6.4 */
-#ifndef GNUTLS_FIPS140_SET_LAX_MODE
-#define GNUTLS_FIPS140_SET_LAX_MODE()
-#endif
-
-#ifndef GNUTLS_FIPS140_SET_STRICT_MODE
-#define GNUTLS_FIPS140_SET_STRICT_MODE()
-#endif
-
 #ifdef DOXYGEN
 /**
  * @brief Convert a gnutls error code to a corresponding NTSTATUS.
@@ -186,5 +177,57 @@ samba_gnutls_aead_aes_256_cbc_hmac_sha512_decrypt(TALLOC_CTX *mem_ctx,
  * @return true if weak crypo is allowed, false otherwise.
  */
 bool samba_gnutls_weak_crypto_allowed(void);
+
+/**
+ * @brief Derive a key using the NIST SP 800‐108 algorithm.
+ *
+ * The details of the algorithm can be found at
+ * https://csrc.nist.gov/pubs/sp/800/108/r1/final.
+ *
+ * @param KI            The key‐derivation key used as input.
+ *
+ * @param KI_len        The length of the key‐derivation key.
+ *
+ * @param FixedData     If non‐NULL, specifies fixed data to be used in place of
+ *                      that constructed from the Label and Context parameters.
+ *
+ * @param FixedData_len The length of the fixed data, if it is present.
+ *
+ * @param Label         A label that identifies the purpose for the derived key.
+ *                      Ignored if FixedData is non‐NULL.
+ *
+ * @param Label_len     The length of the label.
+ *
+ * @param Context       Information related to the derived key. Ignored if
+ *                      FixedData is non‐NULL.
+ *
+ * @param Context_len   The length of the context data.
+ *
+ * @param algorithm     The HMAC algorithm to use.
+ *
+ * @param KO            A buffer to receive the derived key.
+ *
+ * @param KO_len        The length of the key to be derived.
+ *
+ * @return NT_STATUS_OK on success, an NT status error code otherwise.
+ */
+NTSTATUS samba_gnutls_sp800_108_derive_key(
+	const uint8_t *KI,
+	size_t KI_len,
+	const uint8_t *FixedData,
+	size_t FixedData_len,
+	const uint8_t *Label,
+	size_t Label_len,
+	const uint8_t *Context,
+	size_t Context_len,
+	const gnutls_mac_algorithm_t algorithm,
+	uint8_t *KO,
+	size_t KO_len);
+
+#ifndef HAVE_GNUTLS_CB_TLS_SERVER_END_POINT
+int legacy_gnutls_server_end_point_cb(gnutls_session_t session,
+				      bool is_server,
+				      gnutls_datum_t * cb);
+#endif /* HAVE_GNUTLS_CB_TLS_SERVER_END_POINT */
 
 #endif /* _GNUTLS_HELPERS_H */

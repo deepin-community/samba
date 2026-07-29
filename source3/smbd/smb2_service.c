@@ -753,14 +753,20 @@ NTSTATUS make_connection_snum(struct smbXsrv_connection *xconn,
 
 	/* Add veto/hide lists */
 	if (!IS_IPC(conn) && !IS_PRINT(conn)) {
-		set_namearray( &conn->veto_list,
-			       lp_veto_files(talloc_tos(), lp_sub, snum));
-		set_namearray( &conn->hide_list,
-			       lp_hide_files(talloc_tos(), lp_sub, snum));
-		set_namearray( &conn->veto_oplock_list,
-			       lp_veto_oplock_files(talloc_tos(), lp_sub, snum));
-		set_namearray( &conn->aio_write_behind_list,
-				lp_aio_write_behind(talloc_tos(), lp_sub, snum));
+		ok = set_namearray(conn,
+				   lp_veto_oplock_files(talloc_tos(), lp_sub, snum),
+				   &conn->veto_oplock_list);
+		if (!ok) {
+			status = NT_STATUS_NO_MEMORY;
+			goto err_root_exit;
+		}
+		ok = set_namearray(conn,
+				   lp_aio_write_behind(talloc_tos(), lp_sub, snum),
+				   &conn->aio_write_behind_list);
+		if (!ok) {
+			status = NT_STATUS_NO_MEMORY;
+			goto err_root_exit;
+		}
 	}
 	smb_fname_cpath = synthetic_smb_fname(talloc_tos(),
 					conn->connectpath,
@@ -779,22 +785,26 @@ NTSTATUS make_connection_snum(struct smbXsrv_connection *xconn,
 	   I have disabled this chdir check (tridge) */
 	/* the alternative is just to check the directory exists */
 
-	if ((ret = SMB_VFS_STAT(conn, smb_fname_cpath)) != 0 ||
-	    !S_ISDIR(smb_fname_cpath->st.st_ex_mode)) {
-		if (ret == 0 && !S_ISDIR(smb_fname_cpath->st.st_ex_mode)) {
-			DBG_ERR("'%s' is not a directory, when connecting to "
-				 "[%s]\n", conn->connectpath,
-				 lp_const_servicename(snum));
-		} else {
-			DBG_ERR("'%s' does not exist or permission denied "
-				 "when connecting to [%s] Error was %s\n",
-				 conn->connectpath,
-				 lp_const_servicename(snum),
-				 strerror(errno));
-		}
+	ret = SMB_VFS_STAT(conn, smb_fname_cpath);
+	if (ret != 0) {
+		DBG_ERR("'%s' does not exist or permission denied "
+			"when connecting to [%s] Error was %s\n",
+			conn->connectpath,
+			lp_const_servicename(snum),
+			strerror(errno));
 		status = NT_STATUS_BAD_NETWORK_NAME;
 		goto err_root_exit;
 	}
+
+	if (!S_ISDIR(smb_fname_cpath->st.st_ex_mode)) {
+		DBG_ERR("'%s' is not a directory, when connecting to "
+			"[%s]\n",
+			conn->connectpath,
+			lp_const_servicename(snum));
+		status = NT_STATUS_BAD_NETWORK_NAME;
+		goto err_root_exit;
+	}
+
 	conn->base_share_dev = smb_fname_cpath->st.st_ex_dev;
 
 	/* Figure out the characteristics of the underlying filesystem. This
@@ -818,7 +828,7 @@ NTSTATUS make_connection_snum(struct smbXsrv_connection *xconn,
 			 tsocket_address_string(conn->sconn->remote_address,
 						talloc_tos()) );
 #if defined(WITH_SMB1SERVER)
-		if (sconn->using_smb2) {
+		if (conn_using_smb2(sconn)) {
 #endif
 			signing_active = smb2_signing_key_valid(
 						session->global->encryption_key);

@@ -196,7 +196,7 @@ static void manage_gensec_get_pw_request(enum stdio_helper_mode stdio_helper_mod
 {
 	DATA_BLOB in;
 	if (strlen(buf) < 2) {
-		DEBUG(1, ("query [%s] invalid", buf));
+		DEBUG(1, ("query [%s] invalid\n", buf));
 		printf("BH Query invalid\n");
 		return;
 	}
@@ -731,6 +731,10 @@ static NTSTATUS contact_winbind_change_pswd_auth_crap(const char *username,
     return nt_status;
 }
 
+/*
+ * This function does not create a full auth_session_info, just enough
+ * for the caller to get the "unix" username
+ */
 static NTSTATUS ntlm_auth_generate_session_info(struct auth4_context *auth_context,
 						TALLOC_CTX *mem_ctx,
 						void *server_returned_info,
@@ -759,7 +763,17 @@ static NTSTATUS ntlm_auth_generate_session_info(struct auth4_context *auth_conte
 		return NT_STATUS_NO_MEMORY;
 	}
 
-	session_info->security_token = talloc_zero(session_info, struct security_token);
+	/*
+	 * This is not a full session_info - it is not created
+	 * correctly and misses any claims etc, because all we
+	 * actually use in the caller is the unix username.
+	 *
+	 * Therefore so no claims need to be added and
+	 * se_access_check() will never run.
+	 */
+	session_info->security_token
+		= security_token_initialise(talloc_tos(),
+					    CLAIMS_EVALUATION_INVALID_STATE);
 	if (session_info->security_token == NULL) {
 		TALLOC_FREE(session_info);
 		return NT_STATUS_NO_MEMORY;
@@ -1194,7 +1208,7 @@ static NTSTATUS ntlm_auth_prepare_gensec_client(TALLOC_CTX *mem_ctx,
 
 	/* These need to be in priority order, krb5 before NTLMSSP */
 #if defined(HAVE_KRB5)
-	backends[idx++] = &gensec_gse_krb5_security_ops;
+	backends[idx++] = gensec_gse_security_by_oid(GENSEC_OID_KERBEROS5);
 #endif
 
 	backends[idx++] = gensec_security_by_oid(NULL, GENSEC_OID_NTLMSSP);
@@ -1322,7 +1336,7 @@ static NTSTATUS ntlm_auth_prepare_gensec_server(TALLOC_CTX *mem_ctx,
 
 	/* These need to be in priority order, krb5 before NTLMSSP */
 #if defined(HAVE_KRB5)
-	backends[idx++] = &gensec_gse_krb5_security_ops;
+	backends[idx++] = gensec_gse_security_by_oid(GENSEC_OID_KERBEROS5);
 #endif
 
 	backends[idx++] = gensec_security_by_oid(NULL, GENSEC_OID_NTLMSSP);
@@ -1341,7 +1355,11 @@ static NTSTATUS ntlm_auth_prepare_gensec_server(TALLOC_CTX *mem_ctx,
 
 	cli_credentials_set_conf(server_credentials, lp_ctx);
 
-	if (lp_server_role() == ROLE_ACTIVE_DIRECTORY_DC || lp_security() == SEC_ADS || USE_KERBEROS_KEYTAB) {
+	if (lp_server_role() == ROLE_ACTIVE_DIRECTORY_DC ||
+	    lp_server_role() == ROLE_IPA_DC ||
+	    lp_security() == SEC_ADS ||
+	    USE_KERBEROS_KEYTAB)
+	{
 		cli_credentials_set_kerberos_state(server_credentials,
 						   CRED_USE_KERBEROS_DESIRED,
 						   CRED_SPECIFIED);
@@ -1453,7 +1471,7 @@ static void manage_gensec_request(enum stdio_helper_mode stdio_helper_mode,
 
 	static char *want_feature_list = NULL;
 	static DATA_BLOB session_key;
-
+	bool include_krb5_default_ccache = false;
 	TALLOC_CTX *mem_ctx;
 
 	mem_ctx = talloc_named(NULL, 0, "manage_gensec_request internal mem_ctx");
@@ -1484,7 +1502,7 @@ static void manage_gensec_request(enum stdio_helper_mode stdio_helper_mode,
 	}
 
 	if (strlen(buf) < 2) {
-		DEBUG(1, ("query [%s] invalid", buf));
+		DEBUG(1, ("query [%s] invalid\n", buf));
 		printf("BH Query invalid\n");
 		talloc_free(mem_ctx);
 		return;
@@ -1537,6 +1555,9 @@ static void manage_gensec_request(enum stdio_helper_mode stdio_helper_mode,
 			 * NTLMSSP_CLIENT_1 for now.
 			 */
 			use_cached_creds = false;
+			if (opt_username == NULL && state->set_password == NULL) {
+				include_krb5_default_ccache = true;
+			}
 			FALL_THROUGH;
 		case NTLMSSP_CLIENT_1:
 			/* setup the client side */
@@ -1588,6 +1609,21 @@ static void manage_gensec_request(enum stdio_helper_mode stdio_helper_mode,
 						    GENSEC_FEATURE_NTLM_CCACHE);
 			} else if (state->set_password) {
 				cli_credentials_set_password(creds, state->set_password, CRED_SPECIFIED);
+			} else if (include_krb5_default_ccache) {
+				const char *error_string = NULL;
+				int rc;
+
+				rc = cli_credentials_set_ccache(creds,
+								lp_ctx,
+								NULL,
+								CRED_SPECIFIED,
+								&error_string);
+				if (rc != 0) {
+					fprintf(stderr,
+						"Warning reading default "
+						"krb5 credentials cache: %s\n",
+						error_string);
+				}
 			} else {
 				cli_credentials_set_password_callback(creds, get_password);
 			}
@@ -2423,7 +2459,7 @@ static bool check_auth_crap(void)
 	char user_session_key[16];
 	char *hex_lm_key;
 	char *hex_user_session_key;
-	char *error_string;
+	char *error_string = NULL;
 	uint8_t authoritative = 1;
 
 	setbuf(stdout, NULL);
@@ -2453,6 +2489,7 @@ static bool check_auth_crap(void)
 		SAFE_FREE(error_string);
 		return False;
 	}
+	SAFE_FREE(error_string);
 
 	if (request_lm_key
 	    && (!all_zero((uint8_t *)lm_key, sizeof(lm_key)))) {
@@ -2701,7 +2738,7 @@ enum {
 			opt_challenge = strhex_to_data_blob(NULL, hex_challenge);
 			if (opt_challenge.length != 8) {
 				fprintf(stderr, "hex decode of %s failed! "
-					"(only got %d bytes)\n",
+					"(got %d bytes, expected 8)\n",
 					hex_challenge,
 					(int)opt_challenge.length);
 				exit(1);
@@ -2711,7 +2748,7 @@ enum {
 			opt_lm_response = strhex_to_data_blob(NULL, hex_lm_response);
 			if (opt_lm_response.length != 24) {
 				fprintf(stderr, "hex decode of %s failed! "
-					"(only got %d bytes)\n",
+					"(got %d bytes, expected 24)\n",
 					hex_lm_response,
 					(int)opt_lm_response.length);
 				exit(1);
@@ -2722,7 +2759,7 @@ enum {
 			opt_nt_response = strhex_to_data_blob(NULL, hex_nt_response);
 			if (opt_nt_response.length < 24) {
 				fprintf(stderr, "hex decode of %s failed! "
-					"(only got %d bytes)\n",
+					"(only got %d bytes, needed at least 24)\n",
 					hex_nt_response,
 					(int)opt_nt_response.length);
 				exit(1);
@@ -2771,7 +2808,7 @@ enum {
 		opt_workstation = "";
 	}
 
-	lp_ctx = loadparm_init_s3(NULL, loadparm_s3_helpers());
+	lp_ctx = loadparm_init_s3(frame, loadparm_s3_helpers());
 	if (lp_ctx == NULL) {
 		fprintf(stderr, "loadparm_init_s3() failed!\n");
 		exit(1);
@@ -2835,7 +2872,7 @@ enum {
 	}
 
 	/* Exit code */
-
+	gfree_all();
 	poptFreeContext(pc);
 	TALLOC_FREE(frame);
 	return 0;

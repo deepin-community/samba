@@ -165,52 +165,12 @@ struct interface {
 	uint32_t if_index;
 	uint64_t linkspeed;
 	uint32_t capability;
+	uint32_t options;
 };
 
 #define SHARE_MODE_FLAG_POSIX_OPEN	0x1
 
 #include "librpc/gen_ndr/server_id.h"
-
-/* oplock break message definition - linearization of share_mode_entry.
-
-Offset  Data			length.
-0	struct server_id pid	4
-4	uint16_t op_mid		8
-12	uint16_t op_type	2
-14	uint32_t access_mask	4
-18	uint32_t share_access	4
-22	uint32_t private_options	4
-26	uint32_t time sec		4
-30	uint32_t time usec	4
-34	uint64_t dev		8 bytes
-42	uint64_t inode		8 bytes
-50	uint64_t extid		8 bytes
-58	unsigned long file_id	4 bytes
-62	uint32_t uid		4 bytes
-66	uint16_t flags		2 bytes
-68	uint32_t name_hash	4 bytes
-72
-
-*/
-
-#define OP_BREAK_MSG_PID_OFFSET 0
-#define OP_BREAK_MSG_MID_OFFSET 4
-#define OP_BREAK_MSG_OP_TYPE_OFFSET 12
-#define OP_BREAK_MSG_ACCESS_MASK_OFFSET 14
-#define OP_BREAK_MSG_SHARE_ACCESS_OFFSET 18
-#define OP_BREAK_MSG_PRIV_OFFSET 22
-#define OP_BREAK_MSG_TIME_SEC_OFFSET 26
-#define OP_BREAK_MSG_TIME_USEC_OFFSET 30
-#define OP_BREAK_MSG_DEV_OFFSET 34
-#define OP_BREAK_MSG_INO_OFFSET 42
-#define OP_BREAK_MSG_EXTID_OFFSET 50
-#define OP_BREAK_MSG_FILE_ID_OFFSET 58
-#define OP_BREAK_MSG_UID_OFFSET 62
-#define OP_BREAK_MSG_FLAGS_OFFSET 66
-#define OP_BREAK_MSG_NAME_HASH_OFFSET 68
-
-#define OP_BREAK_MSG_VNN_OFFSET 72
-#define MSG_SMB_SHARE_MODE_ENTRY_SIZE 76
 
 #define NT_HASH_LEN 16
 #define LM_HASH_LEN 16
@@ -441,6 +401,7 @@ Offset  Data			length.
 #define NOTIFY_ACTION_ADDED_STREAM 6
 #define NOTIFY_ACTION_REMOVED_STREAM 7
 #define NOTIFY_ACTION_MODIFIED_STREAM 8
+#define NOTIFY_ACTION_DIRLEASE_BREAK 256 /* Flag ORed to the above actions */
 
 /* where to find the base of the SMB packet proper */
 #define smb_base(buf) (((const char *)(buf))+4)
@@ -625,31 +586,7 @@ struct kernel_oplocks_ops {
 
 #include "smb_macros.h"
 
-#define MAX_NETBIOSNAME_LEN 16
-/* DOS character, NetBIOS namestring. Type used on the wire. */
-typedef char nstring[MAX_NETBIOSNAME_LEN];
-/* Unix character, NetBIOS namestring. Type used to manipulate name in nmbd. */
-typedef char unstring[MAX_NETBIOSNAME_LEN*4];
-
-/* A netbios name structure. */
-struct nmb_name {
-	nstring      name;
-	char         scope[64];
-	unsigned int name_type;
-};
-
-/* A netbios node status array element. */
-struct node_status {
-	nstring name;
-	unsigned char type;
-	unsigned char flags;
-};
-
-/* The extra info from a NetBIOS node status query */
-struct node_status_extra {
-	unsigned char mac_addr[6];
-	/* There really is more here ... */ 
-};
+#include "nameserv.h"
 
 #define SAFE_NETBIOS_CHARS ". -_"
 
@@ -670,7 +607,10 @@ struct ea_list {
 	struct ea_struct ea;
 };
 
-/* EA names used internally in Samba. KEEP UP TO DATE with prohibited_ea_names in trans2.c !. */
+/*
+ * EA names used internally in Samba. KEEP UP TO DATE with
+ * samba_private_attr_name() in smb2_trans2.c !.
+ */
 #define SAMBA_POSIX_INHERITANCE_EA_NAME "user.SAMBA_PAI"
 /* EA to use for DOS attributes */
 #define SAMBA_XATTR_DOS_ATTRIB "user.DOSATTRIB"
@@ -678,6 +618,8 @@ struct ea_list {
 #define SAMBA_XATTR_DOSSTREAM_PREFIX "user.DosStream."
 /* Prefix for xattrs storing streams. */
 #define SAMBA_XATTR_MARKER "user.SAMBA_STREAMS"
+/* EA to use to store reparse points. */
+#define SAMBA_XATTR_REPARSE_ATTRIB "user.SmbReparse"
 
 /* usershare error codes. */
 enum usershare_err {

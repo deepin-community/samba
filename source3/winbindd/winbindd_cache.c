@@ -68,7 +68,9 @@ static bool opt_nocache = False;
  */
 
 static const char *non_centry_keys[] = {
+	"NDR/",
 	"SEQNUM/",
+	"TRUSTDOMCACHE/",
 	"WINBINDD_OFFLINE",
 	WINBINDD_CACHE_VERSION_KEYSTR,
 	NULL
@@ -503,8 +505,8 @@ static NTSTATUS fetch_cache_seqnum( struct winbindd_domain *domain, time_t now )
 	return NT_STATUS_OK;
 }
 
-bool wcache_store_seqnum(const char *domain_name, uint32_t seqnum,
-			 time_t last_seq_check)
+static bool wcache_store_seqnum(const char *domain_name, uint32_t seqnum,
+				time_t last_seq_check)
 {
 	size_t len = strlen(domain_name);
 	char keystr[len+8];
@@ -832,7 +834,7 @@ static void centry_put_uint8(struct cache_entry *centry, uint8_t v)
  */
 static void centry_put_string(struct cache_entry *centry, const char *s)
 {
-	int len;
+	size_t len;
 
 	if (!s) {
 		/* null strings are marked as len 0xFFFF */
@@ -843,7 +845,8 @@ static void centry_put_string(struct cache_entry *centry, const char *s)
 	len = strlen(s);
 	/* can't handle more than 254 char strings. Truncating is probably best */
 	if (len > 254) {
-		DBG_DEBUG("centry_put_string: truncating len (%d) to: 254\n", len);
+		DBG_DEBUG("centry_put_string: truncating len (%zu) to: 254\n",
+			  len);
 		len = 254;
 	}
 	centry_put_uint8(centry, len);
@@ -1799,9 +1802,6 @@ static NTSTATUS wcache_name_to_sid(struct winbindd_domain *domain,
 		DBG_DEBUG("cache entry not found\n");
 		return NT_STATUS_NOT_FOUND;
 	}
-	if (*type == SID_NAME_UNKNOWN) {
-		return NT_STATUS_NONE_MAPPED;
-	}
 
 	return NT_STATUS_OK;
 }
@@ -1816,17 +1816,18 @@ NTSTATUS wb_cache_name_to_sid(struct winbindd_domain *domain,
 			      enum lsa_SidType *type)
 {
 	NTSTATUS status;
-	bool old_status;
+	bool was_online;
 	const char *dom_name;
 
-	old_status = domain->online;
+	was_online = domain->online;
+
+	ZERO_STRUCTP(sid);
+	*type = SID_NAME_UNKNOWN;
 
 	status = wcache_name_to_sid(domain, domain_name, name, sid, type);
 	if (!NT_STATUS_EQUAL(status, NT_STATUS_NOT_FOUND)) {
 		return status;
 	}
-
-	ZERO_STRUCTP(sid);
 
 	DBG_DEBUG("name_to_sid: [Cached] - doing backend query for name for domain %s\n",
 		domain->name );
@@ -1836,30 +1837,23 @@ NTSTATUS wb_cache_name_to_sid(struct winbindd_domain *domain,
 					      name, flags, &dom_name, sid, type);
 
 	if (NT_STATUS_EQUAL(status, NT_STATUS_IO_TIMEOUT) ||
-		NT_STATUS_EQUAL(status, NT_STATUS_DOMAIN_CONTROLLER_NOT_FOUND)) {
-		if (!domain->internal && old_status) {
+	    NT_STATUS_EQUAL(status, NT_STATUS_DOMAIN_CONTROLLER_NOT_FOUND))
+	{
+		if (!domain->internal && was_online) {
+			/* Set the domain offline and query the cache again */
 			set_domain_offline(domain);
-		}
-		if (!domain->internal &&
-			!domain->online &&
-			old_status) {
-			NTSTATUS cache_status;
-			cache_status = wcache_name_to_sid(domain, domain_name, name, sid, type);
-			return cache_status;
+			return wcache_name_to_sid(domain,
+						  domain_name,
+						  name,
+						  sid,
+						  type);
 		}
 	}
 	/* and save it */
 
-	if (domain->online &&
-	    (NT_STATUS_IS_OK(status) || NT_STATUS_EQUAL(status, NT_STATUS_NONE_MAPPED))) {
-		enum lsa_SidType save_type = *type;
-
-		if (NT_STATUS_EQUAL(status, NT_STATUS_NONE_MAPPED)) {
-			save_type = SID_NAME_UNKNOWN;
-		}
-
+	if (domain->online && NT_STATUS_IS_OK(status)) {
 		wcache_save_name_to_sid(domain, status, domain_name, name, sid,
-					save_type);
+					*type);
 
 		/* Only save the reverse mapping if this was not a UPN */
 		if (!strchr(name, '@')) {
@@ -1868,7 +1862,7 @@ NTSTATUS wb_cache_name_to_sid(struct winbindd_domain *domain,
 			}
 			(void)strlower_m(discard_const_p(char, name));
 			wcache_save_sid_to_name(domain, status, sid,
-						dom_name, name, save_type);
+						dom_name, name, *type);
 		}
 	}
 
@@ -3173,10 +3167,40 @@ bool wcache_invalidate_cache_noinit(void)
 	return true;
 }
 
-static bool init_wcache(void)
+static TDB_CONTEXT *wcache_open(void)
 {
 	char *db_path;
+	TDB_CONTEXT *tdb = NULL;
+	bool wcache_wiped = !lp_winbind_offline_logon();
 
+	db_path = wcache_path();
+	if (db_path == NULL) {
+		return NULL;
+	}
+
+	/* when working offline we must not clear the cache on restart */
+	tdb = tdb_open_log(db_path,
+			   WINBINDD_CACHE_TDB_DEFAULT_HASH_SIZE,
+			   TDB_INCOMPATIBLE_HASH |
+				   (lp_winbind_offline_logon()
+					    ? TDB_DEFAULT
+					    : (TDB_DEFAULT |
+					       TDB_CLEAR_IF_FIRST)),
+			   O_RDWR | O_CREAT,
+			   0600);
+	TALLOC_FREE(db_path);
+
+	if (wcache_wiped) {
+		tdb_store_uint32(tdb,
+				 WINBINDD_CACHE_VERSION_KEYSTR,
+				 WINBINDD_CACHE_VERSION);
+	}
+
+	return tdb;
+}
+
+static bool init_wcache(void)
+{
 	if (wcache == NULL) {
 		wcache = SMB_XMALLOC_P(struct winbind_cache);
 		ZERO_STRUCTP(wcache);
@@ -3185,22 +3209,18 @@ static bool init_wcache(void)
 	if (wcache->tdb != NULL)
 		return true;
 
-	db_path = wcache_path();
-	if (db_path == NULL) {
-		return false;
-	}
-
-	/* when working offline we must not clear the cache on restart */
-	wcache->tdb = tdb_open_log(db_path,
-				WINBINDD_CACHE_TDB_DEFAULT_HASH_SIZE,
-				TDB_INCOMPATIBLE_HASH |
-					(lp_winbind_offline_logon() ? TDB_DEFAULT : (TDB_DEFAULT | TDB_CLEAR_IF_FIRST)),
-				O_RDWR|O_CREAT, 0600);
-	TALLOC_FREE(db_path);
+	wcache->tdb = wcache_open();
 	if (wcache->tdb == NULL) {
 		DBG_ERR("Failed to open winbindd_cache.tdb!\n");
 		return false;
 	}
+
+	/*
+	 * Create a dummy SEQNUM entry early, otherwise every call via the
+	 * winbind NDR interface will fail to call wcache_store_ndr() when there
+	 * is no SEQNUM present already
+	 */
+	wcache_store_seqnum(lp_workgroup(), 0, 0);
 
 	return true;
 }
@@ -3211,7 +3231,7 @@ static bool init_wcache(void)
  only opener.
 ************************************************************************/
 
-bool initialize_winbindd_cache(void)
+static bool initialize_winbindd_cache(void)
 {
 	bool cache_bad = false;
 	uint32_t vers = 0;
@@ -3251,7 +3271,7 @@ bool initialize_winbindd_cache(void)
 		}
 
 		if (unlink(db_path) == -1) {
-			DBG_ERR("initialize_winbindd_cache: unlink %s failed %s ",
+			DBG_ERR("initialize_winbindd_cache: unlink %s failed %s\n",
 				db_path,
 				strerror(errno) );
 			TALLOC_FREE(db_path);
@@ -3396,8 +3416,6 @@ static int traverse_fn_cleanup(TDB_CONTEXT *the_tdb, TDB_DATA kbuf,
 /* flush the cache */
 static void wcache_flush_cache(void)
 {
-	char *db_path;
-
 	if (!wcache)
 		return;
 	if (wcache->tdb) {
@@ -3408,18 +3426,7 @@ static void wcache_flush_cache(void)
 		return;
 	}
 
-	db_path = wcache_path();
-	if (db_path == NULL) {
-		return;
-	}
-
-	/* when working offline we must not clear the cache on restart */
-	wcache->tdb = tdb_open_log(db_path,
-				WINBINDD_CACHE_TDB_DEFAULT_HASH_SIZE,
-				TDB_INCOMPATIBLE_HASH |
-				(lp_winbind_offline_logon() ? TDB_DEFAULT : (TDB_DEFAULT | TDB_CLEAR_IF_FIRST)),
-				O_RDWR|O_CREAT, 0600);
-	TALLOC_FREE(db_path);
+	wcache->tdb = wcache_open();
 	if (!wcache->tdb) {
 		DBG_ERR("Failed to open winbindd_cache.tdb!\n");
 		return;
@@ -4245,14 +4252,7 @@ int winbindd_validate_cache(void)
 		goto done;
 	}
 
-	tdb = tdb_open_log(tdb_path,
-			   WINBINDD_CACHE_TDB_DEFAULT_HASH_SIZE,
-			   TDB_INCOMPATIBLE_HASH |
-			   ( lp_winbind_offline_logon()
-			     ? TDB_DEFAULT
-			     : TDB_DEFAULT | TDB_CLEAR_IF_FIRST ),
-			   O_RDWR|O_CREAT,
-			   0600);
+	tdb = wcache_open();
 	if (!tdb) {
 		DBG_ERR("winbindd_validate_cache: "
 			  "error opening/initializing tdb\n");
@@ -4605,7 +4605,7 @@ static bool wcache_tdc_store_list( struct winbindd_tdc_domain *domains, size_t n
 		goto done;
 	}
 
-	ret = tdb_store( wcache->tdb, key, data, 0 );
+	ret = tdb_store(wcache->tdb, key, data, TDB_REPLACE);
 
  done:
 	SAFE_FREE( data.dptr );
@@ -4922,7 +4922,7 @@ void wcache_store_ndr(struct winbindd_domain *domain, uint32_t opnum,
 	SBVAL(data.dptr, 4, timeout);
 	memcpy(data.dptr + 12, resp->data, resp->length);
 
-	tdb_store(wcache->tdb, key, data, 0);
+	tdb_store(wcache->tdb, key, data, TDB_REPLACE);
 
 done:
 	TALLOC_FREE(key.dptr);

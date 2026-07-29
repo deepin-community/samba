@@ -7,9 +7,10 @@ package Parse::Pidl::Typelist;
 
 require Exporter;
 @ISA = qw(Exporter);
-@EXPORT_OK = qw(hasType getType resolveType mapTypeName scalar_is_reference expandAlias
+@EXPORT_OK = qw(hasType getType resolveType mapTypeName mapTypeSpecifier scalar_is_reference expandAlias
 	mapScalarType addType typeIs is_signed is_scalar enum_type_fn
 	bitmap_type_fn mapType typeHasBody is_fixed_size_scalar
+	is_string_type scalarTypeUsed
 );
 use vars qw($VERSION);
 $VERSION = '0.01';
@@ -23,12 +24,13 @@ my %types = ();
 my @reference_scalars = (
 	"string", "string_array", "nbt_string", "dns_string",
 	"wrepl_nbt_name", "dnsp_name", "dnsp_string",
-	"ipv4address", "ipv6address"
+	"ipv4address", "ipv6address", "u16string"
 );
 
 my @non_fixed_size_scalars = (
 	"string", "string_array", "nbt_string", "dns_string",
-	"wrepl_nbt_name", "dnsp_name", "dnsp_string"
+	"wrepl_nbt_name", "dnsp_name", "dnsp_string",
+	"u16string"
 );
 
 # a list of known scalar types
@@ -54,6 +56,7 @@ my %scalars = (
 	"pointer"	=> "void*",
 	"DATA_BLOB"	=> "DATA_BLOB",
 	"string"	=> "const char *",
+	"u16string"	=> "const unsigned char *",
 	"string_array"	=> "const char **",
 	"time_t"	=> "time_t",
 	"uid_t"	        => "uid_t",
@@ -72,6 +75,8 @@ my %scalars = (
 	"ipv6address"   => "const char *",
 	"dnsp_name"	=> "const char *",
 	"dnsp_string"	=> "const char *",
+	"libndr_flags"	=> "libndr_flags",
+	"ndr_flags_type"=> "ndr_flags_type",
 );
 
 my %aliases = (
@@ -89,6 +94,18 @@ my %aliases = (
         "mode_t"        => "uint32",
 );
 
+my %format_specifiers = (
+	"char"		=> "c",
+	"int8_t",	=> "\"PRId8\"",
+	"int16_t",	=> "\"PRId16\"",
+	"int32_t",	=> "\"PRId32\"",
+	"int64_t",	=> "\"PRId64\"",
+	"uint8_t",	=> "\"PRIu8\"",
+	"uint16_t",	=> "\"PRIu16\"",
+	"uint32_t",	=> "\"PRIu32\"",
+	"uint64_t",	=> "\"PRIu64\""
+);
+
 sub expandAlias($)
 {
 	my $name = shift;
@@ -98,6 +115,8 @@ sub expandAlias($)
 	return $name;
 }
 
+my %scalars_used = ();
+
 # map from a IDL type to a C header type
 sub mapScalarType($)
 {
@@ -105,9 +124,18 @@ sub mapScalarType($)
 
 	# it's a bug when a type is not in the list
 	# of known scalars or has no mapping
-	return $scalars{$name} if defined($scalars{$name});
+	if (defined($scalars{$name})) {
+		$scalars_used{$name} = $scalars{$name};
+		return $scalars{$name};
+	}
 
 	die("Unknown scalar type $name");
+}
+
+sub scalarTypeUsed($)
+{
+	my $name = shift;
+	return defined($scalars_used{$name});
 }
 
 sub addType($)
@@ -121,8 +149,18 @@ sub resolveType($)
 	my ($ctype) = @_;
 
 	if (not hasType($ctype)) {
-		# assume struct typedef
-		return { TYPE => "TYPEDEF", NAME => $ctype, DATA => { TYPE => "STRUCT" } };
+		if (! ref $ctype) {
+			# it looks like a name.
+			# assume struct typedef
+			return { TYPE => "TYPEDEF", NAME => $ctype, DATA => { TYPE => "STRUCT" } };
+		}
+		if ($ctype->{NAME} && ($ctype->{TYPE} eq "STRUCT")) {
+			return {
+				TYPE => "TYPEDEF",
+				NAME => $ctype->{NAME},
+				DATA => $ctype
+			};
+		}
 	} else {
 		return getType($ctype);
 	}
@@ -160,7 +198,7 @@ sub hasType($)
 	my $t = shift;
 	if (ref($t) eq "HASH") {
 		return 1 if (not defined($t->{NAME}));
-		return 1 if (defined($types{$t->{NAME}}) and 
+		return 1 if (defined($types{$t->{NAME}}) and
 			$types{$t->{NAME}}->{TYPE} eq $t->{TYPE});
 		return 0;
 	}
@@ -186,13 +224,13 @@ sub is_scalar($)
 	sub is_scalar($);
 	my $type = shift;
 
-	return 1 if (ref($type) eq "HASH" and 
-		($type->{TYPE} eq "SCALAR" or $type->{TYPE} eq "ENUM" or 
+	return 1 if (ref($type) eq "HASH" and
+		($type->{TYPE} eq "SCALAR" or $type->{TYPE} eq "ENUM" or
 		 $type->{TYPE} eq "BITMAP"));
 
 	if (my $dt = getType($type)) {
 		return is_scalar($dt->{DATA}) if ($dt->{TYPE} eq "TYPEDEF");
-		return 1 if ($dt->{TYPE} eq "SCALAR" or $dt->{TYPE} eq "ENUM" or 
+		return 1 if ($dt->{TYPE} eq "SCALAR" or $dt->{TYPE} eq "ENUM" or
 			         $dt->{TYPE} eq "BITMAP");
 	}
 
@@ -214,6 +252,13 @@ sub scalar_is_reference($)
 
 	return 1 if (grep(/^$name$/, @reference_scalars));
 	return 0;
+}
+
+sub is_string_type
+{
+	my ($t) = @_;
+
+	return ($t eq "string" or $t eq "u16string");
 }
 
 sub RegisterScalars()
@@ -314,6 +359,14 @@ sub mapTypeName($)
 		return "struct $t";
 	}
 
+}
+
+sub mapTypeSpecifier($)
+{
+	my $t = shift;
+	return undef unless defined($t);
+
+	return $format_specifiers{$t};
 }
 
 sub LoadIdl($;$)

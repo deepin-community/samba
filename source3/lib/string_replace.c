@@ -135,14 +135,14 @@ struct char_mappings **string_replace_init_map(TALLOC_CTX *mem_ctx,
 	return cmaps;
 }
 
-NTSTATUS string_replace_allocate(connection_struct *conn,
-				 const char *name_in,
-				 struct char_mappings **cmaps,
-				 TALLOC_CTX *mem_ctx,
-				 char **mapped_name,
-				 enum vfs_translate_direction direction)
+int string_replace_allocate(connection_struct *conn,
+			    const char *name_in,
+			    struct char_mappings **cmaps,
+			    TALLOC_CTX *mem_ctx,
+			    char **mapped_name,
+			    enum vfs_translate_direction direction)
 {
-	static smb_ucs2_t *tmpbuf = NULL;
+	smb_ucs2_t *tmpbuf = NULL;
 	smb_ucs2_t *ptr = NULL;
 	struct char_mappings *map = NULL;
 	size_t converted_size;
@@ -151,7 +151,7 @@ NTSTATUS string_replace_allocate(connection_struct *conn,
 	ok = push_ucs2_talloc(talloc_tos(), &tmpbuf, name_in,
 			      &converted_size);
 	if (!ok) {
-		return map_nt_error_from_unix(errno);
+		return errno;
 	}
 
 	for (ptr = tmpbuf; *ptr; ptr++) {
@@ -172,14 +172,18 @@ NTSTATUS string_replace_allocate(connection_struct *conn,
 
 	ok = pull_ucs2_talloc(mem_ctx, mapped_name, tmpbuf,
 			      &converted_size);
-	TALLOC_FREE(tmpbuf);
-	if (!ok) {
-		return map_nt_error_from_unix(errno);
+	{
+		int err = errno;
+		TALLOC_FREE(tmpbuf);
+		errno = err;
 	}
-	return NT_STATUS_OK;
+	if (!ok) {
+		return errno;
+	}
+	return 0;
 }
 
-const char *macos_string_replace_map =
+const char macos_string_replace_map[] =
 	"0x01:0xf001,0x02:0xf002,0x03:0xf003,0x04:0xf004,"
 	"0x05:0xf005,0x06:0xf006,0x07:0xf007,0x08:0xf008,"
 	"0x09:0xf009,0x0a:0xf00a,0x0b:0xf00b,0x0c:0xf00c,"

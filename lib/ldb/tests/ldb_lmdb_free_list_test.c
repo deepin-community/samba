@@ -455,7 +455,7 @@ static void test_free_list_read_lock(void **state)
 		assert_int_equal(ret, LDB_SUCCESS);
 
 		/*
-		 * Signal the the parent that we've done the update
+		 * Signal to the parent that we've done the update
 		 */
 		ret = write(to_parent[1], "GO", 2);
 		assert_int_equal(ret, 2);
@@ -656,6 +656,8 @@ int main(int argc, const char **argv)
 	    cmocka_unit_test_setup_teardown(
 		test_free_list_stale_reader, setup, teardown),
 	};
+
+	cmocka_set_message_output(CM_OUTPUT_SUBUNIT);
 
 	return cmocka_run_group_tests(tests, NULL, NULL);
 }

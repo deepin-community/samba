@@ -62,6 +62,8 @@ my $opt_libnss_wrapper_so_path = "";
 my $opt_libresolv_wrapper_so_path = "";
 my $opt_libsocket_wrapper_so_path = "";
 my $opt_libuid_wrapper_so_path = "";
+my $opt_libpam_wrapper_so_path = "";
+my $opt_libpam_matrix_so_path = "";
 my $opt_libasan_so_path = "";
 my $opt_libcrypt_so_path = "";
 my $opt_use_dns_faking = 0;
@@ -126,6 +128,7 @@ sub run_testsuite($$$$$)
 	my ($envname, $name, $cmd, $i, $totalsuites) = @_;
 	my $pcap_file = $target->setup_pcap($name);
 
+	Subunit::report_time();
 	Subunit::start_testsuite($name);
 	Subunit::progress_push();
 	Subunit::report_time();
@@ -254,6 +257,8 @@ my $result = GetOptions (
 		'resolv_wrapper_so_path=s' => \$opt_libresolv_wrapper_so_path,
 		'socket_wrapper_so_path=s' => \$opt_libsocket_wrapper_so_path,
 		'uid_wrapper_so_path=s' => \$opt_libuid_wrapper_so_path,
+		'pam_wrapper_so_path=s' => \$opt_libpam_wrapper_so_path,
+		'pam_matrix_so_path=s' => \$opt_libpam_matrix_so_path,
 		'asan_so_path=s' => \$opt_libasan_so_path,
 		'crypt_so_path=s' => \$opt_libcrypt_so_path,
 		'use-dns-faking' => \$opt_use_dns_faking
@@ -401,6 +406,14 @@ if ($opt_libuid_wrapper_so_path) {
 	}
 }
 
+if ($opt_libpam_wrapper_so_path) {
+	if ($ld_preload) {
+		$ld_preload = "$ld_preload:$opt_libpam_wrapper_so_path";
+	} else {
+		$ld_preload = "$opt_libpam_wrapper_so_path";
+	}
+}
+
 if (defined($ENV{USE_NAMESPACES})) {
 	print "Using linux containerization for selftest testenv(s)...\n";
 
@@ -419,12 +432,6 @@ $ENV{UID_WRAPPER} = 1;
 
 # We are already hitting the limit, so double it.
 $ENV{NSS_WRAPPER_MAX_HOSTENTS} = 200;
-
-# Disable RTLD_DEEPBIND hack for Samba bind dlz module
-#
-# This is needed in order to allow the ldb_*ldap module
-# to work with a preloaded socket wrapper.
-$ENV{LDB_MODULES_DISABLE_DEEPBIND} = 1;
 
 my $socket_wrapper_dir;
 if ($opt_socket_wrapper) {
@@ -448,6 +455,10 @@ if ($opt_mitkrb5 == 1) {
 	$ENV{KRB5RCACHETYPE} = "none";
 }
 
+# Enable support for SHA1 in OpenSSL
+# This is required e.g. for pkinit sha1 tests
+$ENV{OPENSSL_ENABLE_SHA1_SIGNATURES} = 1;
+
 # After this many seconds, the server will self-terminate.  All tests
 # must terminate in this time, and testenv will only stay alive this
 # long
@@ -468,6 +479,7 @@ if (defined($ENV{SMBD_MAXTIME}) and $ENV{SMBD_MAXTIME} ne "") {
 $target = new Samba($bindir, $srcdir, $server_maxtime,
 		    $opt_socket_wrapper_pcap,
 		    $opt_socket_wrapper_keep_pcap,
+		    $opt_libpam_matrix_so_path,
 		    $opt_default_ldb_backend);
 unless ($opt_list) {
 	if ($opt_target eq "samba") {

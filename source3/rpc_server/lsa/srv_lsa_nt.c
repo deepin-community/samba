@@ -30,6 +30,7 @@
 /* This is the implementation of the lsa server code. */
 
 #include "includes.h"
+#include "../lib/util/dns_cmp.h"
 #include "ntdomain.h"
 #include "librpc/gen_ndr/ndr_lsa.h"
 #include "librpc/gen_ndr/ndr_lsa_scompat.h"
@@ -54,10 +55,13 @@
 #include "librpc/rpc/dcerpc_helper.h"
 #include "lib/param/loadparm.h"
 #include "source3/lib/substitute.h"
+#include "librpc/rpc/dcerpc_lsa.h"
 
 #include "lib/crypto/gnutls_helpers.h"
 #include <gnutls/gnutls.h>
 #include <gnutls/crypto.h>
+
+#undef strcasecmp
 
 #undef DBGC_CLASS
 #define DBGC_CLASS DBGC_RPC_SRV
@@ -298,7 +302,7 @@ static NTSTATUS make_lsa_object_sd(TALLOC_CTX *mem_ctx, struct security_descript
 					struct dom_sid *sid, uint32_t sid_access)
 {
 	struct dom_sid adm_sid;
-	struct security_ace ace[5];
+	struct security_ace ace[5] = {};
 	size_t i = 0;
 
 	struct security_acl *psa = NULL;
@@ -1720,6 +1724,58 @@ NTSTATUS _lsa_OpenTrustedDomainByName(struct pipes_struct *p,
 					   r->out.trustdom_handle);
 }
 
+static NTSTATUS get_trustdom_auth_blob_aes(
+	struct dcesrv_call_state *dce_call,
+	TALLOC_CTX *mem_ctx,
+	struct lsa_TrustDomainInfoAuthInfoInternalAES *auth_info,
+	struct trustDomainPasswords *auth_struct)
+{
+	DATA_BLOB session_key = data_blob_null;
+	DATA_BLOB salt = data_blob(auth_info->salt, sizeof(auth_info->salt));
+	DATA_BLOB auth_blob = data_blob(auth_info->cipher.data,
+					auth_info->cipher.size);
+	DATA_BLOB ciphertext = data_blob_null;
+	enum ndr_err_code ndr_err;
+	NTSTATUS status;
+
+	/*
+	 * The data blob starts with 512 bytes of random data and has two 32bit
+	 * size parameters.
+	 */
+	if (auth_blob.length < 520) {
+		return NT_STATUS_INVALID_PARAMETER;
+	}
+
+	status = dcesrv_transport_session_key(dce_call, &session_key);
+	if (!NT_STATUS_IS_OK(status)) {
+		return status;
+	}
+
+	status = samba_gnutls_aead_aes_256_cbc_hmac_sha512_decrypt(
+		mem_ctx,
+		&auth_blob,
+		&session_key,
+		&lsa_aes256_enc_key_salt,
+		&lsa_aes256_mac_key_salt,
+		&salt,
+		auth_info->auth_data,
+		&ciphertext);
+	if (!NT_STATUS_IS_OK(status)) {
+		return status;
+	}
+
+	ndr_err = ndr_pull_struct_blob(
+			&ciphertext,
+			mem_ctx,
+			auth_struct,
+			(ndr_pull_flags_fn_t)ndr_pull_trustDomainPasswords);
+	if (!NDR_ERR_CODE_IS_SUCCESS(ndr_err)) {
+		return NT_STATUS_INVALID_PARAMETER;
+	}
+
+	return NT_STATUS_OK;
+}
+
 static NTSTATUS get_trustdom_auth_blob(struct pipes_struct *p,
 				       TALLOC_CTX *mem_ctx, DATA_BLOB *auth_blob,
 				       struct trustDomainPasswords *auth_struct)
@@ -1847,6 +1903,160 @@ static NTSTATUS get_trustauth_inout_blob(TALLOC_CTX *mem_ctx,
 	return NT_STATUS_OK;
 }
 
+static NTSTATUS lsa_CreateTrustedDomain_precheck(
+	TALLOC_CTX *mem_ctx,
+	struct lsa_info *policy,
+	struct auth_session_info *session_info,
+	struct lsa_TrustDomainInfoInfoEx *info)
+{
+	const char *netbios_name = NULL;
+	const char *dns_name = NULL;
+	bool ok;
+
+	netbios_name = info->netbios_name.string;
+	if (netbios_name == NULL) {
+		return NT_STATUS_INVALID_PARAMETER;
+	}
+
+	dns_name = info->domain_name.string;
+	if (dns_name == NULL) {
+		return NT_STATUS_INVALID_PARAMETER;
+	}
+
+	if (info->sid == NULL) {
+		return NT_STATUS_INVALID_SID;
+	}
+
+	if (!(policy->access & LSA_POLICY_TRUST_ADMIN)) {
+		return NT_STATUS_ACCESS_DENIED;
+	}
+
+	/*
+	 * We expect S-1-5-21-A-B-C, but we don't
+	 * allow S-1-5-21-0-0-0 as this is used
+	 * for claims and compound identities.
+	 */
+	ok = dom_sid_is_valid_account_domain(info->sid);
+	if (!ok) {
+		return NT_STATUS_INVALID_PARAMETER;
+	}
+
+	if (strcasecmp(netbios_name, "BUILTIN") == 0 ||
+	    strcasecmp(dns_name, "BUILTIN") == 0)
+	{
+		return NT_STATUS_INVALID_PARAMETER;
+	}
+
+	if (policy->name != NULL &&
+	    (strcasecmp(netbios_name, policy->name) == 0 ||
+	     strcasecmp(dns_name, policy->name) == 0))
+	{
+		return NT_STATUS_CURRENT_DOMAIN_NOT_ALLOWED;
+	}
+
+	if (session_info->unix_token->uid != sec_initial_uid() &&
+	    !nt_token_check_domain_rid(session_info->security_token,
+				       DOMAIN_RID_ADMINS))
+	{
+		return NT_STATUS_ACCESS_DENIED;
+	}
+
+	return NT_STATUS_OK;
+}
+
+static NTSTATUS lsa_CreateTrustedDomain_common(
+	struct pipes_struct *p,
+	TALLOC_CTX *mem_ctx,
+	struct auth_session_info *session_info,
+	struct lsa_info *policy,
+	uint32_t access_mask,
+	struct lsa_TrustDomainInfoInfoEx *info,
+	struct trustDomainPasswords *auth_struct,
+	struct policy_handle **ptrustdom_handle)
+{
+	struct security_descriptor *psd = NULL;
+	size_t sd_size = 0;
+	uint32_t acc_granted = 0;
+	struct pdb_trusted_domain td = {
+		.trust_type = 0,
+	};
+	NTSTATUS status;
+
+	/* Work out max allowed. */
+	map_max_allowed_access(session_info->security_token,
+			       session_info->unix_token,
+			       &access_mask);
+
+	/* map the generic bits to the lsa policy ones */
+	se_map_generic(&access_mask, &lsa_account_mapping);
+
+	status = make_lsa_object_sd(
+		mem_ctx, &psd, &sd_size, &lsa_trusted_domain_mapping, NULL, 0);
+	if (!NT_STATUS_IS_OK(status)) {
+		return status;
+	}
+
+	status = access_check_object(psd,
+				     session_info->security_token,
+				     SEC_PRIV_INVALID,
+				     SEC_PRIV_INVALID,
+				     0,
+				     access_mask,
+				     &acc_granted,
+				     "lsa_CreateTrustedDomain_common");
+	if (!NT_STATUS_IS_OK(status)) {
+		return status;
+	}
+
+	td.domain_name = talloc_strdup(mem_ctx, info->domain_name.string);
+	if (td.domain_name == NULL) {
+		return NT_STATUS_NO_MEMORY;
+	}
+	td.netbios_name = talloc_strdup(mem_ctx, info->netbios_name.string);
+	if (td.netbios_name == NULL) {
+		return NT_STATUS_NO_MEMORY;
+	}
+	sid_copy(&td.security_identifier, info->sid);
+	td.trust_direction = info->trust_direction;
+	td.trust_type = info->trust_type;
+	td.trust_attributes = info->trust_attributes;
+
+	status = get_trustauth_inout_blob(mem_ctx,
+					  &auth_struct->incoming,
+					  &td.trust_auth_incoming);
+	if (!NT_STATUS_IS_OK(status)) {
+		return NT_STATUS_UNSUCCESSFUL;
+	}
+
+	status = get_trustauth_inout_blob(mem_ctx,
+					  &auth_struct->outgoing,
+					  &td.trust_auth_outgoing);
+	if (!NT_STATUS_IS_OK(status)) {
+		return NT_STATUS_UNSUCCESSFUL;
+	}
+
+	status = pdb_set_trusted_domain(info->domain_name.string, &td);
+	if (!NT_STATUS_IS_OK(status)) {
+		DBG_ERR("pdb_set_trusted_domain failed: %s\n",
+			nt_errstr(status));
+		return status;
+	}
+
+	status = create_lsa_policy_handle(mem_ctx, p,
+					  LSA_HANDLE_TRUST_TYPE,
+					  acc_granted,
+					  info->sid,
+					  info->netbios_name.string,
+					  psd,
+					  *ptrustdom_handle);
+	if (!NT_STATUS_IS_OK(status)) {
+		pdb_del_trusted_domain(info->netbios_name.string);
+		return NT_STATUS_OBJECT_NAME_NOT_FOUND;
+	}
+
+	return NT_STATUS_OK;
+}
+
 /***************************************************************************
  _lsa_CreateTrustedDomainEx2
  ***************************************************************************/
@@ -1859,12 +2069,10 @@ NTSTATUS _lsa_CreateTrustedDomainEx2(struct pipes_struct *p,
 		dcesrv_call_session_info(dce_call);
 	struct lsa_info *policy;
 	NTSTATUS status;
-	uint32_t acc_granted;
-	struct security_descriptor *psd;
-	size_t sd_size;
-	struct pdb_trusted_domain td;
-	struct trustDomainPasswords auth_struct;
-	DATA_BLOB auth_blob;
+	struct trustDomainPasswords auth_struct = {
+		.incoming_size = 0,
+	};
+	DATA_BLOB auth_blob = data_blob_null;
 
 	if (!IS_DC) {
 		return NT_STATUS_NOT_SUPPORTED;
@@ -1879,96 +2087,40 @@ NTSTATUS _lsa_CreateTrustedDomainEx2(struct pipes_struct *p,
 		return NT_STATUS_INVALID_HANDLE;
 	}
 
-	if (!(policy->access & LSA_POLICY_TRUST_ADMIN)) {
-		return NT_STATUS_ACCESS_DENIED;
-	}
-
-	if (session_info->unix_token->uid != sec_initial_uid() &&
-	    !nt_token_check_domain_rid(
-		    session_info->security_token, DOMAIN_RID_ADMINS)) {
-		return NT_STATUS_ACCESS_DENIED;
-	}
-
-	/* Work out max allowed. */
-	map_max_allowed_access(session_info->security_token,
-			       session_info->unix_token,
-			       &r->in.access_mask);
-
-	/* map the generic bits to the lsa policy ones */
-	se_map_generic(&r->in.access_mask, &lsa_account_mapping);
-
-	status = make_lsa_object_sd(p->mem_ctx, &psd, &sd_size,
-				    &lsa_trusted_domain_mapping,
-				    NULL, 0);
+	status = lsa_CreateTrustedDomain_precheck(p->mem_ctx,
+						  policy,
+						  session_info,
+						  r->in.info);
 	if (!NT_STATUS_IS_OK(status)) {
 		return status;
 	}
 
-	status = access_check_object(psd, session_info->security_token,
-				     SEC_PRIV_INVALID, SEC_PRIV_INVALID, 0,
-				     r->in.access_mask, &acc_granted,
-				     "_lsa_CreateTrustedDomainEx2");
+
+	if (r->in.auth_info_internal->auth_blob.size == 0) {
+		return NT_STATUS_INVALID_PARAMETER;
+	}
+
+	auth_blob = data_blob_const(r->in.auth_info_internal->auth_blob.data,
+				    r->in.auth_info_internal->auth_blob.size);
+
+	status = get_trustdom_auth_blob(p,
+					p->mem_ctx,
+					&auth_blob,
+					&auth_struct);
+	if (!NT_STATUS_IS_OK(status)) {
+		return NT_STATUS_UNSUCCESSFUL;
+	}
+
+	status = lsa_CreateTrustedDomain_common(p,
+						p->mem_ctx,
+						session_info,
+						policy,
+						r->in.access_mask,
+						r->in.info,
+						&auth_struct,
+						&r->out.trustdom_handle);
 	if (!NT_STATUS_IS_OK(status)) {
 		return status;
-	}
-
-	ZERO_STRUCT(td);
-
-	td.domain_name = talloc_strdup(p->mem_ctx,
-				       r->in.info->domain_name.string);
-	if (td.domain_name == NULL) {
-		return NT_STATUS_NO_MEMORY;
-	}
-	td.netbios_name = talloc_strdup(p->mem_ctx,
-					r->in.info->netbios_name.string);
-	if (td.netbios_name == NULL) {
-		return NT_STATUS_NO_MEMORY;
-	}
-	sid_copy(&td.security_identifier, r->in.info->sid);
-	td.trust_direction = r->in.info->trust_direction;
-	td.trust_type = r->in.info->trust_type;
-	td.trust_attributes = r->in.info->trust_attributes;
-
-	if (r->in.auth_info_internal->auth_blob.size != 0) {
-		auth_blob.length = r->in.auth_info_internal->auth_blob.size;
-		auth_blob.data = r->in.auth_info_internal->auth_blob.data;
-
-		status = get_trustdom_auth_blob(p, p->mem_ctx, &auth_blob, &auth_struct);
-		if (!NT_STATUS_IS_OK(status)) {
-			return NT_STATUS_UNSUCCESSFUL;
-		}
-
-		status = get_trustauth_inout_blob(p->mem_ctx, &auth_struct.incoming, &td.trust_auth_incoming);
-		if (!NT_STATUS_IS_OK(status)) {
-			return NT_STATUS_UNSUCCESSFUL;
-		}
-
-		status = get_trustauth_inout_blob(p->mem_ctx, &auth_struct.outgoing, &td.trust_auth_outgoing);
-		if (!NT_STATUS_IS_OK(status)) {
-			return NT_STATUS_UNSUCCESSFUL;
-		}
-	} else {
-		td.trust_auth_incoming.data = NULL;
-		td.trust_auth_incoming.length = 0;
-		td.trust_auth_outgoing.data = NULL;
-		td.trust_auth_outgoing.length = 0;
-	}
-
-	status = pdb_set_trusted_domain(r->in.info->domain_name.string, &td);
-	if (!NT_STATUS_IS_OK(status)) {
-		return status;
-	}
-
-	status = create_lsa_policy_handle(p->mem_ctx, p,
-					  LSA_HANDLE_TRUST_TYPE,
-					  acc_granted,
-					  r->in.info->sid,
-					  r->in.info->netbios_name.string,
-					  psd,
-					  r->out.trustdom_handle);
-	if (!NT_STATUS_IS_OK(status)) {
-		pdb_del_trusted_domain(r->in.info->netbios_name.string);
-		return NT_STATUS_OBJECT_NAME_NOT_FOUND;
 	}
 
 	return NT_STATUS_OK;
@@ -1981,18 +2133,8 @@ NTSTATUS _lsa_CreateTrustedDomainEx2(struct pipes_struct *p,
 NTSTATUS _lsa_CreateTrustedDomainEx(struct pipes_struct *p,
 				    struct lsa_CreateTrustedDomainEx *r)
 {
-	struct lsa_CreateTrustedDomainEx2 q;
-	struct lsa_TrustDomainInfoAuthInfoInternal auth_info;
-
-	ZERO_STRUCT(auth_info);
-
-	q.in.policy_handle	= r->in.policy_handle;
-	q.in.info		= r->in.info;
-	q.in.auth_info_internal	= &auth_info;
-	q.in.access_mask	= r->in.access_mask;
-	q.out.trustdom_handle	= r->out.trustdom_handle;
-
-	return _lsa_CreateTrustedDomainEx2(p, &q);
+	p->fault_state = DCERPC_FAULT_OP_RNG_ERROR;
+	return NT_STATUS_NOT_IMPLEMENTED;
 }
 
 /***************************************************************************
@@ -2002,26 +2144,8 @@ NTSTATUS _lsa_CreateTrustedDomainEx(struct pipes_struct *p,
 NTSTATUS _lsa_CreateTrustedDomain(struct pipes_struct *p,
 				  struct lsa_CreateTrustedDomain *r)
 {
-	struct lsa_CreateTrustedDomainEx2 c;
-	struct lsa_TrustDomainInfoInfoEx info;
-	struct lsa_TrustDomainInfoAuthInfoInternal auth_info;
-
-	ZERO_STRUCT(auth_info);
-
-	info.domain_name	= r->in.info->name;
-	info.netbios_name	= r->in.info->name;
-	info.sid		= r->in.info->sid;
-	info.trust_direction	= LSA_TRUST_DIRECTION_OUTBOUND;
-	info.trust_type		= LSA_TRUST_TYPE_DOWNLEVEL;
-	info.trust_attributes	= 0;
-
-	c.in.policy_handle	= r->in.policy_handle;
-	c.in.info		= &info;
-	c.in.auth_info_internal	= &auth_info;
-	c.in.access_mask	= r->in.access_mask;
-	c.out.trustdom_handle	= r->out.trustdom_handle;
-
-	return _lsa_CreateTrustedDomainEx2(p, &c);
+	p->fault_state = DCERPC_FAULT_OP_RNG_ERROR;
+	return NT_STATUS_NOT_IMPLEMENTED;
 }
 
 /***************************************************************************
@@ -2056,7 +2180,7 @@ NTSTATUS _lsa_DeleteTrustedDomain(struct pipes_struct *p,
 
 	if (td->netbios_name == NULL || *td->netbios_name == '\0') {
 		struct dom_sid_buf buf;
-		DEBUG(10, ("Missing netbios name for for trusted domain %s.\n",
+		DEBUG(10, ("Missing netbios name for trusted domain %s.\n",
 			   dom_sid_str_buf(r->in.dom_sid, &buf)));
 		return NT_STATUS_UNSUCCESSFUL;
 	}
@@ -4267,52 +4391,6 @@ NTSTATUS _lsa_lsaRQueryForestTrustInformation(struct pipes_struct *p,
 	return NT_STATUS_NOT_IMPLEMENTED;
 }
 
-#define DNS_CMP_MATCH 0
-#define DNS_CMP_FIRST_IS_CHILD 1
-#define DNS_CMP_SECOND_IS_CHILD 2
-#define DNS_CMP_NO_MATCH 3
-
-/* this function assumes names are well formed DNS names.
- * it doesn't validate them */
-static int dns_cmp(const char *s1, size_t l1,
-		   const char *s2, size_t l2)
-{
-	const char *p1, *p2;
-	size_t t1, t2;
-	int cret;
-
-	if (l1 == l2) {
-		if (strcasecmp_m(s1, s2) == 0) {
-			return DNS_CMP_MATCH;
-		}
-		return DNS_CMP_NO_MATCH;
-	}
-
-	if (l1 > l2) {
-		p1 = s1;
-		p2 = s2;
-		t1 = l1;
-		t2 = l2;
-		cret = DNS_CMP_FIRST_IS_CHILD;
-	} else {
-		p1 = s2;
-		p2 = s1;
-		t1 = l2;
-		t2 = l1;
-		cret = DNS_CMP_SECOND_IS_CHILD;
-	}
-
-	if (p1[t1 - t2 - 1] != '.') {
-		return DNS_CMP_NO_MATCH;
-	}
-
-	if (strcasecmp_m(&p1[t1 - t2], p2) == 0) {
-		return cret;
-	}
-
-	return DNS_CMP_NO_MATCH;
-}
-
 static NTSTATUS make_ft_info(TALLOC_CTX *mem_ctx,
 			     struct lsa_ForestTrustInformation *lfti,
 			     struct ForestTrustInfo *fti)
@@ -4394,8 +4472,6 @@ static NTSTATUS check_ft_info(TALLOC_CTX *mem_ctx,
 	const char *nb_name = NULL;
 	struct dom_sid *sid = NULL;
 	const char *tname = NULL;
-	size_t dns_len = 0;
-	size_t tlen = 0;
 	uint32_t new_fti_idx;
 	uint32_t i;
 	/* use always TDO type, until we understand when Xref can be used */
@@ -4423,12 +4499,10 @@ static NTSTATUS check_ft_info(TALLOC_CTX *mem_ctx,
 
 		case FOREST_TRUST_TOP_LEVEL_NAME:
 			dns_name = nrec->data.name.string;
-			dns_len = nrec->data.name.size;
 			break;
 
 		case LSA_FOREST_TRUST_DOMAIN_INFO:
 			dns_name = nrec->data.info.dns_name.string;
-			dns_len = nrec->data.info.dns_name.size;
 			nb_name = nrec->data.info.netbios_name.string;
 			sid = &nrec->data.info.sid;
 			break;
@@ -4444,22 +4518,19 @@ static NTSTATUS check_ft_info(TALLOC_CTX *mem_ctx,
 			case FOREST_TRUST_TOP_LEVEL_NAME:
 				ex_rule = false;
 				tname = trec->data.name.string;
-				tlen = trec->data.name.size;
 				break;
 			case FOREST_TRUST_TOP_LEVEL_NAME_EX:
 				ex_rule = true;
 				tname = trec->data.name.string;
-				tlen = trec->data.name.size;
 				break;
 			case FOREST_TRUST_DOMAIN_INFO:
 				ex_rule = false;
 				tname = trec->data.info.dns_name.string;
-				tlen = trec->data.info.dns_name.size;
 				break;
 			default:
 				return NT_STATUS_INVALID_PARAMETER;
 			}
-			ret = dns_cmp(dns_name, dns_len, tname, tlen);
+			ret = dns_cmp(dns_name, tname);
 			switch (ret) {
 			case DNS_CMP_MATCH:
 				/* if it matches exclusion,
@@ -4805,6 +4876,462 @@ NTSTATUS _lsa_LSARADTUNREGISTERSECURITYEVENTSOURCE(struct pipes_struct *p,
 
 NTSTATUS _lsa_LSARADTREPORTSECURITYEVENT(struct pipes_struct *p,
 					 struct lsa_LSARADTREPORTSECURITYEVENT *r)
+{
+	p->fault_state = DCERPC_FAULT_OP_RNG_ERROR;
+	return NT_STATUS_NOT_IMPLEMENTED;
+}
+
+void _lsa_Opnum82NotUsedOnWire(struct pipes_struct *p,
+			       struct lsa_Opnum82NotUsedOnWire *r)
+{
+	p->fault_state = DCERPC_FAULT_OP_RNG_ERROR;
+}
+
+void _lsa_Opnum83NotUsedOnWire(struct pipes_struct *p,
+			       struct lsa_Opnum83NotUsedOnWire *r)
+{
+	p->fault_state = DCERPC_FAULT_OP_RNG_ERROR;
+}
+
+void _lsa_Opnum84NotUsedOnWire(struct pipes_struct *p,
+			       struct lsa_Opnum84NotUsedOnWire *r)
+{
+	p->fault_state = DCERPC_FAULT_OP_RNG_ERROR;
+}
+
+void _lsa_Opnum85NotUsedOnWire(struct pipes_struct *p,
+			       struct lsa_Opnum85NotUsedOnWire *r)
+{
+	p->fault_state = DCERPC_FAULT_OP_RNG_ERROR;
+}
+
+void _lsa_Opnum86NotUsedOnWire(struct pipes_struct *p,
+			       struct lsa_Opnum86NotUsedOnWire *r)
+{
+	p->fault_state = DCERPC_FAULT_OP_RNG_ERROR;
+}
+
+void _lsa_Opnum87NotUsedOnWire(struct pipes_struct *p,
+			       struct lsa_Opnum87NotUsedOnWire *r)
+{
+	p->fault_state = DCERPC_FAULT_OP_RNG_ERROR;
+}
+
+void _lsa_Opnum88NotUsedOnWire(struct pipes_struct *p,
+			       struct lsa_Opnum88NotUsedOnWire *r)
+{
+	p->fault_state = DCERPC_FAULT_OP_RNG_ERROR;
+}
+
+void _lsa_Opnum89NotUsedOnWire(struct pipes_struct *p,
+			       struct lsa_Opnum89NotUsedOnWire *r)
+{
+	p->fault_state = DCERPC_FAULT_OP_RNG_ERROR;
+}
+
+void _lsa_Opnum90NotUsedOnWire(struct pipes_struct *p,
+			       struct lsa_Opnum90NotUsedOnWire *r)
+{
+	p->fault_state = DCERPC_FAULT_OP_RNG_ERROR;
+}
+
+void _lsa_Opnum91NotUsedOnWire(struct pipes_struct *p,
+			       struct lsa_Opnum91NotUsedOnWire *r)
+{
+	p->fault_state = DCERPC_FAULT_OP_RNG_ERROR;
+}
+
+void _lsa_Opnum92NotUsedOnWire(struct pipes_struct *p,
+			       struct lsa_Opnum92NotUsedOnWire *r)
+{
+	p->fault_state = DCERPC_FAULT_OP_RNG_ERROR;
+}
+
+void _lsa_Opnum93NotUsedOnWire(struct pipes_struct *p,
+			       struct lsa_Opnum93NotUsedOnWire *r)
+{
+	p->fault_state = DCERPC_FAULT_OP_RNG_ERROR;
+}
+
+void _lsa_Opnum94NotUsedOnWire(struct pipes_struct *p,
+			       struct lsa_Opnum94NotUsedOnWire *r)
+{
+	p->fault_state = DCERPC_FAULT_OP_RNG_ERROR;
+}
+
+void _lsa_Opnum95NotUsedOnWire(struct pipes_struct *p,
+			       struct lsa_Opnum95NotUsedOnWire *r)
+{
+	p->fault_state = DCERPC_FAULT_OP_RNG_ERROR;
+}
+
+void _lsa_Opnum96NotUsedOnWire(struct pipes_struct *p,
+			       struct lsa_Opnum96NotUsedOnWire *r)
+{
+	p->fault_state = DCERPC_FAULT_OP_RNG_ERROR;
+}
+
+void _lsa_Opnum97NotUsedOnWire(struct pipes_struct *p,
+			       struct lsa_Opnum97NotUsedOnWire *r)
+{
+	p->fault_state = DCERPC_FAULT_OP_RNG_ERROR;
+}
+
+void _lsa_Opnum98NotUsedOnWire(struct pipes_struct *p,
+			       struct lsa_Opnum98NotUsedOnWire *r)
+{
+	p->fault_state = DCERPC_FAULT_OP_RNG_ERROR;
+}
+
+void _lsa_Opnum99NotUsedOnWire(struct pipes_struct *p,
+			       struct lsa_Opnum99NotUsedOnWire *r)
+{
+	p->fault_state = DCERPC_FAULT_OP_RNG_ERROR;
+}
+
+void _lsa_Opnum100NotUsedOnWire(struct pipes_struct *p,
+				struct lsa_Opnum100NotUsedOnWire *r)
+{
+	p->fault_state = DCERPC_FAULT_OP_RNG_ERROR;
+}
+
+void _lsa_Opnum101NotUsedOnWire(struct pipes_struct *p,
+				struct lsa_Opnum101NotUsedOnWire *r)
+{
+	p->fault_state = DCERPC_FAULT_OP_RNG_ERROR;
+}
+
+void _lsa_Opnum102NotUsedOnWire(struct pipes_struct *p,
+				struct lsa_Opnum102NotUsedOnWire *r)
+{
+	p->fault_state = DCERPC_FAULT_OP_RNG_ERROR;
+}
+
+void _lsa_Opnum103NotUsedOnWire(struct pipes_struct *p,
+				struct lsa_Opnum103NotUsedOnWire *r)
+{
+	p->fault_state = DCERPC_FAULT_OP_RNG_ERROR;
+}
+
+void _lsa_Opnum104NotUsedOnWire(struct pipes_struct *p,
+				struct lsa_Opnum104NotUsedOnWire *r)
+{
+	p->fault_state = DCERPC_FAULT_OP_RNG_ERROR;
+}
+
+void _lsa_Opnum105NotUsedOnWire(struct pipes_struct *p,
+				struct lsa_Opnum105NotUsedOnWire *r)
+{
+	p->fault_state = DCERPC_FAULT_OP_RNG_ERROR;
+}
+
+void _lsa_Opnum106NotUsedOnWire(struct pipes_struct *p,
+				struct lsa_Opnum106NotUsedOnWire *r)
+{
+	p->fault_state = DCERPC_FAULT_OP_RNG_ERROR;
+}
+
+void _lsa_Opnum107NotUsedOnWire(struct pipes_struct *p,
+				struct lsa_Opnum107NotUsedOnWire *r)
+{
+	p->fault_state = DCERPC_FAULT_OP_RNG_ERROR;
+}
+
+void _lsa_Opnum108NotUsedOnWire(struct pipes_struct *p,
+				struct lsa_Opnum108NotUsedOnWire *r)
+{
+	p->fault_state = DCERPC_FAULT_OP_RNG_ERROR;
+}
+
+void _lsa_Opnum109NotUsedOnWire(struct pipes_struct *p,
+				struct lsa_Opnum109NotUsedOnWire *r)
+{
+	p->fault_state = DCERPC_FAULT_OP_RNG_ERROR;
+}
+
+void _lsa_Opnum110NotUsedOnWire(struct pipes_struct *p,
+				struct lsa_Opnum110NotUsedOnWire *r)
+{
+	p->fault_state = DCERPC_FAULT_OP_RNG_ERROR;
+}
+
+void _lsa_Opnum111NotUsedOnWire(struct pipes_struct *p,
+				struct lsa_Opnum111NotUsedOnWire *r)
+{
+	p->fault_state = DCERPC_FAULT_OP_RNG_ERROR;
+}
+
+void _lsa_Opnum112NotUsedOnWire(struct pipes_struct *p,
+				struct lsa_Opnum112NotUsedOnWire *r)
+{
+	p->fault_state = DCERPC_FAULT_OP_RNG_ERROR;
+}
+
+void _lsa_Opnum113NotUsedOnWire(struct pipes_struct *p,
+				struct lsa_Opnum113NotUsedOnWire *r)
+{
+	p->fault_state = DCERPC_FAULT_OP_RNG_ERROR;
+}
+
+void _lsa_Opnum114NotUsedOnWire(struct pipes_struct *p,
+				struct lsa_Opnum114NotUsedOnWire *r)
+{
+	p->fault_state = DCERPC_FAULT_OP_RNG_ERROR;
+}
+
+void _lsa_Opnum115NotUsedOnWire(struct pipes_struct *p,
+				struct lsa_Opnum115NotUsedOnWire *r)
+{
+	p->fault_state = DCERPC_FAULT_OP_RNG_ERROR;
+}
+
+void _lsa_Opnum116NotUsedOnWire(struct pipes_struct *p,
+				struct lsa_Opnum116NotUsedOnWire *r)
+{
+	p->fault_state = DCERPC_FAULT_OP_RNG_ERROR;
+}
+
+void _lsa_Opnum117NotUsedOnWire(struct pipes_struct *p,
+				struct lsa_Opnum117NotUsedOnWire *r)
+{
+	p->fault_state = DCERPC_FAULT_OP_RNG_ERROR;
+}
+
+void _lsa_Opnum118NotUsedOnWire(struct pipes_struct *p,
+				struct lsa_Opnum118NotUsedOnWire *r)
+{
+	p->fault_state = DCERPC_FAULT_OP_RNG_ERROR;
+}
+
+void _lsa_Opnum119NotUsedOnWire(struct pipes_struct *p,
+				struct lsa_Opnum119NotUsedOnWire *r)
+{
+	p->fault_state = DCERPC_FAULT_OP_RNG_ERROR;
+}
+
+void _lsa_Opnum120NotUsedOnWire(struct pipes_struct *p,
+				struct lsa_Opnum120NotUsedOnWire *r)
+{
+	p->fault_state = DCERPC_FAULT_OP_RNG_ERROR;
+}
+
+void _lsa_Opnum121NotUsedOnWire(struct pipes_struct *p,
+				struct lsa_Opnum121NotUsedOnWire *r)
+{
+	p->fault_state = DCERPC_FAULT_OP_RNG_ERROR;
+}
+
+void _lsa_Opnum122NotUsedOnWire(struct pipes_struct *p,
+				struct lsa_Opnum122NotUsedOnWire *r)
+{
+	p->fault_state = DCERPC_FAULT_OP_RNG_ERROR;
+}
+
+void _lsa_Opnum123NotUsedOnWire(struct pipes_struct *p,
+				struct lsa_Opnum123NotUsedOnWire *r)
+{
+	p->fault_state = DCERPC_FAULT_OP_RNG_ERROR;
+}
+
+void _lsa_Opnum124NotUsedOnWire(struct pipes_struct *p,
+				struct lsa_Opnum124NotUsedOnWire *r)
+{
+	p->fault_state = DCERPC_FAULT_OP_RNG_ERROR;
+}
+
+void _lsa_Opnum125NotUsedOnWire(struct pipes_struct *p,
+				struct lsa_Opnum125NotUsedOnWire *r)
+{
+	p->fault_state = DCERPC_FAULT_OP_RNG_ERROR;
+}
+
+void _lsa_Opnum126NotUsedOnWire(struct pipes_struct *p,
+				struct lsa_Opnum126NotUsedOnWire *r)
+{
+	p->fault_state = DCERPC_FAULT_OP_RNG_ERROR;
+}
+
+void _lsa_Opnum127NotUsedOnWire(struct pipes_struct *p,
+				struct lsa_Opnum127NotUsedOnWire *r)
+{
+	p->fault_state = DCERPC_FAULT_OP_RNG_ERROR;
+}
+
+void _lsa_Opnum128NotUsedOnWire(struct pipes_struct *p,
+				struct lsa_Opnum128NotUsedOnWire *r)
+{
+	p->fault_state = DCERPC_FAULT_OP_RNG_ERROR;
+}
+
+/***************************************************************************
+ _lsa_CreateTrustedDomainEx3
+ ***************************************************************************/
+
+NTSTATUS _lsa_CreateTrustedDomainEx3(struct pipes_struct *p,
+				     struct lsa_CreateTrustedDomainEx3 *r)
+{
+	struct dcesrv_call_state *dce_call = p->dce_call;
+	struct auth_session_info *session_info =
+		dcesrv_call_session_info(dce_call);
+	struct lsa_info *policy;
+	NTSTATUS status;
+	struct trustDomainPasswords auth_struct = {
+		.incoming_size = 0,
+	};
+
+	if (!IS_DC) {
+		return NT_STATUS_NOT_SUPPORTED;
+	}
+
+	policy = find_policy_by_hnd(p,
+				    r->in.policy_handle,
+				    LSA_HANDLE_POLICY_TYPE,
+				    struct lsa_info,
+				    &status);
+	if (!NT_STATUS_IS_OK(status)) {
+		return NT_STATUS_INVALID_HANDLE;
+	}
+
+	status = lsa_CreateTrustedDomain_precheck(p->mem_ctx,
+						  policy,
+						  session_info,
+						  r->in.info);
+	if (!NT_STATUS_IS_OK(status)) {
+		return status;
+	}
+
+
+	status = get_trustdom_auth_blob_aes(dce_call,
+					    p->mem_ctx,
+					    r->in.auth_info_internal,
+					    &auth_struct);
+	if (!NT_STATUS_IS_OK(status)) {
+		return NT_STATUS_UNSUCCESSFUL;
+	}
+
+	status = lsa_CreateTrustedDomain_common(p,
+						p->mem_ctx,
+						session_info,
+						policy,
+						r->in.access_mask,
+						r->in.info,
+						&auth_struct,
+						&r->out.trustdom_handle);
+	if (!NT_STATUS_IS_OK(status)) {
+		return status;
+	}
+
+	return NT_STATUS_OK;
+}
+
+/***************************************************************************
+ _lsa_OpenPolicy3
+ ***************************************************************************/
+
+NTSTATUS _lsa_OpenPolicy3(struct pipes_struct *p,
+			  struct lsa_OpenPolicy3 *r)
+{
+	struct dcesrv_call_state *dce_call = p->dce_call;
+	struct auth_session_info *session_info =
+		dcesrv_call_session_info(dce_call);
+	struct security_descriptor *psd = NULL;
+	size_t sd_size;
+	uint32_t des_access = r->in.access_mask;
+	uint32_t acc_granted;
+	NTSTATUS status;
+
+	if (p->transport != NCACN_NP && p->transport != NCALRPC) {
+		p->fault_state = DCERPC_FAULT_ACCESS_DENIED;
+		return NT_STATUS_ACCESS_DENIED;
+	}
+
+	ZERO_STRUCTP(r->out.handle);
+
+	/*
+	 * The attributes have no effect and MUST be ignored, except the
+	 * root_dir which MUST be NULL.
+	 */
+	if (r->in.attr != NULL && r->in.attr->root_dir != NULL) {
+		return NT_STATUS_INVALID_PARAMETER;
+	}
+
+	switch (r->in.in_version) {
+	case 1:
+		*r->out.out_version = 1;
+
+		r->out.out_revision_info->info1.revision = 1;
+		/* TODO: Enable as soon as we support it */
+#if 0
+		r->out.out_revision_info->info1.supported_features =
+			LSA_FEATURE_TDO_AUTH_INFO_AES_CIPHER;
+#endif
+
+		break;
+	default:
+		return NT_STATUS_NOT_SUPPORTED;
+	}
+
+	/* Work out max allowed. */
+	map_max_allowed_access(session_info->security_token,
+			       session_info->unix_token,
+			       &des_access);
+
+	/* map the generic bits to the lsa policy ones */
+	se_map_generic(&des_access, &lsa_policy_mapping);
+
+	/* get the generic lsa policy SD until we store it */
+	status = make_lsa_object_sd(p->mem_ctx,
+				    &psd,
+				    &sd_size,
+				    &lsa_policy_mapping,
+				    NULL,
+				    0);
+	if (!NT_STATUS_IS_OK(status)) {
+		return status;
+	}
+
+	status = access_check_object(psd,
+				     session_info->security_token,
+				     SEC_PRIV_INVALID,
+				     SEC_PRIV_INVALID,
+				     0,
+				     des_access,
+				     &acc_granted,
+				     "_lsa_OpenPolicy2");
+	if (!NT_STATUS_IS_OK(status)) {
+		return status;
+	}
+
+	status = create_lsa_policy_handle(p->mem_ctx,
+					  p,
+					  LSA_HANDLE_POLICY_TYPE,
+					  acc_granted,
+					  get_global_sam_sid(),
+					  NULL,
+					  psd,
+					  r->out.handle);
+	if (!NT_STATUS_IS_OK(status)) {
+		return NT_STATUS_OBJECT_NAME_NOT_FOUND;
+	}
+
+	return NT_STATUS_OK;
+}
+
+void _lsa_Opnum131NotUsedOnWire(struct pipes_struct *p,
+				struct lsa_Opnum131NotUsedOnWire *r)
+{
+	p->fault_state = DCERPC_FAULT_OP_RNG_ERROR;
+}
+
+NTSTATUS _lsa_lsaRQueryForestTrustInformation2(struct pipes_struct *p,
+					       struct lsa_lsaRQueryForestTrustInformation2 *r)
+{
+	p->fault_state = DCERPC_FAULT_OP_RNG_ERROR;
+	return NT_STATUS_NOT_IMPLEMENTED;
+}
+
+NTSTATUS _lsa_lsaRSetForestTrustInformation2(struct pipes_struct *p,
+					    struct lsa_lsaRSetForestTrustInformation2 *r)
 {
 	p->fault_state = DCERPC_FAULT_OP_RNG_ERROR;
 	return NT_STATUS_NOT_IMPLEMENTED;

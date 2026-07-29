@@ -1297,7 +1297,7 @@ class DrsReplicaSyncIntegrityTestCase(drs_base.DrsBaseTestCase):
             self.nc_change()
 
         if mid_change:
-            # create even moire objects
+            # create even more objects
             objs = self.create_object_range(301, 450, prefix="obj2")
 
         base_msg = self.default_conn.ldb_dc.search(base=self.base_dn,
@@ -1329,9 +1329,9 @@ class DrsReplicaSyncIntegrityTestCase(drs_base.DrsBaseTestCase):
 
         # Check some predicates about USN ordering that the below tests will rely on
         if ou_change and nc_change:
-            self.assertGreater(ou_usn, base_usn);
+            self.assertGreater(ou_usn, base_usn)
         elif not ou_change and nc_change:
-            self.assertGreater(base_usn, ou_usn);
+            self.assertGreater(base_usn, ou_usn)
 
         ctr6 = self.repl_get_next()
 
@@ -1415,6 +1415,55 @@ class DrsReplicaSyncIntegrityTestCase(drs_base.DrsBaseTestCase):
     def test_repl_nc_is_first_no_change(self):
         # The NC should not be present in this replication
         self._test_repl_nc_is_first(start_at_zero=False, nc_change=False, ou_change=False)
+
+
+class DrsReplicaSyncFakeAzureAdTests(DrsReplicaSyncIntegrityTestCase):
+    """This repeats all of DrsReplicaSyncIntegrityTestCase, but the client
+    always sets highwatermark.reserved_usn = 0. This is what Azure AD
+    / Entra ID Connect does.
+    """
+    @staticmethod
+    def modify_highwatermark(hwm):
+        if hwm is not None:
+            hwm.reserved_usn = 0
+
+    SKIPPED_TESTS = {
+        "test_repl_get_tgt",
+        "test_repl_get_tgt_and_anc",
+        "test_repl_get_tgt_chain",
+        "test_do_full_repl_mix_no_overlap",
+        "test_do_full_repl_no_overlap",
+        "test_do_full_repl_no_overlap_get_anc",
+        "test_DummyDN_valid_GUID_full_repl",
+        "test_InvalidNC_DummyDN_InvalidGUID_full_repl",
+        "test_repl_get_anc_link_attr",
+        "test_repl_integrity_cross_partition_links",
+        "test_repl_integrity_cross_partition_links_with_tgt",
+        "test_repl_integrity_get_anc",
+        "test_repl_integrity_obj_reanimation",
+        "test_repl_integrity_src_obj_deletion",
+        "test_repl_integrity_tgt_obj_deletion",
+        "test_repl_nc_is_first",
+        "test_repl_nc_is_first_mid",
+        "test_repl_nc_is_first_nc_change_only", # xfail in parent
+        "test_repl_nc_is_first_no_change",
+        "test_repl_nc_is_first_start_zero",
+        "test_repl_nc_is_first_start_zero_nc_change",
+    }
+
+    def setUp(self):
+        # Only some tests behave any differently with the zeroed
+        # reserved_usn. The getncchanges tests are quite slow, so it
+        # is worth skipping unnecessary tests.
+        #
+        # If you think a test is worth running here, add it to the
+        # list.
+        testname = self.id().rsplit(".", 1)[1]
+        if testname in self.SKIPPED_TESTS:
+            self.skipTest("Probably not affected by reserved_usn = 0")
+
+        super().setUp()
+
 
 class DcConnection:
     """Helper class to track a connection to another DC"""

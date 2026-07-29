@@ -10,12 +10,12 @@
    it under the terms of the GNU General Public License as published by
    the Free Software Foundation; either version 3 of the License, or
    (at your option) any later version.
-   
+
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
    GNU General Public License for more details.
-   
+
    You should have received a copy of the GNU General Public License
    along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
@@ -54,7 +54,7 @@
   primaryGroupToken: HIDDEN, CONSTRUCTED, SEARCHABLE
 
      contains the RID of a certain group object
-    
+
 
   attributeTypes: in schema only
   objectClasses: in schema only
@@ -70,11 +70,9 @@
 
 #include "librpc/gen_ndr/ndr_misc.h"
 #include "librpc/gen_ndr/ndr_drsblobs.h"
-#include "param/param.h"
 #include "dsdb/samdb/samdb.h"
+#include "dsdb/samdb/ldb_modules/managed_pwd.h"
 #include "dsdb/samdb/ldb_modules/util.h"
-
-#include "libcli/security/security.h"
 
 #include "auth/auth.h"
 
@@ -101,6 +99,27 @@ enum search_type {
 	ACCOUNT_GROUPS
 };
 
+enum expire_uf_smartcard {
+	EXPIRE_UF_SMARTCARD_UNINIT = 0,
+	NO_EXPIRE_UF_SMARTCARD = 1,
+	EXPIRE_UF_SMARTCARD = 2
+};
+
+struct operational_context {
+	struct ldb_module *module;
+	struct ldb_request *req;
+	enum ldb_scope scope;
+	const char * const *attrs;
+	struct ldb_parse_tree *tree;
+	struct op_controls_flags* controls_flags;
+	struct op_attributes_operations *list_operations;
+	unsigned int list_operations_size;
+	struct op_attributes_replace *attrs_to_replace;
+	unsigned int attrs_to_replace_size;
+	enum expire_uf_smartcard expire_passwords_onsmartcardonlyaccounts;
+	NTTIME now;
+};
+
 static int get_pso_for_user(struct ldb_module *module,
 			    struct ldb_message *user_msg,
 			    struct ldb_request *parent,
@@ -111,7 +130,7 @@ static int get_pso_for_user(struct ldb_module *module,
 */
 static int construct_canonical_name(struct ldb_module *module,
 				    struct ldb_message *msg, enum ldb_scope scope,
-				    struct ldb_request *parent)
+				    struct ldb_request *parent, struct ldb_reply *ares)
 {
 	char *canonicalName;
 	canonicalName = ldb_dn_canonical_string(msg, msg->dn);
@@ -126,11 +145,11 @@ static int construct_canonical_name(struct ldb_module *module,
 */
 static int construct_primary_group_token(struct ldb_module *module,
 					 struct ldb_message *msg, enum ldb_scope scope,
-					 struct ldb_request *parent)
+					 struct ldb_request *parent, struct ldb_reply *ares)
 {
 	struct ldb_context *ldb;
 	uint32_t primary_group_token;
-	
+
 	ldb = ldb_module_get_ctx(module);
 	if (ldb_match_msg_objectclass(msg, "group") == 1) {
 		primary_group_token
@@ -249,7 +268,7 @@ static int get_group_sids(struct ldb_context *ldb, TALLOC_CTX *mem_ctx,
 
 	status = dsdb_expand_nested_groups(ldb, &account_sid_blob,
 					   true, /* We don't want to add the object's SID itself,
-						    it's not returend in this attribute */
+						    it's not returned in this attribute */
 					   filter,
 					   mem_ctx, groupSIDs, num_groupSIDs);
 
@@ -322,7 +341,7 @@ static int construct_generic_token_groups(struct ldb_module *module,
 
 static int construct_token_groups(struct ldb_module *module,
 				  struct ldb_message *msg, enum ldb_scope scope,
-				  struct ldb_request *parent)
+				  struct ldb_request *parent, struct ldb_reply *ares)
 {
 	/**
 	 * TODO: Add in a limiting domain when we start to support
@@ -335,7 +354,7 @@ static int construct_token_groups(struct ldb_module *module,
 
 static int construct_token_groups_no_gc(struct ldb_module *module,
 					struct ldb_message *msg, enum ldb_scope scope,
-					struct ldb_request *parent)
+					struct ldb_request *parent, struct ldb_reply *ares)
 {
 	/**
 	 * TODO: Add in a limiting domain when we start to support
@@ -348,7 +367,7 @@ static int construct_token_groups_no_gc(struct ldb_module *module,
 
 static int construct_global_universal_token_groups(struct ldb_module *module,
 						   struct ldb_message *msg, enum ldb_scope scope,
-						   struct ldb_request *parent)
+						   struct ldb_request *parent, struct ldb_reply *ares)
 {
 	return construct_generic_token_groups(module, msg, scope, parent,
 					      "tokenGroupsGlobalAndUniversal",
@@ -359,7 +378,7 @@ static int construct_global_universal_token_groups(struct ldb_module *module,
 */
 static int construct_parent_guid(struct ldb_module *module,
 				 struct ldb_message *msg, enum ldb_scope scope,
-				 struct ldb_request *parent)
+				 struct ldb_request *parent, struct ldb_reply *ares)
 {
 	struct ldb_result *res, *parent_res;
 	const struct ldb_val *parent_guid;
@@ -398,7 +417,7 @@ static int construct_parent_guid(struct ldb_module *module,
 	                            DSDB_SEARCH_SHOW_RECYCLED, parent);
 	/* not NC, so the object should have a parent*/
 	if (ret == LDB_ERR_NO_SUCH_OBJECT) {
-		ret = ldb_error(ldb_module_get_ctx(module), LDB_ERR_OPERATIONS_ERROR, 
+		ret = ldb_error(ldb_module_get_ctx(module), LDB_ERR_OPERATIONS_ERROR,
 				 talloc_asprintf(msg, "Parent dn %s for %s does not exist",
 						 ldb_dn_get_linearized(parent_dn),
 						 ldb_dn_get_linearized(msg->dn)));
@@ -428,7 +447,7 @@ static int construct_parent_guid(struct ldb_module *module,
 
 static int construct_modifyTimeStamp(struct ldb_module *module,
 					struct ldb_message *msg, enum ldb_scope scope,
-					struct ldb_request *parent)
+					struct ldb_request *parent, struct ldb_reply *ares)
 {
 	struct operational_data *data = talloc_get_type(ldb_module_get_private(module), struct operational_data);
 	struct ldb_context *ldb = ldb_module_get_ctx(module);
@@ -471,7 +490,7 @@ static int construct_modifyTimeStamp(struct ldb_module *module,
 */
 static int construct_subschema_subentry(struct ldb_module *module,
 					struct ldb_message *msg, enum ldb_scope scope,
-					struct ldb_request *parent)
+					struct ldb_request *parent, struct ldb_reply *ares)
 {
 	struct operational_data *data = talloc_get_type(ldb_module_get_private(module), struct operational_data);
 	char *subSchemaSubEntry;
@@ -538,7 +557,7 @@ static int construct_msds_isrodc_with_server_dn(struct ldb_module *module,
 						struct ldb_dn *dn,
 						struct ldb_request *parent)
 {
-	struct ldb_dn *server_dn;
+	struct ldb_dn *server_dn = NULL;
 	const char *attr_obj_cat[] = { "objectCategory", NULL };
 	struct ldb_result *res;
 	struct ldb_message_element *object_category;
@@ -575,7 +594,7 @@ static int construct_msds_isrodc_with_computer_dn(struct ldb_module *module,
 						  struct ldb_request *parent)
 {
 	int ret;
-	struct ldb_dn *server_dn;
+	struct ldb_dn *server_dn = NULL;
 
 	ret = dsdb_module_reference_dn(module, msg, msg->dn, "serverReferenceBL",
 				       &server_dn, parent);
@@ -596,7 +615,7 @@ static int construct_msds_isrodc_with_computer_dn(struct ldb_module *module,
 */
 static int construct_msds_isrodc(struct ldb_module *module,
 				 struct ldb_message *msg, enum ldb_scope scope,
-				 struct ldb_request *parent)
+				 struct ldb_request *parent, struct ldb_reply *ares)
 {
 	struct ldb_message_element * object_class;
 	struct ldb_message_element * object_category;
@@ -644,13 +663,14 @@ static int construct_msds_isrodc(struct ldb_module *module,
 /*
   construct msDS-keyVersionNumber attr
 
-  TODO:  Make this based on the 'win2k' DS huristics bit...
+  TODO:  Make this based on the 'win2k' DS heuristics bit...
 
 */
 static int construct_msds_keyversionnumber(struct ldb_module *module,
 					   struct ldb_message *msg,
 					   enum ldb_scope scope,
-					   struct ldb_request *parent)
+					   struct ldb_request *parent,
+					   struct ldb_reply *ares)
 {
 	uint32_t i;
 	enum ndr_err_code ndr_err;
@@ -701,15 +721,9 @@ static int construct_msds_keyversionnumber(struct ldb_module *module,
 
 }
 
-#define _UF_TRUST_ACCOUNTS ( \
-	UF_WORKSTATION_TRUST_ACCOUNT | \
-	UF_SERVER_TRUST_ACCOUNT | \
-	UF_INTERDOMAIN_TRUST_ACCOUNT \
-)
 #define _UF_NO_EXPIRY_ACCOUNTS ( \
-	UF_SMARTCARD_REQUIRED | \
 	UF_DONT_EXPIRE_PASSWD | \
-	_UF_TRUST_ACCOUNTS \
+	UF_TRUST_ACCOUNT_MASK \
 )
 
 
@@ -743,13 +757,62 @@ static int64_t get_user_max_pwd_age(struct ldb_module *module,
 	return samdb_search_int64(ldb, user_msg, 0, nc_root, "maxPwdAge", NULL);
 }
 
+static enum expire_uf_smartcard get_expire_passwords_onsmartcardonlyaccounts(struct ldb_module *module,
+									     struct operational_context *ac)
+{
+	struct ldb_context *ldb = ldb_module_get_ctx(module);
+	if (ac->expire_passwords_onsmartcardonlyaccounts != EXPIRE_UF_SMARTCARD_UNINIT) {
+		return ac->expire_passwords_onsmartcardonlyaccounts;
+	}
+
+	if (dsdb_functional_level(ldb) < DS_DOMAIN_FUNCTION_2016) {
+		ac->expire_passwords_onsmartcardonlyaccounts
+			= NO_EXPIRE_UF_SMARTCARD;
+	} else {
+		const char *base_attrs[] = { "msDS-ExpirePasswordsOnSmartCardOnlyAccounts",
+					     NULL };
+		struct ldb_message *base_msg;
+		bool attr_in_ldb;
+
+		int ldb_ret = dsdb_search_one(ldb, ac,
+					      &base_msg,
+					      ldb_get_default_basedn(ldb),
+					      LDB_SCOPE_BASE,
+					      base_attrs, 0, NULL);
+		if (ldb_ret != LDB_SUCCESS) {
+			DBG_WARNING("could not find own base DN in DB: %s\n", ldb_errstring(ldb));
+			return EXPIRE_UF_SMARTCARD_UNINIT;
+		}
+		/*
+		 * This attribute is to allow these passwords to
+		 * expire, and if they expire to rotate them. TRUE
+		 * means rotate, FALSE or absent meant never allow to
+		 * expire.
+		 */
+		attr_in_ldb = ldb_msg_find_attr_as_bool(base_msg,
+							"msDS-ExpirePasswordsOnSmartCardOnlyAccounts",
+							false);
+		talloc_free(base_msg);
+		if (attr_in_ldb) {
+			ac->expire_passwords_onsmartcardonlyaccounts
+				= EXPIRE_UF_SMARTCARD;
+		} else {
+			ac->expire_passwords_onsmartcardonlyaccounts
+				= NO_EXPIRE_UF_SMARTCARD;
+		}
+	}
+	return ac->expire_passwords_onsmartcardonlyaccounts;
+}
+
+
 /*
   calculate msDS-UserPasswordExpiryTimeComputed
 */
 static NTTIME get_msds_user_password_expiry_time_computed(struct ldb_module *module,
-						struct ldb_message *msg,
-						struct ldb_request *parent,
-						struct ldb_dn *domain_dn)
+							  struct operational_context *ac,
+							  struct ldb_message *msg,
+							  struct ldb_request *parent,
+							  struct ldb_dn *domain_dn)
 {
 	int64_t pwdLastSet, maxPwdAge;
 	uint32_t userAccountControl;
@@ -759,7 +822,16 @@ static NTTIME get_msds_user_password_expiry_time_computed(struct ldb_module *mod
 					"userAccountControl",
 					0);
 	if (userAccountControl & _UF_NO_EXPIRY_ACCOUNTS) {
-		return 0x7FFFFFFFFFFFFFFFULL;
+		return INT64_MAX;
+	}
+
+	if (userAccountControl & UF_SMARTCARD_REQUIRED) {
+		enum expire_uf_smartcard expire_uf_smartcard =
+			get_expire_passwords_onsmartcardonlyaccounts(module, ac);
+
+		if (expire_uf_smartcard != EXPIRE_UF_SMARTCARD) {
+			return INT64_MAX;
+		}
 	}
 
 	pwdLastSet = ldb_msg_find_attr_as_int64(msg, "pwdLastSet", 0);
@@ -771,14 +843,14 @@ static NTTIME get_msds_user_password_expiry_time_computed(struct ldb_module *mod
 		/*
 		 * This can't really happen...
 		 */
-		return 0x7FFFFFFFFFFFFFFFULL;
+		return INT64_MAX;
 	}
 
-	if (pwdLastSet >= 0x7FFFFFFFFFFFFFFFLL) {
+	if (pwdLastSet >= INT64_MAX) {
 		/*
 		 * Somethings wrong with the clock...
 		 */
-		return 0x7FFFFFFFFFFFFFFFULL;
+		return INT64_MAX;
 	}
 
 	/*
@@ -786,31 +858,31 @@ static NTTIME get_msds_user_password_expiry_time_computed(struct ldb_module *mod
 	 *
 	 * Possible values are in the range of:
 	 *
-	 * maxPwdAge: -864000000001
+	 * maxPwdAge: -2
 	 * to
-	 * maxPwdAge: -9223372036854775808 (-0x8000000000000000ULL)
+	 * maxPwdAge: -9223372036854775808 (INT64_MIN)
 	 *
 	 */
 	maxPwdAge = get_user_max_pwd_age(module, msg, parent, domain_dn);
-	if (maxPwdAge >= -864000000000) {
+	if (maxPwdAge >= -1) {
 		/*
 		 * This is not really possible...
 		 */
-		return 0x7FFFFFFFFFFFFFFFULL;
+		return INT64_MAX;
 	}
 
-	if (maxPwdAge == -0x8000000000000000LL) {
-		return 0x7FFFFFFFFFFFFFFFULL;
+	if (maxPwdAge == INT64_MIN) {
+		return INT64_MAX;
 	}
 
 	/*
-	 * Note we already caught maxPwdAge == -0x8000000000000000ULL
-	 * and pwdLastSet >= 0x7FFFFFFFFFFFFFFFULL above.
+	 * Note we already caught maxPwdAge == INT64_MIN
+	 * and pwdLastSet >= INT64_MAX above.
 	 *
 	 * Remember maxPwdAge is a negative number,
 	 * so it results in the following.
 	 *
-	 * 0x7FFFFFFFFFFFFFFEULL + 0x7FFFFFFFFFFFFFFFULL
+	 * 0x7FFFFFFFFFFFFFFEULL + INT64_MAX
 	 * =
 	 * 0xFFFFFFFFFFFFFFFDULL
 	 *
@@ -818,8 +890,8 @@ static NTTIME get_msds_user_password_expiry_time_computed(struct ldb_module *mod
 	 * ever be more than 1<<64, therefore this result can't wrap.
 	 */
 	ret = (NTTIME)pwdLastSet - (NTTIME)maxPwdAge;
-	if (ret >= 0x7FFFFFFFFFFFFFFFULL) {
-		return 0x7FFFFFFFFFFFFFFFULL;
+	if (ret >= INT64_MAX) {
+		return INT64_MAX;
 	}
 
 	return ret;
@@ -861,14 +933,16 @@ static int64_t get_user_lockout_duration(struct ldb_module *module,
 */
 static int construct_msds_user_account_control_computed(struct ldb_module *module,
 							struct ldb_message *msg, enum ldb_scope scope,
-							struct ldb_request *parent)
+							struct ldb_request *parent, struct ldb_reply *ares)
 {
-	uint32_t userAccountControl;
 	uint32_t msDS_User_Account_Control_Computed = 0;
 	struct ldb_context *ldb = ldb_module_get_ctx(module);
-	NTTIME now;
 	struct ldb_dn *nc_root;
+	NTTIME must_change_time;
 	int ret;
+	struct operational_context *ac
+		= talloc_get_type_abort(parent->context,
+					struct operational_context);
 
 	ret = dsdb_find_nc_root(ldb, msg, msg->dn, &nc_root);
 	if (ret != 0) {
@@ -882,13 +956,16 @@ static int construct_msds_user_account_control_computed(struct ldb_module *modul
 		/* Only calculate this on our default NC */
 		return 0;
 	}
-	/* Test account expire time */
-	unix_to_nt_time(&now, time(NULL));
 
-	userAccountControl = ldb_msg_find_attr_as_uint(msg,
-						       "userAccountControl",
-						       0);
-	if (!(userAccountControl & _UF_TRUST_ACCOUNTS)) {
+	if (ac->now == 0) {
+		/* Get the current or simulated time */
+		bool time_ok = dsdb_gmsa_current_time(ldb, &ac->now);
+		if (!time_ok) {
+			return ldb_module_operr(module);
+		}
+	}
+
+	if (!dsdb_account_is_trust(msg)) {
 
 		int64_t lockoutTime = ldb_msg_find_attr_as_int64(msg, "lockoutTime", 0);
 		if (lockoutTime != 0) {
@@ -901,22 +978,21 @@ static int construct_msds_user_account_control_computed(struct ldb_module *modul
 			/* zero locks out until the administrator intervenes */
 			if (lockoutDuration >= 0) {
 				msDS_User_Account_Control_Computed |= UF_LOCKOUT;
-			} else if (lockoutTime - lockoutDuration >= now) {
+			} else if (lockoutTime - lockoutDuration >= ac->now) {
 				msDS_User_Account_Control_Computed |= UF_LOCKOUT;
 			}
 		}
 	}
 
-	if (!(userAccountControl & _UF_NO_EXPIRY_ACCOUNTS)) {
-		NTTIME must_change_time
-			= get_msds_user_password_expiry_time_computed(module,
-								      msg,
-								      parent,
-								      nc_root);
-		/* check for expired password */
-		if (must_change_time < now) {
-			msDS_User_Account_Control_Computed |= UF_PASSWORD_EXPIRED;
-		}
+	must_change_time
+		= get_msds_user_password_expiry_time_computed(module,
+							      ac,
+							      msg,
+							      parent,
+							      nc_root);
+	/* check for expired password */
+	if (must_change_time < ac->now) {
+		msDS_User_Account_Control_Computed |= UF_PASSWORD_EXPIRED;
 	}
 
 	return samdb_msg_add_int64(ldb,
@@ -930,9 +1006,12 @@ static int construct_msds_user_account_control_computed(struct ldb_module *modul
 */
 static int construct_msds_user_password_expiry_time_computed(struct ldb_module *module,
 							     struct ldb_message *msg, enum ldb_scope scope,
-							     struct ldb_request *parent)
+							     struct ldb_request *parent, struct ldb_reply *ares)
 {
 	struct ldb_context *ldb = ldb_module_get_ctx(module);
+	struct operational_context *ac
+		= talloc_get_type_abort(parent->context,
+					struct operational_context);
 	struct ldb_dn *nc_root;
 	int64_t password_expiry_time;
 	int ret;
@@ -952,7 +1031,9 @@ static int construct_msds_user_password_expiry_time_computed(struct ldb_module *
 	}
 
 	password_expiry_time
-		= get_msds_user_password_expiry_time_computed(module, msg,
+		= get_msds_user_password_expiry_time_computed(module,
+							      ac,
+							      msg,
 							      parent, nc_root);
 
 	return samdb_msg_add_int64(ldb,
@@ -1073,7 +1154,7 @@ static int pso_compare(struct ldb_message **m1, struct ldb_message **m2)
 
 		return ndr_guid_compare(&guid1, &guid2);
 	} else {
-		return prec1 - prec2;
+		return NUMERIC_CMP(prec1, prec2);
 	}
 }
 
@@ -1301,9 +1382,10 @@ static int get_pso_for_user(struct ldb_module *module,
  * Settings Object (PSO) that applies to that user.
  */
 static int construct_resultant_pso(struct ldb_module *module,
-                                   struct ldb_message *msg,
+				   struct ldb_message *msg,
 				   enum ldb_scope scope,
-                                   struct ldb_request *parent)
+				   struct ldb_request *parent,
+				   struct ldb_reply *ares)
 {
 	struct ldb_message *pso = NULL;
 	int ret;
@@ -1357,7 +1439,7 @@ struct op_attributes_replace {
 	const char *attr;
 	const char *replace;
 	const char * const *extra_attrs;
-	int (*constructor)(struct ldb_module *, struct ldb_message *, enum ldb_scope, struct ldb_request *);
+	int (*constructor)(struct ldb_module *, struct ldb_message *, enum ldb_scope, struct ldb_request *, struct ldb_reply *);
 };
 
 /* the 'extra_attrs' required for msDS-ResultantPSO */
@@ -1412,6 +1494,17 @@ static const char *resultant_pso_computed_attrs[] =
 	NULL
 };
 
+static const char *managed_password_computed_attrs[] = {
+	"msDS-GroupMSAMembership",
+	"msDS-ManagedPasswordId",
+	"msDS-ManagedPasswordInterval",
+	"msDS-ManagedPasswordPreviousId",
+	"objectClass",
+	"objectSid",
+	"whenCreated",
+	NULL,
+};
+
 /*
   a list of attribute names that are hidden, but can be searched for
   using another (non-hidden) name to produce the correct result
@@ -1434,7 +1527,11 @@ static const struct op_attributes_replace search_sub[] = {
 	{ "msDS-UserPasswordExpiryTimeComputed", "userAccountControl", user_password_expiry_time_computed_attrs,
 	  construct_msds_user_password_expiry_time_computed },
 	{ "msDS-ResultantPSO", "objectClass", resultant_pso_computed_attrs,
-	  construct_resultant_pso }
+	  construct_resultant_pso },
+	{"msDS-ManagedPassword",
+	 NULL,
+	 managed_password_computed_attrs,
+	 constructed_msds_managed_password},
 };
 
 
@@ -1442,7 +1539,7 @@ enum op_remove {
 	OPERATIONAL_REMOVE_ALWAYS, /* remove always */
 	OPERATIONAL_REMOVE_UNASKED,/* remove if not requested */
 	OPERATIONAL_SD_FLAGS,	   /* show if SD_FLAGS_OID set, or asked for */
-	OPERATIONAL_REMOVE_UNLESS_CONTROL	 /* remove always unless an adhoc control has been specified */
+	OPERATIONAL_REMOVE_UNLESS_CONTROL	 /* remove always unless an ad hoc control has been specified */
 };
 
 /*
@@ -1482,7 +1579,8 @@ static int operational_search_post_process(struct ldb_module *module,
 					   unsigned int list_size,
 					   struct op_attributes_replace *list_replace,
 					   unsigned int list_replace_size,
-					   struct ldb_request *parent)
+					   struct ldb_request *parent,
+					   struct ldb_reply *ares)
 {
 	struct ldb_context *ldb;
 	unsigned int i, a = 0;
@@ -1505,7 +1603,7 @@ static int operational_search_post_process(struct ldb_module *module,
 			constructor or a simple copy */
 		constructed_attributes = true;
 		if (list_replace[a].constructor != NULL) {
-			if (list_replace[a].constructor(module, msg, scope, parent) != LDB_SUCCESS) {
+			if (list_replace[a].constructor(module, msg, scope, parent, ares) != LDB_SUCCESS) {
 				goto failed;
 			}
 		} else if (ldb_msg_copy_attr(msg,
@@ -1551,24 +1649,12 @@ failed:
   hook search operations
 */
 
-struct operational_context {
-	struct ldb_module *module;
-	struct ldb_request *req;
-	enum ldb_scope scope;
-	const char * const *attrs;
-	struct op_controls_flags* controls_flags;
-	struct op_attributes_operations *list_operations;
-	unsigned int list_operations_size;
-	struct op_attributes_replace *attrs_to_replace;
-	unsigned int attrs_to_replace_size;
-};
-
 static int operational_callback(struct ldb_request *req, struct ldb_reply *ares)
 {
 	struct operational_context *ac;
 	int ret;
 
-	ac = talloc_get_type(req->context, struct operational_context);
+	ac = talloc_get_type_abort(req->context, struct operational_context);
 
 	if (!ares) {
 		return ldb_module_done(ac->req, NULL, NULL,
@@ -1593,7 +1679,8 @@ static int operational_callback(struct ldb_request *req, struct ldb_reply *ares)
 						      ac->list_operations_size,
 						      ac->attrs_to_replace,
 						      ac->attrs_to_replace_size,
-						      req);
+						      req,
+						      ares);
 		if (ret != 0) {
 			return ldb_module_done(ac->req, NULL, NULL,
 						LDB_ERR_OPERATIONS_ERROR);
@@ -1681,12 +1768,61 @@ static struct op_attributes_operations* operation_get_op_list(TALLOC_CTX *ctx,
 	return list;
 }
 
+struct operational_present_ctx {
+	const char *attr;
+	bool found_operational;
+};
+
+/*
+  callback to determine if an operational attribute (needing
+  replacement) is in use at all
+ */
+static int operational_present(struct ldb_parse_tree *tree, void *private_context)
+{
+	struct operational_present_ctx *ctx = private_context;
+	switch (tree->operation) {
+	case LDB_OP_EQUALITY:
+		if (ldb_attr_cmp(tree->u.equality.attr, ctx->attr) == 0) {
+			ctx->found_operational = true;
+		}
+		break;
+	case LDB_OP_GREATER:
+	case LDB_OP_LESS:
+	case LDB_OP_APPROX:
+		if (ldb_attr_cmp(tree->u.comparison.attr, ctx->attr) == 0) {
+			ctx->found_operational = true;
+		}
+		break;
+	case LDB_OP_SUBSTRING:
+		if (ldb_attr_cmp(tree->u.substring.attr, ctx->attr) == 0) {
+			ctx->found_operational = true;
+		}
+		break;
+	case LDB_OP_PRESENT:
+		if (ldb_attr_cmp(tree->u.present.attr, ctx->attr) == 0) {
+			ctx->found_operational = true;
+		}
+		break;
+	case LDB_OP_EXTENDED:
+		if (tree->u.extended.attr &&
+		    ldb_attr_cmp(tree->u.extended.attr, ctx->attr) == 0) {
+			ctx->found_operational = true;
+		}
+		break;
+	default:
+		break;
+	}
+	return LDB_SUCCESS;
+}
+
+
 static int operational_search(struct ldb_module *module, struct ldb_request *req)
 {
 	struct ldb_context *ldb;
 	struct operational_context *ac;
 	struct ldb_request *down_req;
 	const char **search_attrs = NULL;
+	struct operational_present_ctx ctx;
 	unsigned int i, a;
 	int ret;
 
@@ -1702,20 +1838,53 @@ static int operational_search(struct ldb_module *module, struct ldb_request *req
 		return ldb_oom(ldb);
 	}
 
+	ac->expire_passwords_onsmartcardonlyaccounts
+		= EXPIRE_UF_SMARTCARD_UNINIT;
+
+	ac->now = 0;
+
 	ac->module = module;
 	ac->req = req;
 	ac->scope = req->op.search.scope;
 	ac->attrs = req->op.search.attrs;
+	ctx.found_operational = false;
 
-	/*  FIXME: We must copy the tree and keep the original
-	 *  unmodified. SSS */
-	/* replace any attributes in the parse tree that are
-	   searchable, but are stored using a different name in the
-	   backend */
+	/*
+	 * find any attributes in the parse tree that are searchable,
+	 * but are stored using a different name in the backend, so we
+	 * only duplicate the memory when needed
+	 */
 	for (i=0;i<ARRAY_SIZE(parse_tree_sub);i++) {
-		ldb_parse_tree_attr_replace(req->op.search.tree,
-					    parse_tree_sub[i].attr,
-					    parse_tree_sub[i].replace);
+		ctx.attr = parse_tree_sub[i].attr;
+
+		ldb_parse_tree_walk(req->op.search.tree,
+				    operational_present,
+				    &ctx);
+		if (ctx.found_operational) {
+			break;
+		}
+	}
+
+	if (ctx.found_operational) {
+
+		ac->tree = ldb_parse_tree_copy_shallow(ac,
+						       req->op.search.tree);
+
+		if (ac->tree == NULL) {
+			return ldb_operr(ldb);
+		}
+
+		/* replace any attributes in the parse tree that are
+		   searchable, but are stored using a different name in the
+		   backend */
+		for (i=0;i<ARRAY_SIZE(parse_tree_sub);i++) {
+			ldb_parse_tree_attr_replace(ac->tree,
+						    parse_tree_sub[i].attr,
+						    parse_tree_sub[i].replace);
+		}
+	} else {
+		/* Avoid allocating a copy if we do not need to */
+		ac->tree = req->op.search.tree;
 	}
 
 	ac->controls_flags = talloc(ac, struct op_controls_flags);
@@ -1750,9 +1919,6 @@ static int operational_search(struct ldb_module *module, struct ldb_request *req
 
 			ac->attrs_to_replace[ac->attrs_to_replace_size] = search_sub[i];
 			ac->attrs_to_replace_size++;
-			if (!search_sub[i].replace) {
-				continue;
-			}
 
 			if (search_sub[i].extra_attrs && search_sub[i].extra_attrs[0]) {
 				unsigned int j;
@@ -1761,7 +1927,7 @@ static int operational_search(struct ldb_module *module, struct ldb_request *req
 				for (j = 0; search_sub[i].extra_attrs[j]; j++) {
 					search_attrs2 = ldb_attr_list_copy_add(req, search_attrs
 									       ? search_attrs
-									       : ac->attrs, 
+									       : ac->attrs,
 									       search_sub[i].extra_attrs[j]);
 					if (search_attrs2 == NULL) {
 						return ldb_operr(ldb);
@@ -1770,6 +1936,10 @@ static int operational_search(struct ldb_module *module, struct ldb_request *req
 					talloc_free(search_attrs);
 					search_attrs = search_attrs2;
 				}
+			}
+
+			if (!search_sub[i].replace) {
+				continue;
 			}
 
 			if (!search_attrs) {
@@ -1795,7 +1965,7 @@ static int operational_search(struct ldb_module *module, struct ldb_request *req
 	ret = ldb_build_search_req_ex(&down_req, ldb, ac,
 					req->op.search.base,
 					req->op.search.scope,
-					req->op.search.tree,
+					ac->tree,
 					/* use new set of attrs if any */
 					search_attrs == NULL?req->op.search.attrs:search_attrs,
 					req->controls,

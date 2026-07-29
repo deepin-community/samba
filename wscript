@@ -12,9 +12,30 @@ import shutil
 import wafsamba, samba_dist, samba_git, samba_version, samba_utils
 from waflib import Options, Scripting, Logs, Context, Errors
 from waflib.Tools import bison
+import ssl
 
 samba_dist.DIST_DIRS('.')
 samba_dist.DIST_BLACKLIST('.gitignore .bzrignore source4/selftest/provisions')
+
+# A function so the variables are not in global scope
+def get_default_private_libs():
+    # LDB is used by sssd (was made private by default in Samba 4.21)
+    SSSD_LIBS=["ldb"]
+    # These following libs without ABI checking were made private by default in Samba 4.21
+    # Presumably unused (dcerpc-samr was probably a copy and paste error,
+    # and samba-policy has primary use via python bindings).  tevent-util
+    # was for openchange but was for PIDL output that is no longer
+    # generated
+    POSSIBLY_UNUSED_LIBS=["dcerpc-samr","samba-policy","tevent-util"]
+    # These were used by mapiproxy in OpenChange (also used LDB and
+    # the real public libs tdb, talloc, tevent)
+    OPENCHANGE_SERVER_LIBS = ["dcerpc_server","samdb"]
+    # These (plus LDB, ndr, talloc, tevent) are used by the OpenChange
+    # client, which is still in use (Fedora/Red Hat packages it)
+    OPENCHANGE_LIBS = ["dcerpc","samba-hostconfig","samba-credentials"]
+    return SSSD_LIBS + POSSIBLY_UNUSED_LIBS + OPENCHANGE_LIBS + OPENCHANGE_SERVER_LIBS
+
+DEFAULT_PRIVATE_LIBS = get_default_private_libs()
 
 # install in /usr/local/samba by default
 default_prefix = Options.default_prefix = '/usr/local/samba'
@@ -35,7 +56,7 @@ def system_mitkrb5_callback(option, opt, value, parser):
 
 def options(opt):
     opt.BUILTIN_DEFAULT('NONE')
-    opt.PRIVATE_EXTENSION_DEFAULT('samba4')
+    opt.PRIVATE_EXTENSION_DEFAULT('private-samba')
     opt.RECURSE('lib/replace')
     opt.RECURSE('dynconfig')
     opt.RECURSE('packaging')
@@ -123,7 +144,9 @@ def options(opt):
                   help=('Disable kernely keyring support for credential storage'),
                   action='store_false', dest='enable_keyring')
 
-    gr = opt.option_group('developer options')
+    opt.samba_add_onoff_option('ldap')
+
+    opt.option_group('developer options')
 
     opt.load('python') # options for disabling pyc or pyo compilation
     # enable options related to building python extensions
@@ -140,7 +163,21 @@ def options(opt):
                                dest='with_smb1server',
                                help=("Build smbd with SMB1 support (default=yes)."))
 
+    opt.add_option('--vendor-suffix',
+                   help=('Specify a vendor (or packager) name to include in the version string'),
+                   type="string",
+                   dest='SAMBA_VERSION_VENDOR_SUFFIX',
+                   default=None)
+
+    opt.add_option('--with-himmelblau', default=False,
+                  help=('Build with Azure Entra ID support.'),
+                  action='store_true', dest='enable_himmelblau')
+
+
 def configure(conf):
+    if Options.options.SAMBA_VERSION_VENDOR_SUFFIX:
+        conf.env.SAMBA_VERSION_VENDOR_SUFFIX = Options.options.SAMBA_VERSION_VENDOR_SUFFIX
+
     version = samba_version.load_version(env=conf.env)
 
     conf.DEFINE('CONFIG_H_IS_FROM_SAMBA', 1)
@@ -177,7 +214,7 @@ def configure(conf):
     conf.RECURSE('examples/winexe')
 
     conf.SAMBA_CHECK_PERL(mandatory=True)
-    conf.find_program('xsltproc', var='XSLTPROC')
+    conf.CHECK_XSLTPROC_MANPAGES()
 
     if conf.env.disable_python:
         if not (Options.options.without_ad_dc):
@@ -185,6 +222,8 @@ def configure(conf):
 
     conf.SAMBA_CHECK_PYTHON()
     conf.SAMBA_CHECK_PYTHON_HEADERS()
+
+    conf.SAMBA_CHECK_RUST()
 
     if sys.platform == 'darwin' and not conf.env['HAVE_ENVIRON_DECL']:
         # Mac OSX needs to have this and it's also needed that the python is compiled with this
@@ -207,9 +246,9 @@ def configure(conf):
                    mandatory=True)
     conf.CHECK_FUNCS_IN('inflateInit2', 'z')
 
-    if Options.options.enable_keyring != False:
+    if Options.options.enable_keyring is not False:
         conf.env['WITH_KERNEL_KEYRING'] = 'auto'
-        if Options.options.enable_keyring == True:
+        if Options.options.enable_keyring is True:
             conf.env['WITH_KERNEL_KEYRING'] = True
     else:
         conf.env['WITH_KERNEL_KEYRING'] = False
@@ -254,6 +293,56 @@ def configure(conf):
             else:
                 conf.define('USING_SYSTEM_PAM_WRAPPER', 1)
 
+    # Check for LDAP
+    if Options.options.with_ldap:
+        conf.CHECK_HEADERS('ldap.h lber.h ldap_pvt.h')
+        conf.CHECK_TYPE('ber_tag_t', 'unsigned int', headers='ldap.h lber.h')
+        conf.CHECK_FUNCS_IN('ber_scanf ber_sockbuf_add_io', 'lber')
+        conf.CHECK_VARIABLE('LDAP_OPT_SOCKBUF', headers='ldap.h')
+
+        # if we LBER_OPT_LOG_PRINT_FN we can intercept ldap logging and print it out
+        # for the samba logs
+        conf.CHECK_VARIABLE('LBER_OPT_LOG_PRINT_FN',
+                            define='HAVE_LBER_LOG_PRINT_FN', headers='lber.h')
+
+        conf.CHECK_FUNCS_IN('ldap_init ldap_init_fd ldap_initialize ldap_set_rebind_proc', 'ldap')
+        conf.CHECK_FUNCS_IN('ldap_add_result_entry', 'ldap')
+
+        # Check if ldap_set_rebind_proc() takes three arguments
+        if conf.CHECK_CODE('ldap_set_rebind_proc(0, 0, 0)',
+                           'LDAP_SET_REBIND_PROC_ARGS',
+                           msg="Checking whether ldap_set_rebind_proc takes 3 arguments",
+                           headers='ldap.h lber.h', link=False):
+            conf.DEFINE('LDAP_SET_REBIND_PROC_ARGS', '3')
+        else:
+            conf.DEFINE('LDAP_SET_REBIND_PROC_ARGS', '2')
+
+        # last but not least, if ldap_init() exists, we want to use ldap
+        if conf.CONFIG_SET('HAVE_LDAP_INIT') and conf.CONFIG_SET('HAVE_LDAP_H'):
+            conf.DEFINE('HAVE_LDAP', '1')
+            conf.DEFINE('LDAP_DEPRECATED', '1')
+            conf.env['HAVE_LDAP'] = '1'
+            # if ber_sockbuf_add_io() and LDAP_OPT_SOCKBUF are available, we can add
+            # SASL wrapping hooks
+            if conf.CONFIG_SET('HAVE_BER_SOCKBUF_ADD_IO') and \
+                    conf.CONFIG_SET('HAVE_LDAP_OPT_SOCKBUF'):
+                conf.DEFINE('HAVE_LDAP_TRANSPORT_WRAPPING', 1)
+            conf.env.ENABLE_LDAP_BACKEND = True
+        else:
+            conf.fatal("LDAP support not found. "
+                       "Try installing libldap2-dev or openldap-devel. "
+                       "Otherwise, use --without-ldap to build without "
+                       "LDAP support. "
+                       "LDAP support is required for the LDAP passdb backend, "
+                       "LDAP idmap backends and ADS. "
+                       "ADS support improves communication with "
+                       "Active Directory domain controllers.")
+    else:
+        conf.SET_TARGET_TYPE('ldap', 'EMPTY')
+        conf.SET_TARGET_TYPE('lber', 'EMPTY')
+
+    conf.RECURSE('lib/tdb')
+    conf.RECURSE('lib/tevent')
     conf.RECURSE('lib/ldb')
 
     if conf.CHECK_LDFLAGS(['-Wl,--wrap=test']):
@@ -339,13 +428,13 @@ def configure(conf):
 
     conf.SET_TARGET_TYPE('jansson', 'EMPTY')
 
-    if Options.options.with_json != False:
+    if Options.options.with_json is not False:
         if conf.CHECK_CFG(package='jansson', args='--cflags --libs',
                           msg='Checking for jansson'):
             conf.CHECK_FUNCS_IN('json_object', 'jansson')
 
     if not conf.CONFIG_GET('HAVE_JSON_OBJECT'):
-        if Options.options.with_json != False:
+        if Options.options.with_json is not False:
             conf.fatal("Jansson JSON support not found. "
                        "Try installing libjansson-dev or jansson-devel. "
                        "Otherwise, use --without-json to build without "
@@ -390,8 +479,8 @@ def configure(conf):
                            msg='Checking configure summary'):
         raise Errors.WafError('configure summary failed')
 
-    if Options.options.enable_pie != False:
-        if Options.options.enable_pie == True:
+    if Options.options.enable_pie is not False:
+        if Options.options.enable_pie is True:
                 need_pie = True
         else:
                 # not specified, only build PIEs if supported by compiler
@@ -400,8 +489,8 @@ def configure(conf):
                          msg="Checking compiler for PIE support"):
             conf.env['ENABLE_PIE'] = True
 
-    if Options.options.enable_relro != False:
-        if Options.options.enable_relro == True:
+    if Options.options.enable_relro is not False:
+        if Options.options.enable_relro is True:
             need_relro = True
         else:
             # not specified, only build RELROs if supported by compiler
@@ -411,14 +500,25 @@ def configure(conf):
             conf.env['ENABLE_RELRO'] = True
 
     if conf.CONFIG_GET('ENABLE_SELFTEST') and \
-       Options.options.with_smb1server == False and \
-       Options.options.without_ad_dc != True:
+       Options.options.with_smb1server is False and \
+       Options.options.without_ad_dc is not True:
         conf.fatal('--without-smb1-server cannot be specified with '
                    '--enable-selftest/--enable-developer if '
                    '--without-ad-dc is NOT set!')
 
-    if Options.options.with_smb1server != False:
+    if Options.options.with_smb1server is not False:
         conf.DEFINE('WITH_SMB1SERVER', '1')
+
+    conf.env.debug = Options.options.debug
+    conf.env.developer = Options.options.developer
+    conf.env.enable_himmelblau = Options.options.enable_himmelblau
+    if Options.options.enable_himmelblau:
+        if not conf.env.enable_rust:
+            conf.fatal('--with-himmelblau cannot be specified without '
+                       '--enable-rust')
+        if ssl.OPENSSL_VERSION_INFO[0] < 3:
+            conf.fatal('--with-himmelblau cannot be specified with '
+                       '%s' % ssl.OPENSSL_VERSION)
 
     #
     # FreeBSD is broken. It doesn't include 'extern char **environ'
@@ -452,7 +552,6 @@ def configure(conf):
 
 def etags(ctx):
     '''build TAGS file using etags'''
-    from waflib import Utils
     source_root = os.path.dirname(Context.g_module.root_path)
     cmd = r'rm -f %s/TAGS && (find %s -name "*.[ch]" | egrep -v \.inst\. | xargs -n 100 etags -a)' % (source_root, source_root)
     print("Running: %s" % cmd)
@@ -462,7 +561,6 @@ def etags(ctx):
 
 def ctags(ctx):
     "build 'tags' file using ctags"
-    from waflib import Utils
     source_root = os.path.dirname(Context.g_module.root_path)
     cmd = r'ctags --python-kinds=-i $(find %s -name "*.[ch]" | grep -v "*_proto\.h" | egrep -v \.inst\.) $(find %s -name "*.py")' % (source_root, source_root)
     print("Running: %s" % cmd)
@@ -518,6 +616,11 @@ def distcheck():
     '''test that distribution tarball builds and installs'''
     samba_version.load_version(env=None)
 
+def printversion(ctx):
+    '''print version'''
+    ver = samba_version.load_version(env=None)
+    print('Samba Version: ' + ver.STRING_WITH_NICKNAME)
+
 def wildcard_cmd(cmd):
     '''called on a unknown command'''
     from samba_wildcard import run_named_build_task
@@ -531,7 +634,6 @@ Scripting.main = main
 
 def reconfigure(ctx):
     '''reconfigure if config scripts have changed'''
-    import samba_utils
     samba_utils.reconfigure(ctx)
 
 

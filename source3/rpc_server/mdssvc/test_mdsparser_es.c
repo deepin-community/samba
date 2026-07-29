@@ -28,136 +28,150 @@
 #include "lib/param/param.h"
 #include "rpc_server/mdssvc/es_parser.tab.h"
 
-#define PATH_QUERY_SUBEXPR \
-	" AND path.real.fulltext:\\\"/foo/bar\\\""
-
 static struct {
 	const char *mds;
 	const char *es;
 } map[] = {
 	{
 		"*==\"samba\"",
-		"(samba)" PATH_QUERY_SUBEXPR
+		"samba"
 	}, {
 		"kMDItemTextContent==\"samba\"",
-		"(content:samba)" PATH_QUERY_SUBEXPR
+		"content:samba"
 	}, {
 		"_kMDItemGroupId==\"11\"",
-		"(file.content_type:(application\\\\/pdf))" PATH_QUERY_SUBEXPR
+		"file.content_type:(application\\\\/pdf)"
 	}, {
 		"kMDItemContentType==\"1\"",
-		"(file.content_type:(message\\\\/rfc822))" PATH_QUERY_SUBEXPR
+		"file.content_type:(message\\\\/rfc822)"
 	}, {
 		"kMDItemContentType==\"public.content\"",
-		"(file.content_type:(message\\\\/rfc822 application\\\\/pdf application\\\\/vnd.oasis.opendocument.presentation image\\\\/* text\\\\/*))" PATH_QUERY_SUBEXPR
+		"file.content_type:(message\\\\/rfc822 application\\\\/pdf application\\\\/vnd.oasis.opendocument.presentation image\\\\/* text\\\\/*)"
 	}, {
 		"kMDItemContentTypeTree==\"1\"",
-		"(file.content_type:(message\\\\/rfc822))" PATH_QUERY_SUBEXPR
+		"file.content_type:(message\\\\/rfc822)"
 	}, {
 		"kMDItemFSContentChangeDate==$time.iso(2018-10-01T10:00:00Z)",
-		"(file.last_modified:2018\\\\-10\\\\-01T10\\\\:00\\\\:00Z)" PATH_QUERY_SUBEXPR
+		"file.last_modified:2018\\\\-10\\\\-01T10\\\\:00\\\\:00Z"
+	}, {
+		"kMDItemFSContentChangeDate==$time.iso(1960-10-01T10:00:00Z)",
+		"file.last_modified:1960\\\\-10\\\\-01T10\\\\:00\\\\:00Z"
+#ifdef __LP64__
+	}, {
+		"kMDItemFSContentChangeDate==$time.iso(1000-10-01T10:00:00Z)",
+		"file.last_modified:1000\\\\-10\\\\-01T10\\\\:00\\\\:00Z"
+	}, {
+		"kMDItemFSContentChangeDate==$time.iso(0000-10-01T10:00:00Z)",
+		"file.last_modified:0000\\\\-10\\\\-01T10\\\\:00\\\\:00Z"
+	}, {
+		"kMDItemFSContentChangeDate==$time.iso(9999-10-01T10:00:00Z)",
+		"file.last_modified:9999\\\\-10\\\\-01T10\\\\:00\\\\:00Z"
+#endif
 	}, {
 		"kMDItemFSContentChangeDate==\"1\"",
-		"(file.last_modified:2001\\\\-01\\\\-01T00\\\\:00\\\\:01Z)" PATH_QUERY_SUBEXPR
+		"file.last_modified:2001\\\\-01\\\\-01T00\\\\:00\\\\:01Z"
 	}, {
 		"kMDItemFSCreationDate==\"1\"",
-		"(file.created:2001\\\\-01\\\\-01T00\\\\:00\\\\:01Z)" PATH_QUERY_SUBEXPR
+		"file.created:2001\\\\-01\\\\-01T00\\\\:00\\\\:01Z"
 	}, {
 		"kMDItemFSName==\"samba*\"",
-		"(file.filename:samba*)" PATH_QUERY_SUBEXPR
+		"file.filename:samba*"
 	}, {
 		"kMDItemFSOwnerGroupID==\"0\"",
-		"(attributes.owner:0)" PATH_QUERY_SUBEXPR
+		"attributes.owner:0"
 	}, {
 		"kMDItemFSOwnerUserID==\"0\"",
-		"(attributes.group:0)" PATH_QUERY_SUBEXPR
+		"attributes.group:0"
 	}, {
 		"kMDItemFSSize==\"1\"",
-		"(file.filesize:1)" PATH_QUERY_SUBEXPR
+		"file.filesize:1"
 	}, {
 		"kMDItemPath==\"/foo/bar\"",
-		"(path.real:\\\\/foo\\\\/bar)" PATH_QUERY_SUBEXPR
+		"path.real:\\\\/foo\\\\/bar"
 	}, {
 		"kMDItemAttributeChangeDate==\"1\"",
-		"(file.last_modified:2001\\\\-01\\\\-01T00\\\\:00\\\\:01Z)" PATH_QUERY_SUBEXPR
+		"file.last_modified:2001\\\\-01\\\\-01T00\\\\:00\\\\:01Z"
 	}, {
 		"kMDItemAuthors==\"Chouka\"",
-		"(meta.author:Chouka)" PATH_QUERY_SUBEXPR
+		"meta.author:Chouka"
 	}, {
 		"kMDItemContentCreationDate==\"1\"",
-		"(file.created:2001\\\\-01\\\\-01T00\\\\:00\\\\:01Z)" PATH_QUERY_SUBEXPR
+		"file.created:2001\\\\-01\\\\-01T00\\\\:00\\\\:01Z"
 	}, {
 		"kMDItemContentModificationDate==\"1\"",
-		"(file.last_modified:2001\\\\-01\\\\-01T00\\\\:00\\\\:01Z)" PATH_QUERY_SUBEXPR
+		"file.last_modified:2001\\\\-01\\\\-01T00\\\\:00\\\\:01Z"
 	}, {
 		"kMDItemCreator==\"Chouka\"",
-		"(meta.raw.creator:Chouka)" PATH_QUERY_SUBEXPR
+		"meta.raw.creator:Chouka"
 	}, {
 		"kMDItemDescription==\"Dog\"",
-		"(meta.raw.description:Dog)" PATH_QUERY_SUBEXPR
+		"meta.raw.description:Dog"
 	}, {
 		"kMDItemDisplayName==\"Samba\"",
-		"(file.filename:Samba)" PATH_QUERY_SUBEXPR
+		"file.filename:Samba"
 	}, {
 		"kMDItemDurationSeconds==\"1\"",
-		"(meta.raw.xmpDM\\\\:duration:1)" PATH_QUERY_SUBEXPR
+		"meta.raw.xmpDM\\\\:duration:1"
 	}, {
 		"kMDItemNumberOfPages==\"1\"",
-		"(meta.raw.xmpTPg\\\\:NPages:1)" PATH_QUERY_SUBEXPR
+		"meta.raw.xmpTPg\\\\:NPages:1"
 	}, {
 		"kMDItemTitle==\"Samba\"",
-		"(meta.title:Samba)" PATH_QUERY_SUBEXPR
+		"meta.title:Samba"
 	}, {
 		"kMDItemAlbum==\"Red Roses for Me\"",
-		"(meta.raw.xmpDM\\\\:album:Red\\\\ Roses\\\\ for\\\\ Me)" PATH_QUERY_SUBEXPR
+		"meta.raw.xmpDM\\\\:album:Red\\\\ Roses\\\\ for\\\\ Me"
 	}, {
 		"kMDItemBitsPerSample==\"1\"",
-		"(meta.raw.tiff\\\\:BitsPerSample:1)" PATH_QUERY_SUBEXPR
+		"meta.raw.tiff\\\\:BitsPerSample:1"
 	}, {
 		"kMDItemPixelHeight==\"1\"",
-		"(meta.raw.Image\\\\ Height:1)" PATH_QUERY_SUBEXPR
+		"meta.raw.Image\\\\ Height:1"
 	}, {
 		"kMDItemPixelWidth==\"1\"",
-		"(meta.raw.Image\\\\ Width:1)" PATH_QUERY_SUBEXPR
+		"meta.raw.Image\\\\ Width:1"
 	}, {
 		"kMDItemResolutionHeightDPI==\"72\"",
-		"(meta.raw.Y\\\\ Resolution:72)" PATH_QUERY_SUBEXPR
+		"meta.raw.Y\\\\ Resolution:72"
 	}, {
 		"kMDItemResolutionWidthDPI==\"72\"",
-		"(meta.raw.X\\\\ Resolution:72)" PATH_QUERY_SUBEXPR
+		"meta.raw.X\\\\ Resolution:72"
 	},{
 		"*!=\"samba\"",
-		"((NOT samba))" PATH_QUERY_SUBEXPR
+		"(NOT samba)"
 	}, {
 		"kMDItemFSSize!=\"1\"",
-		"((NOT file.filesize:1))" PATH_QUERY_SUBEXPR
+		"(NOT file.filesize:1)"
 	}, {
 		"kMDItemFSSize>\"1\"",
-		"(file.filesize:{1 TO *})" PATH_QUERY_SUBEXPR
+		"file.filesize:{1 TO *}"
 	}, {
 		"kMDItemFSSize<\"1\"",
-		"(file.filesize:{* TO 1})" PATH_QUERY_SUBEXPR
+		"file.filesize:{* TO 1}"
 	}, {
 		"kMDItemFSCreationDate!=\"1\"",
-		"((NOT file.created:2001\\\\-01\\\\-01T00\\\\:00\\\\:01Z))" PATH_QUERY_SUBEXPR
+		"(NOT file.created:2001\\\\-01\\\\-01T00\\\\:00\\\\:01Z)"
 	}, {
 		"kMDItemFSCreationDate>\"1\"",
-		"(file.created:{2001\\\\-01\\\\-01T00\\\\:00\\\\:01Z TO *})" PATH_QUERY_SUBEXPR
+		"file.created:{2001\\\\-01\\\\-01T00\\\\:00\\\\:01Z TO *}"
 	}, {
 		"kMDItemFSCreationDate<\"1\"",
-		"(file.created:{* TO 2001\\\\-01\\\\-01T00\\\\:00\\\\:01Z})" PATH_QUERY_SUBEXPR
+		"file.created:{* TO 2001\\\\-01\\\\-01T00\\\\:00\\\\:01Z}"
 	}, {
 		"kMDItemFSName==\"Samba\"||kMDItemTextContent==\"Samba\"",
-		"(file.filename:Samba OR content:Samba)" PATH_QUERY_SUBEXPR
+		"file.filename:Samba OR content:Samba"
 	}, {
 		"kMDItemFSName==\"Samba\"&&kMDItemTextContent==\"Samba\"",
-		"((file.filename:Samba) AND (content:Samba))" PATH_QUERY_SUBEXPR
+		"(file.filename:Samba) AND (content:Samba)"
 	}, {
 		"InRange(kMDItemFSCreationDate,1,2)",
-		"(file.created:[2001\\\\-01\\\\-01T00\\\\:00\\\\:01Z TO 2001\\\\-01\\\\-01T00\\\\:00\\\\:02Z])" PATH_QUERY_SUBEXPR
+		"file.created:[2001\\\\-01\\\\-01T00\\\\:00\\\\:01Z TO 2001\\\\-01\\\\-01T00\\\\:00\\\\:02Z]"
 	}, {
 		"InRange(kMDItemFSSize,1,2)",
-		"(file.filesize:[1 TO 2])" PATH_QUERY_SUBEXPR
+		"file.filesize:[1 TO 2]"
+	}, {
+		"InRange(kMDItemContentCreationDate,$time.iso(2024-12-31T23:00:00Z),$time.iso(2025-12-31T23:00:00Z))",
+		"file.created:[2024\\\\-12\\\\-31T23\\\\:00\\\\:00Z TO 2025\\\\-12\\\\-31T23\\\\:00\\\\:00Z]"
 	}
 };
 
@@ -167,49 +181,55 @@ static struct {
 } map_ignore_failures[] = {
 	{
 		"*==\"Samba\"||foo==\"bar\"",
-		"(Samba)" PATH_QUERY_SUBEXPR
+		"Samba"
 	}, {
 		"*==\"Samba\"&&foo==\"bar\"",
-		"(Samba)" PATH_QUERY_SUBEXPR
+		"Samba"
 	}, {
 		"*==\"Samba\"||kMDItemContentType==\"666\"",
-		"(Samba)" PATH_QUERY_SUBEXPR
+		"Samba"
 	}, {
 		"*==\"Samba\"&&kMDItemContentType==\"666\"",
-		"(Samba)" PATH_QUERY_SUBEXPR
+		"Samba"
 	}, {
 		"*==\"Samba\"||foo==\"bar\"||kMDItemContentType==\"666\"",
-		"(Samba)" PATH_QUERY_SUBEXPR
+		"Samba"
 	}, {
 		"*==\"Samba\"&&foo==\"bar\"&&kMDItemContentType==\"666\"",
-		"(Samba)" PATH_QUERY_SUBEXPR
+		"Samba"
 	}, {
 		"foo==\"bar\"||kMDItemContentType==\"666\"||*==\"Samba\"||x!=\"6\"",
-		"(Samba)" PATH_QUERY_SUBEXPR
+		"Samba"
 	}, {
 		"*==\"Samba\"||InRange(foo,1,2)",
-		"(Samba)" PATH_QUERY_SUBEXPR
+		"Samba"
 	}, {
 		"*==\"Samba\"||foo==$time.iso(2018-10-01T10:00:00Z)",
-		"(Samba)" PATH_QUERY_SUBEXPR
+		"Samba"
 	}
 };
 
 static void test_mdsparser_es(void **state)
 {
 	TALLOC_CTX *frame = talloc_stackframe();
-	const char *path_scope = "/foo/bar";
 	char *es_query = NULL;
+	char *default_path = NULL;
 	const char *path = NULL;
 	json_t *mappings = NULL;
 	json_error_t json_error;
 	int i;
 	bool ok;
 
+	default_path = talloc_asprintf(
+		frame,
+		"%s/mdssvc/elasticsearch_mappings.json",
+		get_dyn_SAMBA_DATADIR());
+	assert_non_null(default_path);
+
 	path = lp_parm_const_string(GLOBAL_SECTION_SNUM,
 				    "elasticsearch",
 				    "mappings",
-				    NULL);
+				    default_path);
 	assert_non_null(path);
 
 	mappings = json_load_file(path, 0, &json_error);
@@ -219,7 +239,6 @@ static void test_mdsparser_es(void **state)
 		DBG_DEBUG("Mapping: %s\n", map[i].mds);
 		ok = map_spotlight_to_es_query(frame,
 					       mappings,
-					       path_scope,
 					       map[i].mds,
 					       &es_query);
 		assert_true(ok);
@@ -238,7 +257,6 @@ static void test_mdsparser_es(void **state)
 		DBG_DEBUG("Mapping: %s\n", map_ignore_failures[i].mds);
 		ok = map_spotlight_to_es_query(frame,
 					       mappings,
-					       path_scope,
 					       map_ignore_failures[i].mds,
 					       &es_query);
 		assert_true(ok);
@@ -264,6 +282,7 @@ int main(int argc, const char *argv[])
 	int opt;
 	bool ok;
 	TALLOC_CTX *frame = talloc_stackframe();
+	struct loadparm_context *lp_ctx = NULL;
 
 	smb_init_locale();
 
@@ -275,7 +294,8 @@ int main(int argc, const char *argv[])
 		TALLOC_FREE(frame);
 		exit(1);
 	}
-	lp_set_cmdline("log level", "1");
+	lp_ctx = samba_cmdline_get_lp_ctx();
+	lpcfg_set_cmdline(lp_ctx, "log level", "1");
 
 	pc = samba_popt_get_context(getprogname(),
 				    argc,

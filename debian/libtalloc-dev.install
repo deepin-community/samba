@@ -1,0 +1,6 @@
+usr/include/talloc.h
+#usr/lib/${DEB_HOST_MULTIARCH}/libtalloc.a
+usr/lib/${DEB_HOST_MULTIARCH}/libtalloc.so
+usr/lib/${DEB_HOST_MULTIARCH}/pkgconfig/talloc.pc
+usr/share/man/man3/talloc.3
+lib/talloc/talloc_guide.txt usr/share/doc/libtalloc-dev/

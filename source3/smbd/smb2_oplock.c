@@ -28,24 +28,39 @@
 #include "messages.h"
 #include "locking/leases_db.h"
 #include "../librpc/gen_ndr/ndr_open_files.h"
+#include "lib/util/tevent_ntstatus.h"
+#include "source3/smbd/dir.h"
 
 /*
  * helper function used by the kernel oplock backends to post the break message
  */
 void break_kernel_oplock(struct messaging_context *msg_ctx, files_struct *fsp)
 {
-	uint8_t msg[MSG_SMB_KERNEL_BREAK_SIZE];
-
-	/* Put the kernel break info into the message. */
-	push_file_id_24((char *)msg, &fsp->file_id);
-	SIVAL(msg, 24, fh_get_gen_id(fsp->fh));
+	struct oplock_break_message msg = {
+		.id = fsp->file_id,
+		.share_file_id = fh_get_gen_id(fsp->fh),
+	};
+	enum ndr_err_code ndr_err;
+	uint8_t msgbuf[33];
+	DATA_BLOB blob = {.data = msgbuf, .length = sizeof(msgbuf)};
 
 	/* Don't need to be root here as we're only ever
 	   sending to ourselves. */
 
-	messaging_send_buf(msg_ctx, messaging_server_id(msg_ctx),
-			   MSG_SMB_KERNEL_BREAK,
-			   msg, MSG_SMB_KERNEL_BREAK_SIZE);
+	ndr_err = ndr_push_struct_into_fixed_blob(
+		&blob,
+		&msg,
+		(ndr_push_flags_fn_t)ndr_push_oplock_break_message);
+	if (!NDR_ERR_CODE_IS_SUCCESS(ndr_err)) {
+		DBG_WARNING("ndr_push_oplock_break_message failed: %s\n",
+			    ndr_errstr(ndr_err));
+		return;
+	}
+
+	messaging_send(msg_ctx,
+		       messaging_server_id(msg_ctx),
+		       MSG_SMB_KERNEL_BREAK,
+		       &blob);
 }
 
 /****************************************************************************
@@ -204,7 +219,7 @@ uint32_t get_lease_type(struct share_mode_entry *e, struct file_id id)
 		return 0;
 	}
 	DBG_ERR("leases_db_get for client_guid [%s] "
-		"lease_key [%"PRIu64"/%"PRIu64"] "
+		"lease_key [%"PRIx64"/%"PRIx64"] "
 		"file_id [%s] failed: %s\n",
 		GUID_buf_string(&e->client_guid, &guid_strbuf),
 		e->lease_key.data[0],
@@ -829,7 +844,7 @@ static void process_oplock_break_message(struct messaging_context *msg_ctx,
 					 struct server_id src,
 					 DATA_BLOB *data)
 {
-	struct oplock_break_message *msg = NULL;
+	struct oplock_break_message msg;
 	enum ndr_err_code ndr_err;
 	files_struct *fsp;
 	bool use_kernel;
@@ -844,34 +859,22 @@ static void process_oplock_break_message(struct messaging_context *msg_ctx,
 
 	smb_vfs_assert_allowed();
 
-	msg = talloc(talloc_tos(), struct oplock_break_message);
-	if (msg == NULL) {
-		DBG_WARNING("talloc failed\n");
-		return;
-	}
-
-	ndr_err = ndr_pull_struct_blob_all(
-		data,
-		msg,
-		msg,
-		(ndr_pull_flags_fn_t)ndr_pull_oplock_break_message);
+	ndr_err = ndr_pull_struct_blob_all_noalloc(
+		data, &msg, (ndr_pull_flags_fn_t)ndr_pull_oplock_break_message);
 	if (!NDR_ERR_CODE_IS_SUCCESS(ndr_err)) {
 		DBG_DEBUG("ndr_pull_oplock_break_message failed: %s\n",
 			  ndr_errstr(ndr_err));
-		TALLOC_FREE(msg);
 		return;
 	}
 	if (DEBUGLEVEL >= 10) {
 		struct server_id_buf buf;
 		DBG_DEBUG("Got break message from %s\n",
 			  server_id_str_buf(src, &buf));
-		NDR_PRINT_DEBUG(oplock_break_message, msg);
+		NDR_PRINT_DEBUG(oplock_break_message, &msg);
 	}
 
-	break_to = msg->break_to;
-	fsp = initial_break_processing(sconn, msg->id, msg->share_file_id);
-
-	TALLOC_FREE(msg);
+	break_to = msg.break_to;
+	fsp = initial_break_processing(sconn, msg.id, msg.share_file_id);
 
 	if (fsp == NULL) {
 		/* We hit a race here. Break messages are sent, and before we
@@ -1033,7 +1036,7 @@ static void process_oplock_break_message(struct messaging_context *msg_ctx,
 	}
 
 #if defined(WITH_SMB1SERVER)
-	if (sconn->using_smb2) {
+	if (conn_using_smb2(sconn)) {
 #endif
 		send_break_message_smb2(fsp, break_from, break_to);
 #if defined(WITH_SMB1SERVER)
@@ -1075,35 +1078,31 @@ static void process_kernel_oplock_break(struct messaging_context *msg_ctx,
 					struct server_id src,
 					DATA_BLOB *data)
 {
-	struct file_id id;
+	struct oplock_break_message msg;
+	enum ndr_err_code ndr_err;
 	struct file_id_buf idbuf;
-	unsigned long file_id;
 	files_struct *fsp;
 	struct smbd_server_connection *sconn =
 		talloc_get_type_abort(private_data,
 		struct smbd_server_connection);
 	struct server_id_buf tmp;
 
-	if (data->data == NULL) {
-		DEBUG(0, ("Got NULL buffer\n"));
+	ndr_err = ndr_pull_struct_blob_all_noalloc(
+		data,
+		&msg,
+		(ndr_pull_flags_fn_t)ndr_pull_oplock_break_message);
+	if (!NDR_ERR_CODE_IS_SUCCESS(ndr_err)) {
+		DBG_DEBUG("ndr_pull_oplock_break_message failed: %s\n",
+			  ndr_errstr(ndr_err));
 		return;
 	}
-
-	if (data->length != MSG_SMB_KERNEL_BREAK_SIZE) {
-		DEBUG(0, ("Got invalid msg len %d\n", (int)data->length));
-		return;
-	}
-
-	/* Pull the data from the message. */
-	pull_file_id_24((char *)data->data, &id);
-	file_id = (unsigned long)IVAL(data->data, 24);
 
 	DBG_DEBUG("Got kernel oplock break message from pid %s: %s/%u\n",
 		  server_id_str_buf(src, &tmp),
-		  file_id_str_buf(id, &idbuf),
-		  (unsigned int)file_id);
+		  file_id_str_buf(msg.id, &idbuf),
+		  (unsigned int)msg.share_file_id);
 
-	fsp = initial_break_processing(sconn, id, file_id);
+	fsp = initial_break_processing(sconn, msg.id, msg.share_file_id);
 
 	if (fsp == NULL) {
 		DEBUG(3, ("Got a kernel oplock break message for a file "
@@ -1119,7 +1118,7 @@ static void process_kernel_oplock_break(struct messaging_context *msg_ctx,
 	}
 
 #if defined(WITH_SMB1SERVER)
-	if (sconn->using_smb2) {
+	if (conn_using_smb2(sconn)) {
 #endif
 		send_break_message_smb2(fsp, 0, OPLOCKLEVEL_NONE);
 #if defined(WITH_SMB1SERVER)
@@ -1248,6 +1247,142 @@ static bool do_break_oplock_to_none(struct share_mode_entry *e,
 	return false;
 }
 
+struct dirlease_break_state {
+	struct smbd_server_connection *sconn;
+	struct file_id file_id;
+	struct smb2_lease_key parent_lease_key;
+	uint32_t total_lease_types;
+};
+
+static bool do_dirlease_break_to_none(struct share_mode_entry *e,
+				      void *private_data)
+{
+	struct dirlease_break_state *state = private_data;
+	uint32_t current_state = 0;
+	NTSTATUS status;
+
+	DBG_DEBUG("lease_key=%"PRIu64"/%"PRIu64"\n",
+		  e->lease_key.data[0],
+		  e->lease_key.data[1]);
+
+	status = leases_db_get(&e->client_guid,
+			       &e->lease_key,
+			       &state->file_id,
+			       &current_state,
+			       NULL, /* breaking */
+			       NULL, /* breaking_to_requested */
+			       NULL, /* breaking_to_required */
+			       NULL, /* lease_version */
+			       NULL); /* epoch */
+	if (!NT_STATUS_IS_OK(status)) {
+		DBG_WARNING("leases_db_get failed: %s\n",
+			    nt_errstr(status));
+		return false;
+	}
+
+	if (share_entry_stale_pid(e)) {
+		return false;
+	}
+
+	state->total_lease_types |= current_state;
+
+	if (smb2_lease_key_equal(&state->parent_lease_key, &e->lease_key)) {
+		return false;
+	}
+
+	if ((current_state & (SMB2_LEASE_READ | SMB2_LEASE_HANDLE)) == 0) {
+		return false;
+	}
+
+	DBG_DEBUG("Breaking %"PRIu64"/%"PRIu64" to none\n",
+		  e->lease_key.data[0],
+		  e->lease_key.data[1]);
+
+	send_break_to_none(state->sconn->msg_ctx, &state->file_id, e);
+	return false;
+}
+
+void contend_dirleases(struct connection_struct *conn,
+		       const struct smb_filename *smb_fname,
+		       const struct smb2_lease *lease)
+{
+	struct dirlease_break_state state = {
+		.sconn = conn->sconn,
+	};
+	struct share_mode_lock *lck = NULL;
+	struct smb_filename *parent_fname = NULL;
+	uint32_t access_mask, share_mode;
+	NTSTATUS status;
+	int ret;
+	bool ok;
+
+	if (!lp_smb3_directory_leases()) {
+		return;
+	}
+
+	if (lease != NULL) {
+		DBG_DEBUG("Parent leasekey %"PRIx64"/%"PRIx64"\n",
+			  lease->parent_lease_key.data[0],
+			  lease->parent_lease_key.data[1]);
+		state.parent_lease_key = lease->parent_lease_key;
+	}
+
+	status = SMB_VFS_PARENT_PATHNAME(conn,
+					 talloc_tos(),
+					 smb_fname,
+					 &parent_fname,
+					 NULL);
+	if (!NT_STATUS_IS_OK(status)) {
+		DBG_ERR("parent_smb_fname() for [%s] failed: %s\n",
+			smb_fname_str_dbg(smb_fname), strerror(errno));
+		return;
+	}
+
+	ret = SMB_VFS_STAT(conn, parent_fname);
+	if (ret != 0) {
+		DBG_ERR("Trigger [conn: %s] [smb_fname: %s] cwd [%s], "
+			"failed to stat parent [%s]: %s\n",
+			conn->connectpath,
+			smb_fname_str_dbg(smb_fname),
+			get_current_dir_name(),
+			smb_fname_str_dbg(parent_fname),
+			strerror(errno));
+		TALLOC_FREE(parent_fname);
+		return;
+	}
+
+	state.file_id = vfs_file_id_from_sbuf(conn, &parent_fname->st);
+	TALLOC_FREE(parent_fname);
+
+	lck = get_existing_share_mode_lock(talloc_tos(), state.file_id);
+	if (lck == NULL) {
+		/*
+		 * No sharemode db entry -> no leases.
+		 */
+		return;
+	}
+
+	ok = share_mode_forall_leases(lck, do_dirlease_break_to_none, &state);
+	if (!ok) {
+		DBG_WARNING("share_mode_forall_leases failed\n");
+	}
+
+	/*
+	 * While we're at it, update lease type.
+	 */
+	share_mode_flags_get(lck,
+			     &access_mask,
+			     &share_mode,
+			     NULL);
+	share_mode_flags_set(lck,
+			     access_mask,
+			     share_mode,
+			     state.total_lease_types,
+			     NULL);
+
+	TALLOC_FREE(lck);
+}
+
 /****************************************************************************
  This function is called on any file modification or lock request. If a file
  is level 2 oplocked then it must tell all other level 2 holders to break to
@@ -1345,61 +1480,6 @@ void smbd_contend_level2_oplocks_end(files_struct *fsp,
 }
 
 /****************************************************************************
- Linearize a share mode entry struct to an internal oplock break message.
-****************************************************************************/
-
-void share_mode_entry_to_message(char *msg, const struct file_id *id,
-				 const struct share_mode_entry *e)
-{
-	SIVAL(msg,OP_BREAK_MSG_PID_OFFSET,(uint32_t)e->pid.pid);
-	SBVAL(msg,OP_BREAK_MSG_MID_OFFSET,e->op_mid);
-	SSVAL(msg,OP_BREAK_MSG_OP_TYPE_OFFSET,e->op_type);
-	SIVAL(msg,OP_BREAK_MSG_ACCESS_MASK_OFFSET,e->access_mask);
-	SIVAL(msg,OP_BREAK_MSG_SHARE_ACCESS_OFFSET,e->share_access);
-	SIVAL(msg,OP_BREAK_MSG_PRIV_OFFSET,e->private_options);
-	SIVAL(msg,OP_BREAK_MSG_TIME_SEC_OFFSET,(uint32_t)e->time.tv_sec);
-	SIVAL(msg,OP_BREAK_MSG_TIME_USEC_OFFSET,(uint32_t)e->time.tv_usec);
-	/*
-	 * "id" used to be part of share_mode_entry, thus the strange
-	 * place to put this. Feel free to move somewhere else :-)
-	 */
-	push_file_id_24(msg+OP_BREAK_MSG_DEV_OFFSET, id);
-	SIVAL(msg,OP_BREAK_MSG_FILE_ID_OFFSET,e->share_file_id);
-	SIVAL(msg,OP_BREAK_MSG_UID_OFFSET,e->uid);
-	SSVAL(msg,OP_BREAK_MSG_FLAGS_OFFSET,e->flags);
-	SIVAL(msg,OP_BREAK_MSG_NAME_HASH_OFFSET,e->name_hash);
-	SIVAL(msg,OP_BREAK_MSG_VNN_OFFSET,e->pid.vnn);
-}
-
-/****************************************************************************
- De-linearize an internal oplock break message to a share mode entry struct.
-****************************************************************************/
-
-void message_to_share_mode_entry(struct file_id *id,
-				 struct share_mode_entry *e,
-				 const char *msg)
-{
-	e->pid.pid = (pid_t)IVAL(msg,OP_BREAK_MSG_PID_OFFSET);
-	e->op_mid = BVAL(msg,OP_BREAK_MSG_MID_OFFSET);
-	e->op_type = SVAL(msg,OP_BREAK_MSG_OP_TYPE_OFFSET);
-	e->access_mask = IVAL(msg,OP_BREAK_MSG_ACCESS_MASK_OFFSET);
-	e->share_access = IVAL(msg,OP_BREAK_MSG_SHARE_ACCESS_OFFSET);
-	e->private_options = IVAL(msg,OP_BREAK_MSG_PRIV_OFFSET);
-	e->time.tv_sec = (time_t)IVAL(msg,OP_BREAK_MSG_TIME_SEC_OFFSET);
-	e->time.tv_usec = (int)IVAL(msg,OP_BREAK_MSG_TIME_USEC_OFFSET);
-	/*
-	 * "id" used to be part of share_mode_entry, thus the strange
-	 * place to put this. Feel free to move somewhere else :-)
-	 */
-	pull_file_id_24(msg+OP_BREAK_MSG_DEV_OFFSET, id);
-	e->share_file_id = (unsigned long)IVAL(msg,OP_BREAK_MSG_FILE_ID_OFFSET);
-	e->uid = (uint32_t)IVAL(msg,OP_BREAK_MSG_UID_OFFSET);
-	e->flags = (uint16_t)SVAL(msg,OP_BREAK_MSG_FLAGS_OFFSET);
-	e->name_hash = IVAL(msg,OP_BREAK_MSG_NAME_HASH_OFFSET);
-	e->pid.vnn = IVAL(msg,OP_BREAK_MSG_VNN_OFFSET);
-}
-
-/****************************************************************************
  Setup oplocks for this process.
 ****************************************************************************/
 
@@ -1425,4 +1505,541 @@ void init_kernel_oplocks(struct smbd_server_connection *sconn)
 #endif
 		sconn->oplocks.kernel_ops = koplocks;
 	}
+}
+
+struct pending_hlease_break {
+	struct pending_hlease_break *prev;
+	struct pending_hlease_break *next;
+	struct server_id pid;
+	struct file_id id;
+	uint64_t share_file_id;
+	uint16_t break_to;
+};
+
+struct delay_for_handle_lease_break_state {
+	TALLOC_CTX *mem_ctx;
+	struct tevent_context *ev;
+	struct timeval timeout;
+	uint32_t access_mask;
+	bool recursive;
+	bool recursive_h_leases_break;
+	struct files_struct *fsp;
+	struct share_mode_lock *lck;
+	bool delay;
+	struct pending_hlease_break *breaks;
+	struct file_id break_id;
+	bool found_open;
+	uint32_t num_watches;
+};
+
+static void delay_for_handle_lease_break_cleanup(struct tevent_req *req,
+						 enum tevent_req_state req_state)
+{
+	struct delay_for_handle_lease_break_state *state =
+		tevent_req_data(req, struct delay_for_handle_lease_break_state);
+
+	if (req_state == TEVENT_REQ_DONE) {
+		return;
+	}
+	TALLOC_FREE(state->lck);
+}
+
+static void delay_for_handle_lease_break_check(struct tevent_req *req);
+
+struct tevent_req *delay_for_handle_lease_break_send(
+	TALLOC_CTX *mem_ctx,
+	struct tevent_context *ev,
+	struct timeval timeout,
+	struct files_struct *fsp,
+	uint32_t access_mask,
+	bool recursive,
+	struct share_mode_lock **lck)
+{
+	struct tevent_req *req = NULL;
+	struct delay_for_handle_lease_break_state *state = NULL;
+
+	req = tevent_req_create(
+		mem_ctx, &state, struct delay_for_handle_lease_break_state);
+	if (req == NULL) {
+		return NULL;
+	}
+
+	tevent_req_set_cleanup_fn(req, delay_for_handle_lease_break_cleanup);
+
+	*state = (struct delay_for_handle_lease_break_state) {
+		.mem_ctx = mem_ctx,
+		.ev = ev,
+		.timeout = timeout,
+		.access_mask = access_mask,
+		.recursive = recursive,
+		.recursive_h_leases_break = recursive,
+		.fsp = fsp,
+		.lck = talloc_move(state, lck),
+	};
+
+	delay_for_handle_lease_break_check(req);
+	if (!tevent_req_is_in_progress(req)) {
+		return tevent_req_post(req, ev);
+	}
+
+	/* Ensure we can't be closed in flight. */
+	if (!aio_add_req_to_fsp(fsp, req)) {
+		tevent_req_nterror(req, NT_STATUS_NO_MEMORY);
+		return tevent_req_post(req, ev);
+	}
+
+	return req;
+}
+
+static bool delay_for_handle_lease_break_fn(struct share_mode_entry *e,
+					    void *private_data)
+{
+	struct delay_for_handle_lease_break_state *state = talloc_get_type_abort(
+		private_data, struct delay_for_handle_lease_break_state);
+	struct files_struct *fsp = state->fsp;
+	struct server_id_buf buf;
+	uint32_t lease_type;
+	bool ours, stale;
+
+	if (fsp->lease != NULL) {
+		ours = smb2_lease_equal(fsp_client_guid(fsp),
+					&fsp->lease->lease.lease_key,
+					&e->client_guid,
+					&e->lease_key);
+		if (ours) {
+			return false;
+		}
+	}
+
+	if ((state->access_mask & e->access_mask) == 0) {
+		return false;
+	}
+
+	lease_type = get_lease_type(e, fsp->file_id);
+	if ((lease_type & SMB2_LEASE_HANDLE) == 0) {
+		return false;
+	}
+
+	stale = share_entry_stale_pid(e);
+	if (stale) {
+		return false;
+	}
+
+	state->delay = true;
+
+	DBG_DEBUG("Breaking h-lease on [%s] pid [%s]\n",
+		  fsp_str_dbg(fsp),
+		  server_id_str_buf(e->pid, &buf));
+
+	send_break_message(fsp->conn->sconn->msg_ctx,
+			   &fsp->file_id,
+			   e,
+			   lease_type & ~SMB2_LEASE_HANDLE);
+
+	return false;
+}
+
+static void delay_for_handle_lease_break_fsp_done(struct tevent_req *subreq);
+
+static void delay_for_handle_lease_break_fsp_check(struct tevent_req *req)
+{
+	struct delay_for_handle_lease_break_state *state = tevent_req_data(
+		req, struct delay_for_handle_lease_break_state);
+	struct tevent_req *subreq = NULL;
+	bool ok;
+
+	DBG_DEBUG("fsp [%s]\n", fsp_str_dbg(state->fsp));
+
+	if (state->lck == NULL) {
+		DBG_DEBUG("fsp [%s] all opens are gone\n",
+			  fsp_str_dbg(state->fsp));
+		return;
+	}
+
+	ok = share_mode_forall_leases(state->lck,
+				      delay_for_handle_lease_break_fn,
+				      state);
+	if (!ok) {
+		tevent_req_nterror(req, NT_STATUS_INTERNAL_ERROR);
+		return;
+	}
+	if (state->delay) {
+		DBG_DEBUG("Delaying fsp [%s]\n", fsp_str_dbg(state->fsp));
+
+		subreq = share_mode_watch_send(state,
+					       state->ev,
+					       &state->fsp->file_id,
+					       (struct server_id){0});
+		if (tevent_req_nomem(subreq, req)) {
+			return;
+		}
+
+		tevent_req_set_callback(subreq,
+					delay_for_handle_lease_break_fsp_done,
+					req);
+
+		if (!tevent_req_set_endtime(subreq, state->ev, state->timeout)) {
+			tevent_req_nterror(req, NT_STATUS_NO_MEMORY);
+			return;
+		}
+		return;
+	}
+}
+
+static void delay_for_handle_lease_break_fsp_done(struct tevent_req *subreq)
+{
+	struct tevent_req *req = tevent_req_callback_data(
+		subreq, struct tevent_req);
+	struct delay_for_handle_lease_break_state *state = tevent_req_data(
+		req, struct delay_for_handle_lease_break_state);
+	NTSTATUS status;
+
+	DBG_DEBUG("Watch returned for fsp [%s]\n", fsp_str_dbg(state->fsp));
+
+	status = share_mode_watch_recv(subreq, NULL, NULL);
+	TALLOC_FREE(subreq);
+	if (!NT_STATUS_IS_OK(status)) {
+		DBG_ERR("share_mode_watch_recv returned %s\n",
+			nt_errstr(status));
+		if (NT_STATUS_EQUAL(status, NT_STATUS_IO_TIMEOUT)) {
+			/*
+			 * The sharemode-watch timer fired because a client
+			 * didn't respond to the lease break.
+			 */
+			status = NT_STATUS_ACCESS_DENIED;
+		}
+		tevent_req_nterror(req, status);
+		return;
+	}
+
+	state->lck = get_existing_share_mode_lock(state, state->fsp->file_id);
+	/*
+	 * This could potentially end up looping for some if a client
+	 * aggressively reaquires H-leases on the file, but we have a
+	 * timeout on the tevent req as upper bound.
+	 */
+	delay_for_handle_lease_break_check(req);
+}
+
+static int delay_for_handle_lease_break_below_fn(struct share_mode_data *d,
+						 struct share_mode_entry *e,
+						 void *private_data)
+{
+	struct tevent_req *req = talloc_get_type_abort(
+		private_data, struct tevent_req);
+	struct delay_for_handle_lease_break_state *state = tevent_req_data(
+		req, struct delay_for_handle_lease_break_state);
+	struct pending_hlease_break *b = NULL;
+	struct file_id_buf fid_buf;
+	const char *fid_bufp = NULL;
+	struct server_id_buf sid_buf;
+	uint32_t lease = 0;
+	bool stale;
+
+	if (DEBUGLVL(DBGLVL_DEBUG)) {
+		fid_bufp = file_id_str_buf(d->id, &fid_buf);
+	}
+
+	DBG_DEBUG("Breaking [%s] file-id [%s]\n",
+		  state->recursive_h_leases_break ? "yes" : "no",
+		  fid_bufp);
+
+	stale = share_entry_stale_pid(e);
+	if (stale) {
+		return 0;
+	}
+
+	if (state->recursive_h_leases_break) {
+		lease = get_lease_type(e, d->id);
+	}
+
+	if ((lease & SMB2_LEASE_HANDLE) == 0) {
+		if (e->flags & SHARE_MODE_FLAG_POSIX_OPEN) {
+			DBG_DEBUG("POSIX open file-id [%s]\n", fid_bufp);
+			/* Ignore POSIX opens. */
+			return 0;
+		}
+		state->found_open = true;
+		DBG_DEBUG("Unbreakable open [%s]\n", fid_bufp);
+		if (!state->recursive_h_leases_break) {
+			/* Second round, stop */
+			DBG_DEBUG("Stopping\n");
+			return -1;
+		}
+		return 0;
+	}
+	lease &= ~SMB2_LEASE_HANDLE;
+
+	b = talloc_zero(state, struct pending_hlease_break);
+	if (b == NULL) {
+		DBG_ERR("talloc_zero failed\n");
+		return -1;
+	}
+	b->id = d->id;
+	b->break_to = lease;
+	b->pid = e->pid;
+	b->share_file_id = e->share_file_id;
+
+	DLIST_ADD_END(state->breaks, b);
+
+	DBG_DEBUG("Queued h-lease break on file-id [%s] pid [%s]\n",
+		  fid_bufp,
+		  server_id_str_buf(b->pid, &sid_buf));
+
+	state->delay = true;
+	return 0;
+}
+
+static void delay_for_handle_lease_break_below_send_breaks(
+	struct tevent_req *req);
+
+static void delay_for_handle_lease_break_below_check(struct tevent_req *req)
+{
+	struct delay_for_handle_lease_break_state *state = tevent_req_data(
+		req, struct delay_for_handle_lease_break_state);
+	int ret;
+
+	DBG_DEBUG("fsp [%s]\n", fsp_str_dbg(state->fsp));
+
+	if (!state->recursive) {
+		return;
+	}
+	if (!S_ISDIR(state->fsp->fsp_name->st.st_ex_mode)) {
+		return;
+	}
+	if (!lp_strict_rename(SNUM(state->fsp->conn))) {
+		/*
+		 * This will also not do h-lease breaks
+		 */
+		state->found_open = file_find_subpath(state->fsp);
+		return;
+	}
+
+	ret = opens_below_forall(state->fsp->conn,
+				 state->fsp->fsp_name,
+				 delay_for_handle_lease_break_below_fn,
+				 req);
+	if (ret == -1) {
+		tevent_req_nterror(req, NT_STATUS_INTERNAL_ERROR);
+		return;
+	}
+	if (!state->delay) {
+		DBG_DEBUG("No delay for [%s]\n", fsp_str_dbg(state->fsp));
+		return;
+	}
+	/*
+	 * Ignore any opens without h-lease in the first round of listing opens
+	 */
+	state->found_open = false;
+	delay_for_handle_lease_break_below_send_breaks(req);
+	return;
+}
+
+static void delay_for_handle_lease_break_below_done(struct tevent_req *subreq);
+
+static void delay_for_handle_lease_break_below_send_breaks(
+	struct tevent_req *req)
+{
+	struct delay_for_handle_lease_break_state *state = tevent_req_data(
+		req, struct delay_for_handle_lease_break_state);
+	struct messaging_context *msg_ctx = state->fsp->conn->sconn->msg_ctx;
+	struct pending_hlease_break *b = NULL;
+	struct file_id last_file_id;
+	struct tevent_req *subreq = NULL;
+	NTSTATUS status;
+
+	DBG_DEBUG("Sending breaks\n");
+
+	if (state->breaks == NULL) {
+		return;
+	}
+
+	for (b = state->breaks, last_file_id = b->id; b != NULL; b = b->next) {
+		struct share_mode_entry e;
+		struct file_id_buf fid_buf;
+		struct server_id_buf sid_buf;
+
+		if (!file_id_equal(&b->id, &last_file_id)) {
+			break;
+		}
+
+		e = (struct share_mode_entry) {
+			.share_file_id = b->share_file_id,
+			.pid = b->pid,
+		};
+
+		status = send_break_message(msg_ctx,
+					    &b->id,
+					    &e,
+					    b->break_to);
+		if (tevent_req_nterror(req, status)) {
+			DBG_ERR("send_break_message failed\n");
+			return;
+		}
+
+		DLIST_REMOVE(state->breaks, b);
+
+		DBG_DEBUG("Sent h-lease break on file-id [%s] pid [%s]\n",
+			  file_id_str_buf(b->id, &fid_buf),
+			  server_id_str_buf(b->pid, &sid_buf));
+
+		subreq = share_mode_watch_send(state,
+					       state->ev,
+					       &b->id,
+					       (struct server_id){0});
+		if (tevent_req_nomem(subreq, req)) {
+			return;
+		}
+		tevent_req_set_callback(subreq,
+					delay_for_handle_lease_break_below_done,
+					req);
+		if (!tevent_req_set_endtime(subreq, state->ev, state->timeout)) {
+			tevent_req_oom(req);
+			return;
+		}
+		state->num_watches++;
+	}
+
+	state->break_id = last_file_id;
+	DBG_DEBUG("Stopped sending breaks\n");
+}
+
+static void delay_for_handle_lease_break_below_done(struct tevent_req *subreq)
+{
+	struct tevent_req *req = tevent_req_callback_data(
+		subreq, struct tevent_req);
+	struct delay_for_handle_lease_break_state *state = tevent_req_data(
+		req, struct delay_for_handle_lease_break_state);
+	struct share_mode_lock *lck = NULL;
+	struct file_id_buf fid_buf;
+	const char *fid_bufp = NULL;
+	NTSTATUS status;
+
+	if (DEBUGLVL(DBGLVL_DEBUG)) {
+		fid_bufp = file_id_str_buf(state->break_id, &fid_buf);
+	}
+
+	DBG_DEBUG("Watch finished for file-id [%s]\n", fid_bufp);
+
+	status = share_mode_watch_recv(subreq, NULL, NULL);
+	TALLOC_FREE(subreq);
+	if (!NT_STATUS_IS_OK(status)) {
+		DBG_ERR("share_mode_watch_recv returned %s\n",
+			nt_errstr(status));
+		if (NT_STATUS_EQUAL(status, NT_STATUS_IO_TIMEOUT)) {
+			/*
+			 * The sharemode-watch timer fired because a client
+			 * didn't respond to the lease break.
+			 */
+			status = NT_STATUS_ACCESS_DENIED;
+		}
+		tevent_req_nterror(req, status);
+		return;
+	}
+
+	state->num_watches--;
+	if (state->num_watches > 0) {
+		return;
+	}
+
+	/*
+	 * If the client just sends a break ACK, but doesn't close the file,
+	 * Windows server directly returns NT_STATUS_ACCESS_DENIED.
+	 */
+
+	DBG_DEBUG("Checking for remaining opens on [%s]\n", fid_bufp);
+
+	lck = fetch_share_mode_unlocked(state, state->break_id);
+	if (lck != NULL) {
+		bool has_nonposix_open;
+
+		has_nonposix_open = has_nonposix_opens(lck);
+		TALLOC_FREE(lck);
+		if (has_nonposix_open) {
+			DBG_DEBUG("Found open\n");
+			tevent_req_nterror(req, NT_STATUS_ACCESS_DENIED);
+			return;
+		}
+	}
+
+	if (state->breaks != NULL) {
+		delay_for_handle_lease_break_below_send_breaks(req);
+		return;
+	}
+
+	/*
+	 * We've sent lease breaks recursively once, don't do that again. So we
+	 * do a recursive scan a second time to check for new opens and if there
+	 * are any, with or without h-leases, just fail with
+	 * NT_STATUS_ACCESS_DENIED.
+	 */
+	state->recursive_h_leases_break = false;
+
+	state->lck = get_existing_share_mode_lock(state, state->fsp->file_id);
+	delay_for_handle_lease_break_check(req);
+}
+
+static void delay_for_handle_lease_break_check(struct tevent_req *req)
+{
+	struct delay_for_handle_lease_break_state *state = tevent_req_data(
+		req, struct delay_for_handle_lease_break_state);
+
+	state->delay = false;
+
+	DBG_DEBUG("fsp [%s]\n", fsp_str_dbg(state->fsp));
+
+	delay_for_handle_lease_break_fsp_check(req);
+	if (!tevent_req_is_in_progress(req)) {
+		return;
+	}
+	if (state->delay) {
+		DBG_DEBUG("Delaying fsp [%s]\n", fsp_str_dbg(state->fsp));
+		TALLOC_FREE(state->lck);
+		return;
+	}
+
+	delay_for_handle_lease_break_below_check(req);
+	if (!tevent_req_is_in_progress(req)) {
+		return;
+	}
+	if (state->found_open) {
+		tevent_req_nterror(req, NT_STATUS_ACCESS_DENIED);
+		return;
+	}
+	if (state->delay) {
+		TALLOC_FREE(state->lck);
+		return;
+	}
+
+	tevent_req_done(req);
+}
+
+NTSTATUS delay_for_handle_lease_break_recv(struct tevent_req *req,
+					   TALLOC_CTX *mem_ctx,
+					   struct share_mode_lock **lck)
+{
+	NTSTATUS status;
+
+	struct delay_for_handle_lease_break_state *state =
+		tevent_req_data(req, struct delay_for_handle_lease_break_state);
+
+	if (tevent_req_is_nterror(req, &status)) {
+		tevent_req_received(req);
+		return status;
+	}
+
+	*lck = talloc_move(mem_ctx, &state->lck);
+	tevent_req_received(req);
+	return NT_STATUS_OK;
+}
+
+const struct smb2_lease *fsp_get_smb2_lease(const struct files_struct *fsp)
+{
+	if (fsp == NULL) {
+		return NULL;
+	}
+	if (fsp->lease == NULL) {
+		return NULL;
+	}
+	return &fsp->lease->lease;
 }
