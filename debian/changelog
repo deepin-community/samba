@@ -1,3 +1,12 @@
+samba (2:4.22.8+dfsg-0+deb13u2deepin9) unstable; urgency=medium
+
+  * Refresh CVE patches for upstream 4.22.8 compatibility
+  * Remove CVE-2025-9640 patches (already fixed in upstream 4.22.8)
+  * Refresh CVE-2026-58218 patch to apply against current source
+  * Refresh CVE-2026-58222 patch to apply against current source
+
+ -- deepin-ci-robot <packages@deepin.org>  Wed, 29 Jul 2026 14:40:47 +0800
+
 samba (2:4.22.8+dfsg-0+deb13u2deepin8) unstable; urgency=medium
 
   * Fix CVE-2025-9640: uninitialized memory write in vfs_streams_xattr
