@@ -30,3 +30,11 @@ fix-smbtree-segfault.patch
 fix-smb-userpass-mount-fail.patch
 fix-statvfs-fail.patch
 fix-volume_label-crash.patch
+# CVE-2025-9640: Fix uninitialized memory write in vfs_streams_xattr
+CVE-2026-58218.patch
+CVE-2026-58216.patch
+CVE-2026-58221.patch
+CVE-2026-58224.patch
+CVE-2026-58222.patch
+CVE-2026-6949.patch
+
