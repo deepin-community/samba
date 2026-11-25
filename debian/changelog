@@ -1,3 +1,11 @@
+samba (2:4.22.8+dfsg-0+deb13u2deepin11) unstable; urgency=medium
+
+  * fix(cve): CVE-2026-15779 (medium) - pam_winbind: only chown the home
+    directory if it was created   Upstream: https://github.com/samba-
+    team/samba/commit/79caa6ef08b9b333e17bb0762e95e18e250db463
+
+ -- deepin-ci-robot <packages@deepin.org>  Wed, 25 Nov 2026 09:02:55 +0800
+
 samba (2:4.22.8+dfsg-0+deb13u2deepin10) unstable; urgency=medium
 
   * Rebuild with LTO enabled (dpkg vendor feature optimize/lto).
